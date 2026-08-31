@@ -100,8 +100,8 @@ CONFIG_SPEC = {
     "note_width": _spec("fields", 40, "truncate notes to this many characters", lo=4),
     "clock_format": _spec("fields", "%H:%M", "strftime format for the finish time", "str"),
 
-    # colour (256-colour codes; see `agent-tqdm colors`)
-    "color": _spec("color", True, "use colour at all", "bool"),
+    # color (256-color codes; see `agent-tqdm colors`)
+    "color": _spec("color", True, "use color at all", "bool"),
     "color_running": _spec("color", 44, "bar and spinner while running", lo=0, hi=255),
     "color_done": _spec("color", 42, "a finished job", lo=0, hi=255),
     "color_failed": _spec("color", 203, "a failed or cancelled job", lo=0, hi=255),
@@ -110,7 +110,7 @@ CONFIG_SPEC = {
     "color_track": _spec("color", 238, "the unfilled part of the bar", lo=0, hi=255),
     "color_text": _spec("color", 252, "primary text", lo=0, hi=255),
 
-    # estimation behaviour
+    # estimation behavior
     "blend_full_at": _spec("estimation", 6,
                            "observations after which the measured rate fully replaces the prior", lo=1),
     "rate_window": _spec("estimation", 12, "samples used for the throughput estimate", lo=2),
@@ -120,12 +120,12 @@ CONFIG_SPEC = {
                              "relative change in the total estimate before it is flagged",
                              "float", lo=0.0, hi=10.0),
 
-    # behaviour
-    "notify": _spec("behaviour", True, "desktop notification on completion (macOS)", "bool"),
-    "crash_alert": _spec("behaviour", True,
+    # behavior
+    "notify": _spec("behavior", True, "desktop notification on completion (macOS)", "bool"),
+    "crash_alert": _spec("behavior", True,
                          "interrupt Claude when a job crashes, so it tells you right away", "bool"),
-    "notify_sound_ok": _spec("behaviour", "Glass", "sound for a successful finish", "str"),
-    "notify_sound_fail": _spec("behaviour", "Basso", "sound for a failure", "str"),
+    "notify_sound_ok": _spec("behavior", "Glass", "sound for a successful finish", "str"),
+    "notify_sound_fail": _spec("behavior", "Basso", "sound for a failure", "str"),
 }
 
 DEFAULT_CONFIG = dict((k, s["default"]) for k, s in CONFIG_SPEC.items())
@@ -135,9 +135,9 @@ CONFIG_GROUPS = [
     ("cadence", "Update cadence"),
     ("bar", "Bar shape"),
     ("fields", "Fields on the line"),
-    ("color", "Colour (256-colour codes)"),
+    ("color", "Color (256-color codes)"),
     ("estimation", "Estimation"),
-    ("behaviour", "Behaviour"),
+    ("behavior", "Behavior"),
 ]
 
 CONFIG_PRESETS = {
@@ -638,7 +638,7 @@ SPINNER = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
 
 
 def apply_theme(cfg):
-    """Fold the configured colours and spinner into the render globals."""
+    """Fold the configured colors and spinner into the render globals."""
     global PALETTE, SPINNER
     PALETTE = {"run": cfg["color_running"], "done": cfg["color_done"],
                "fail": cfg["color_failed"], "warn": cfg["color_warn"],
@@ -978,7 +978,7 @@ def format_crash(ev, cfg=None):
         lines.append("  last output:")
         for ln in ev["log_tail"].splitlines()[-15:]:
             lines.append("    " + ln[:200])
-    lines.append("Tell the user this job crashed, summarise why from the output above, "
+    lines.append("Tell the user this job crashed, summarize why from the output above, "
                  "and suggest a fix if the cause is clear. Do not re-run it without asking.")
     return "\n".join(lines)
 
@@ -1488,7 +1488,7 @@ def cmd_run(args):
         cmd_parts = cmd_parts[1:]
     if not cmd_parts:
         raise SystemExit("nothing to run: agent-tqdm run --name train -- python train.py")
-    # Re-quote each argument: the caller's shell already tokenised them, so a
+    # Re-quote each argument: the caller's shell already tokenized them, so a
     # naive join would break `-c "..."`, paths with spaces, and quoted flags.
     # A single argument is passed through raw, so `run -- "a && b"` still works.
     cmd = (" ".join(shlex.quote(p) for p in cmd_parts)
@@ -1972,7 +1972,7 @@ def cmd_preview(args):
         c["fill_char"] = c["track_char"] = c["left_cap"] = c["right_cap"] = ""
         print("  %-8s %s" % (style, draw_bar(0.56, c, "run")))
     if args.colors:
-        print("\n256-colour codes for the color_* settings:")
+        print("\n256-color codes for the color_* settings:")
         for row in range(0, 256, 16):
             print("  " + " ".join("\033[38;5;%dm%3d\033[0m" % (c, c)
                                   for c in range(row, min(row + 16, 256))))
@@ -2142,7 +2142,7 @@ def build_parser():
     sp = sub.add_parser("preview", help="render sample bars with the current settings")
     sp.add_argument("--set", action="append", metavar="KEY=VALUE",
                     help="try a setting without saving it")
-    sp.add_argument("--colors", action="store_true", help="also print the 256-colour codes")
+    sp.add_argument("--colors", action="store_true", help="also print the 256-color codes")
     sp.set_defaults(fn=cmd_preview)
 
     sp = sub.add_parser("inbox", help="crash reports queued for the Claude session")

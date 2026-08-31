@@ -83,10 +83,10 @@ with open("{scratch}/index.bin", "wb") as f:
         "shows": "named stages, for output with no numbers at all",
         "eta": "50s",
         "flags": ["--milestones",
-                  "reading source;normalising;joining;writing;verifying"],
+                  "reading source;normalizing;joining;writing;verifying"],
         "script": """
 import time
-for s in ["reading source", "normalising", "joining", "writing", "verifying"]:
+for s in ["reading source", "normalizing", "joining", "writing", "verifying"]:
     print(s, flush=True)
     time.sleep({tick} * 8.5)
 """,

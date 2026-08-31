@@ -180,7 +180,7 @@ agent-tqdm cancel ingest        # also SIGTERMs the process
 ## Appearance
 
 Everything about the bar is configurable — width, style, which fields appear,
-colours, thresholds. If the user asks for it to look different, do not edit the
+colors, thresholds. If the user asks for it to look different, do not edit the
 script: `agent-tqdm config` lists every setting with its default, `agent-tqdm
 config --set key=value` changes one, and `agent-tqdm preview` renders sample
 bars so they can see the result immediately. `agent-tqdm config --preset

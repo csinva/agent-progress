@@ -142,7 +142,7 @@ given job:
 `milestones` covers scripts that just narrate what they're doing. `probe` is the
 escape hatch for state in a database, a queue, or on another host.
 
-`auto` recognises tqdm, HuggingFace Trainer, PyTorch Lightning (outer epoch plus
+`auto` recognizes tqdm, HuggingFace Trainer, PyTorch Lightning (outer epoch plus
 inner bar), Keras, `Epoch 12/50`, `step 900/10000`, `Trial 7 of 40`, and bare
 percentages.
 
@@ -187,7 +187,7 @@ slower says so: `est 26m (+6m)`.
 3. **Claude tells you, unprompted.** The crash is queued with the last 15 lines
    of output, and a `Stop` hook hands it over the moment Claude finishes its next
    turn — no waiting for you to type anything. Claude reports what died,
-   summarises the cause, and suggests a fix.
+   summarizes the cause, and suggests a fix.
 
 Nothing can push a message into a running Claude session from outside, so
 delivery is queued rather than instantaneous: the report arrives at the first of
@@ -244,7 +244,7 @@ See changes before keeping them:
 ```bash
 agent-tqdm preview                      # sample bars in every state
 agent-tqdm preview --set style=dots     # try a setting without saving it
-agent-tqdm preview --colors             # the 256-colour codes
+agent-tqdm preview --colors             # the 256-color codes
 ```
 
 Presets: `minimal`, `rich`, `tqdm`, `plain`, `quiet`.
@@ -259,7 +259,7 @@ Any setting can be overridden for one command via the environment:
 AGENT_TQDM_BAR_WIDTH=40 AGENT_TQDM_STYLE=bars agent-tqdm ls
 ```
 
-`NO_COLOR` is honoured.
+`NO_COLOR` is honored.
 
 | group | settings |
 | --- | --- |
@@ -267,9 +267,9 @@ AGENT_TQDM_BAR_WIDTH=40 AGENT_TQDM_STYLE=bars agent-tqdm ls
 | **cadence** | `min_interval_seconds`, `interval_fraction` |
 | **bar shape** | `style`, `bar_width`, `name_width`, `fill_char`, `track_char`, `left_cap`, `right_cap`, `spinner`, `spinner_fps`, `glyph_done`, `glyph_failed`, `glyph_cancelled`, `glyph_stalled` |
 | **fields** | `show_spinner`, `show_name`, `show_percent`, `show_counts`, `show_clock`, `show_rate`, `show_eta_clock`, `show_drift`, `show_note`, `note_width`, `clock_format` |
-| **colour** | `color`, `color_running`, `color_done`, `color_failed`, `color_warn`, `color_dim`, `color_track`, `color_text` |
+| **color** | `color`, `color_running`, `color_done`, `color_failed`, `color_warn`, `color_dim`, `color_track`, `color_text` |
 | **estimation** | `blend_full_at`, `rate_window`, `rate_min_span`, `drift_threshold` |
-| **behaviour** | `notify`, `notify_sound_ok`, `notify_sound_fail`, `crash_alert` |
+| **behavior** | `notify`, `notify_sound_ok`, `notify_sound_fail`, `crash_alert` |
 
 Styles are `blocks`, `tqdm`, `ascii`, `dots`, `bars`, and any of them can be
 overridden character by character:
@@ -301,6 +301,6 @@ the bar — the estimate carries it.
 
 ---
 
-## Licence
+## License
 
 MIT

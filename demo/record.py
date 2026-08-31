@@ -27,7 +27,7 @@ ENGINE = os.path.join(os.path.dirname(HERE), "scripts", "agent_tqdm.py")
 BG = (13, 17, 23)          # a calm terminal background
 FG = (210, 210, 210)
 PAD = 26
-COLS, ROWS = 120, 8
+COLS, ROWS = 120, 11
 
 # Menlo covers the block elements and box drawing the bars use, but not the
 # Braille range the spinner comes from. Anything it lacks is drawn from a
@@ -175,22 +175,28 @@ def make_frame(lines, font, cell_w, line_h, size, emoji, fallbacks):
     return img
 
 
-# Three jobs, each measured a different way, plus one that dies.
+# Three jobs, each measured a different way, plus one that dies. `typed` is the
+# command a user sends to Claude Code; the scratch script is named to match, so
+# what the video shows is what actually ran.
+PROMPT = "> "
+SLASH = "/agent-tqdm:track "
+
 JOBS = [
-    ("train", "--eta 10s --unit ep", """
+    ("train", "python train.py --epochs 24", "--eta 10s --unit ep", """
 import time
 N = 24
 for i in range(1, N + 1):
     time.sleep(0.72)
     print("Epoch %d/%d  loss %.3f" % (i, N, 2.4 / (i ** 0.5)), flush=True)
 """),
-    ("convert", "--eta 20s --milestones 'decoding;resampling;encoding;verifying'", """
+    ("convert", "python convert.py clip.mov",
+     "--eta 20s --milestones 'decoding;resampling;encoding;verifying'", """
 import time
 for s in ["decoding", "resampling", "encoding", "verifying"]:
     print(s, flush=True)
     time.sleep(4.3)
 """),
-    ("upload", "--eta 20s", """
+    ("upload", "python upload.py dataset/", "--eta 20s", """
 import time
 print("opening connection", flush=True)
 time.sleep(3)
@@ -200,20 +206,63 @@ raise ConnectionResetError("peer closed the connection")
 """),
 ]
 
+START_AT = [0.4, 2.6, 4.8]     # when each command finishes being typed
+TYPE_SECONDS = 1.5
+
 CAPTIONS = [
-    (0.0, "three jobs - a counter, named stages, and one that will fail"),
-    (8.5, "upload died: skull, and the exit decoded, not a bare number"),
-    (13.0, "train's 10s estimate was wrong - it is correcting itself"),
-    (18.5, "done - two clean exits, and a crash that reported itself"),
+    (0.0, "you type the command; Claude picks how to watch it and estimates the time"),
+    (7.0, "three jobs, three different signals - a counter, named stages, wall clock"),
+    (12.0, "upload died: skull, and the exit decoded, not a bare number"),
+    (16.5, "train's 10s estimate was wrong - it corrected itself from measurement"),
+    (21.0, "done - two clean exits, and a crash that reported itself"),
 ]
+
+
+def command_line(cc, visible):
+    """Colour a partially-typed command: prompt, slash command, arguments."""
+    out = cc.paint(visible[:len(PROMPT)], "run", True)
+    rest = visible[len(PROMPT):]
+    if rest:
+        out += cc.paint(rest[:len(SLASH)], "text", True)
+        if len(rest) > len(SLASH):
+            out += cc.paint(rest[len(SLASH):], "dim", True)
+    return out
+
+
+def write_gif(frames_dir, out, width, every, colors, src_fps):
+    """A GIF of the same frames, for embedding directly in a README.
+
+    One palette is built from a late frame and reused for every frame: a
+    per-frame adaptive palette makes the colours crawl between frames."""
+    names = sorted(f for f in os.listdir(frames_dir) if f.endswith(".png"))
+    kept = names[::max(1, every)]
+    if not kept:
+        return
+    def load(name):
+        im = Image.open(os.path.join(frames_dir, name)).convert("RGB")
+        h = int(im.height * width / float(im.width))
+        return im.resize((width, h - h % 2), Image.LANCZOS)
+
+    palette = load(kept[len(kept) * 3 // 4]).quantize(
+        colors=colors, method=Image.MEDIANCUT)
+    imgs = [load(n).quantize(palette=palette, dither=Image.NONE) for n in kept]
+    imgs[0].save(out, save_all=True, append_images=imgs[1:],
+                 duration=int(1000.0 * every / src_fps), loop=0, optimize=True)
+    print("%s  (%.2f MB, %d frames)" % (out, os.path.getsize(out) / 1e6, len(imgs)))
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.join(HERE, "agent-tqdm.mov"))
     ap.add_argument("--fps", type=int, default=12)
-    ap.add_argument("--seconds", type=float, default=22.0)
+    ap.add_argument("--seconds", type=float, default=25.0)
     ap.add_argument("--font-size", type=int, default=22)
+    # GitHub strips <video> from READMEs and renders a repo .mov as a plain
+    # link, so a GIF is what actually plays inline at the top of the page.
+    ap.add_argument("--gif", default=os.path.join(HERE, "agent-tqdm.gif"))
+    ap.add_argument("--gif-width", type=int, default=880)
+    ap.add_argument("--gif-every", type=int, default=2, help="keep 1 frame in N")
+    ap.add_argument("--gif-colors", type=int, default=48)
     args = ap.parse_args()
 
     cc = load_engine()
@@ -245,20 +294,43 @@ def main():
         return subprocess.run([sys.executable, ENGINE] + list(a),
                               capture_output=True, text=True).stdout
 
-    for name, flags, src in JOBS:
-        path = os.path.join(scratch, name + ".py")
-        open(path, "w").write(src)
+    for name, _typed, _flags, src in JOBS:
+        open(os.path.join(scratch, name + ".py"), "w").write(src)
+
+    def launch(idx):
+        name, _typed, flags, _src = JOBS[idx]
         subprocess.run("%s %s run --name rec-%s %s --interval 1s -- %s %s"
-                       % (sys.executable, ENGINE, name, flags, sys.executable, path),
+                       % (sys.executable, ENGINE, name, flags, sys.executable,
+                          os.path.join(scratch, name + ".py")),
                        shell=True, capture_output=True)
 
     print("recording %.0fs at %dfps..." % (args.seconds, args.fps))
     start = time.time()
+    launched = [False] * len(JOBS)
     n = 0
     while True:
         elapsed = time.time() - start
         if elapsed > args.seconds:
             break
+        # commands are typed out one at a time; each job starts when its
+        # command is finished, exactly as it would if you were typing them
+        cmds = []
+        for i, (_n, typed, _f, _s) in enumerate(JOBS):
+            done_at = START_AT[i]
+            begin = done_at - TYPE_SECONDS
+            if elapsed < begin:
+                continue
+            full = PROMPT + SLASH + typed
+            if elapsed >= done_at:
+                cmds.append(command_line(cc, full))
+                if not launched[i]:
+                    launch(i)
+                    launched[i] = True
+            else:
+                shown = int(len(full) * (elapsed - begin) / TYPE_SECONDS)
+                cmds.append(command_line(cc, full[:shown])
+                            + cc.paint("\u2588", "run", True))
+
         st = cc.state_ro()
         jobs = sorted((j for j in st["jobs"].values()
                        if (j.get("id") or "").startswith("rec-")),
@@ -267,10 +339,15 @@ def main():
         for at, text in CAPTIONS:
             if elapsed >= at:
                 caption = text
+
         lines = [cc.paint("agent-tqdm", "dim", True), ""]
+        lines += ["  " + c for c in cmds]
+        while len(lines) < 2 + len(JOBS):
+            lines.append("")
+        lines.append("")
         for j in jobs:
             lines.append("  " + cc.render_line(j, cfg, width=COLS - 4))
-        while len(lines) < ROWS - 2:
+        while len(lines) < ROWS - 1:
             lines.append("")
         lines.append(cc.paint("  " + caption, "warn", True))
         make_frame(lines[:ROWS], font, cell_w, line_h, size, emoji, fallbacks).save(
@@ -285,7 +362,11 @@ def main():
                     "-o", binary], check=True)
     subprocess.run([binary, args.out, str(args.fps), frames], check=True)
 
-    for name, _f, _s in JOBS:
+    if args.gif:
+        write_gif(frames, args.gif, args.gif_width, args.gif_every,
+                  args.gif_colors, args.fps)
+
+    for name, _t, _f, _s in JOBS:
         cli("rm", "rec-" + name)
     with cc.state_rw() as st:
         st["inbox"] = [e for e in st.get("inbox", [])

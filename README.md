@@ -1,16 +1,27 @@
-# agent-tqdm
+<h1 align="center">agent-tqdm</h1>
+<p align="center">tqdm-style progress bars in the Claude Code statusline, for any long-running job.</p>
 
-**tqdm-style progress bars in the Claude Code statusline, for any long-running job.**
+<p align="center">
+  <a href="#install">install</a> •
+  <a href="#what-counts-as-progress">monitors</a> •
+  <a href="#when-a-job-crashes">crashes</a> •
+  <a href="#configuration">configuration</a>
+</p>
 
-```
-⠹ ingest ▕████████████▍·········▏  56%  280/500file  14:32<11:08  est 26m (+6m)  →16:18
-```
+<p align="center">
+  <img src="https://img.shields.io/badge/license-mit-blue.svg">
+  <img src="https://img.shields.io/badge/python-3.8+-blue">
+  <img src="https://img.shields.io/badge/claude%20code-plugin-orange">
+</p>
 
-Training runs, data pipelines, test suites, builds, migrations, downloads,
-simulations, backups. Claude works out how to watch the job, estimates how long
-it will take, and launches it. A background watcher takes it from there.
+<p align="center">
+  <img src="demo/agent-tqdm.gif" width="100%" alt="agent-tqdm tracking three jobs: a counter, named stages, and one that crashes">
+</p>
 
----
+<p align="center">
+  <i>You send the command; Claude works out how to watch it and how long it should take.<br>
+  Full recording: <a href="demo/agent-tqdm.mov">demo/agent-tqdm.mov</a></i>
+</p>
 
 ## Why
 
@@ -57,15 +68,12 @@ you lose nothing.
 
 ## See it in action
 
-https://github.com/csinva/agent-tqdm/raw/main/demo/agent-tqdm.mov
+The clip above is `demo/agent-tqdm.mov`, recorded from live job state — the bars
+in it are real output, not a mock-up. Regenerate it with `python3 demo/record.py`:
+frames render through the same code the statusline uses, and encoding goes
+through AVFoundation, so no ffmpeg is needed.
 
-A 22-second recording of three jobs — a counter, named stages, and one that
-fails — is at [`demo/agent-tqdm.mov`](demo/agent-tqdm.mov). Regenerate it with
-`python3 demo/record.py`: frames come from live job state through the same
-renderer the statusline uses, and encoding uses AVFoundation, so no ffmpeg is
-needed.
-
-For the full thing, run it yourself:
+For the full thing, including every monitor kind, run it yourself:
 
 ```bash
 agent-tqdm demo --tour
@@ -302,7 +310,7 @@ hooks/inject_status.py       job status into context; crash delivery
 scripts/agent_tqdm.py        the engine - state, monitors, estimation, rendering
 scripts/install-statusline.sh
 demo/tour.py                 the narrated tour
-demo/record.py               renders the .mov from live job state
+demo/record.py               renders the .mov and .gif from live job state
 demo/mov_encoder.swift       PNG frames -> .mov via AVFoundation
 ```
 

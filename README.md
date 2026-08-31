@@ -55,6 +55,40 @@ you lose nothing.
 
 ---
 
+## See it in action
+
+```bash
+agent-tqdm demo --tour
+```
+
+Seven real jobs — one per monitor kind, plus one that crashes and one too short
+to display — with narration about what to look for, in the terminal and in your
+statusline. Takes about a minute and cleans up after itself.
+
+```
+agent-tqdm tour  +24s
+
+  ⠹ demo-train   ▕████████████████▌·····▏  75%  18/24ep    00:26<00:08  1.4s/ep    est 34s (+9s)
+  ⠹ demo-shards  ▕████████████████▌·····▏  75%  9/12file   00:26<00:08  2.7s/file  est 34s (-15s)
+  ⠹ demo-index   ▕█████████████████▉····▏  81%             00:26<00:06             est 32s (-17s)
+  ⠹ demo-etl     ▕█████████████████▌····▏  80%  4/5stage   00:26<~00:15 6.7s/stage
+  ⠹ demo-queue   ▕███████████████▍······▏  70%  28/40row   00:26<00:11  1.08row/s  est 37s (-12s)
+  💀 demo-flaky  ▕███████████▌··········▏  52%             in 00:08     exit 1
+  ✓ demo-quickie ▕██████████████████████▏ 100%             in 00:11
+
+  -> demo-train was given a deliberately wrong 25s estimate. It is measuring its
+     own throughput now - watch the ETA move.
+```
+
+It ends by printing the crash report Claude receives, and the statusline view of
+the same jobs — filtered to 3 rows with the short job dropped — next to the full
+list, so the difference is visible.
+
+`agent-tqdm demo` is the quick one-job version. `--speed 2` runs the tour twice
+as fast.
+
+---
+
 ## Use it
 
 Through Claude — say *"run this in the background and show me a progress bar"*,
@@ -257,6 +291,7 @@ hooks/hooks.json             SessionStart, UserPromptSubmit, Stop
 hooks/inject_status.py       job status into context; crash delivery
 scripts/agent_tqdm.py        the engine - state, monitors, estimation, rendering
 scripts/install-statusline.sh
+demo/tour.py                 the narrated tour
 ```
 
 State lives in `~/.claude/agent-tqdm/` (`state.json`, `logs/`, `config.json`).

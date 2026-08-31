@@ -495,8 +495,9 @@ def estimate(job, now=None, cfg=None):
         frac_from_data = True
     eta_end = job.get("eta_end")
     if frac is None and eta_end and eta_end > started:
-        # no countable progress: fall back to wall-clock against Claude's guess
-        frac = (now - started) / (eta_end - started)
+        # no countable progress: fall back to wall-clock against Claude's guess,
+        # frozen at the end for a job that has already stopped
+        frac = ((ended or now) - started) / (eta_end - started)
         frac = min(frac, 0.99)          # never claim done on a guess alone
     if frac is not None:
         frac = max(0.0, min(1.0, frac))
@@ -532,7 +533,7 @@ def estimate(job, now=None, cfg=None):
 
     if job.get("state") != "running":
         remaining, source, overdue = 0.0, None, False
-        if job.get("state") == "done" and frac is None:
+        if job.get("state") == "done":
             frac = 1.0
 
     return {
@@ -1766,6 +1767,13 @@ def cmd_watch(args):
 
 def cmd_demo(args):
     """End-to-end smoke test: launch a fake 'training run' and track it for real."""
+    if args.tour:
+        tour = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "demo", "tour.py")
+        if not os.path.exists(tour):
+            raise SystemExit("tour not found at %s" % tour)
+        return subprocess.call([sys.executable, tour] +
+                               (["--speed", str(args.speed)] if args.speed else []))
     ensure_dirs()
     script = os.path.join(ROOT, "_demo_job.py")
     with open(script, "w") as f:
@@ -2113,6 +2121,9 @@ def build_parser():
     sp.add_argument("--step-seconds", type=float, default=1.5)
     sp.add_argument("--eta", default="30s", help="deliberately-wrong prior, to show blending")
     sp.add_argument("--interval", default="2s", help="probe cadence for the demo")
+    sp.add_argument("--tour", action="store_true",
+                    help="the full narrated tour: every monitor kind, plus a crash")
+    sp.add_argument("--speed", type=float, help="tour speed multiplier")
     sp.set_defaults(fn=cmd_demo)
 
     sp = sub.add_parser("config", help="show or change any setting")

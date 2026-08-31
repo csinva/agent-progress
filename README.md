@@ -57,6 +57,16 @@ you lose nothing.
 
 ## See it in action
 
+https://github.com/csinva/agent-tqdm/raw/main/demo/agent-tqdm.mov
+
+A 22-second recording of three jobs — a counter, named stages, and one that
+fails — is at [`demo/agent-tqdm.mov`](demo/agent-tqdm.mov). Regenerate it with
+`python3 demo/record.py`: frames come from live job state through the same
+renderer the statusline uses, and encoding uses AVFoundation, so no ffmpeg is
+needed.
+
+For the full thing, run it yourself:
+
 ```bash
 agent-tqdm demo --tour
 ```
@@ -292,6 +302,8 @@ hooks/inject_status.py       job status into context; crash delivery
 scripts/agent_tqdm.py        the engine - state, monitors, estimation, rendering
 scripts/install-statusline.sh
 demo/tour.py                 the narrated tour
+demo/record.py               renders the .mov from live job state
+demo/mov_encoder.swift       PNG frames -> .mov via AVFoundation
 ```
 
 State lives in `~/.claude/agent-tqdm/` (`state.json`, `logs/`, `config.json`).

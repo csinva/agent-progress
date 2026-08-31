@@ -1,0 +1,2174 @@
+#!/usr/bin/env python3
+"""agent-tqdm - tqdm-style progress bars for long-running jobs, driven by Claude Code.
+
+Design in one paragraph: a job's ETA starts as Claude's *prior* (a guess made from
+reading the training script), and is progressively replaced by a *measured* rate
+scraped out of the job's log by a small background watcher. The statusline renderer
+blends the two, so the bar is useful from second one and accurate by the end.
+
+No third-party dependencies. Python 3.8+.
+"""
+
+from __future__ import print_function
+
+import argparse
+import contextlib
+import errno
+import difflib
+import fcntl
+import glob as globmod
+import json
+import os
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import time
+import unicodedata
+
+# --------------------------------------------------------------------------- paths
+
+HOME = os.path.expanduser("~")
+ROOT = os.environ.get("AGENT_TQDM_HOME") or os.path.join(HOME, ".claude", "agent-tqdm")
+STATE = os.path.join(ROOT, "state.json")
+LOCK = os.path.join(ROOT, ".lock")
+LOGS = os.path.join(ROOT, "logs")
+CONFIG = os.path.join(ROOT, "config.json")
+
+STATE_VERSION = 1
+
+# --------------------------------------------------------------------- config
+#
+# Every tunable lives in one table: default, type, valid range, and a one-line
+# explanation. `agent-tqdm config` renders this, validates writes against it,
+# and no default is hard-coded anywhere else in the file.
+
+
+def _spec(group, default, help, type="int", choices=None, lo=None, hi=None):
+    return {"group": group, "default": default, "help": help,
+            "type": type, "choices": choices, "lo": lo, "hi": hi}
+
+
+CONFIG_SPEC = {
+    # what shows up at all
+    "min_duration_seconds": _spec(
+        "visibility", 120,
+        "hide jobs expected to take less than this many seconds (0 = show all)", lo=0),
+    "max_jobs": _spec("visibility", 3, "bars shown in the statusline at once", lo=1),
+    "keep_done_seconds": _spec("visibility", 300, "how long a finished job lingers", lo=0),
+    "keep_failed_seconds": _spec("visibility", 1800,
+                                 "how long a crashed job stays on the statusline", lo=0),
+    "prune_after_hours": _spec("visibility", 48, "forget finished jobs after this", lo=0),
+    "show_context_line": _spec("visibility", True,
+                               "show model/dir/branch when no bar is visible", "bool"),
+
+    # how often a job is re-observed
+    "min_interval_seconds": _spec("cadence", 120,
+                                  "never re-observe a job more often than this", lo=1),
+    "interval_fraction": _spec("cadence", 0.05,
+                               "nor more often than this fraction of the estimated total",
+                               "float", lo=0.0, hi=1.0),
+
+    # bar shape
+    "style": _spec("bar", "blocks", "preset bar characters", "str",
+                   choices=["blocks", "tqdm", "ascii", "dots", "bars"]),
+    "bar_width": _spec("bar", 22, "width of the bar, in cells", lo=4, hi=200),
+    "name_width": _spec("bar", 18, "truncate job names to this many characters", lo=4),
+    "fill_char": _spec("bar", "", "override the filled character (empty = use style)", "str"),
+    "track_char": _spec("bar", "", "override the unfilled character", "str"),
+    "left_cap": _spec("bar", "", "override the left bracket", "str"),
+    "right_cap": _spec("bar", "", "override the right bracket", "str"),
+    "spinner": _spec("bar", "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f",
+                     "spinner frames for a running job", "str"),
+    "spinner_fps": _spec("bar", 8, "spinner frames per second", "float", lo=0.0),
+    "glyph_done": _spec("bar", "\u2713", "marker for a job that finished cleanly", "str"),
+    "glyph_failed": _spec("bar", "\U0001f480", "marker for a job that crashed", "str"),
+    "glyph_cancelled": _spec("bar", "\u25a0", "marker for a job you stopped", "str"),
+    "glyph_stalled": _spec("bar", "\u23f8", "marker for a job that stopped making progress", "str"),
+
+    # which fields appear on the line
+    "show_spinner": _spec("fields", True, "leading spinner / status glyph", "bool"),
+    "show_name": _spec("fields", True, "the job name", "bool"),
+    "show_percent": _spec("fields", True, "the percentage", "bool"),
+    "show_counts": _spec("fields", True, "the step/total counter", "bool"),
+    "show_clock": _spec("fields", True, "the elapsed<remaining pair", "bool"),
+    "show_rate": _spec("fields", True, "throughput, e.g. 31.2s/ep", "bool"),
+    "show_eta_clock": _spec("fields", True, "wall-clock finish time, e.g. -> 16:18", "bool"),
+    "show_drift": _spec("fields", True, "flag when the estimate has moved a lot", "bool"),
+    "show_note": _spec("fields", True, "the job's note", "bool"),
+    "note_width": _spec("fields", 40, "truncate notes to this many characters", lo=4),
+    "clock_format": _spec("fields", "%H:%M", "strftime format for the finish time", "str"),
+
+    # colour (256-colour codes; see `agent-tqdm colors`)
+    "color": _spec("color", True, "use colour at all", "bool"),
+    "color_running": _spec("color", 44, "bar and spinner while running", lo=0, hi=255),
+    "color_done": _spec("color", 42, "a finished job", lo=0, hi=255),
+    "color_failed": _spec("color", 203, "a failed or cancelled job", lo=0, hi=255),
+    "color_warn": _spec("color", 179, "unmeasured estimates, drift, warnings", lo=0, hi=255),
+    "color_dim": _spec("color", 244, "secondary text", lo=0, hi=255),
+    "color_track": _spec("color", 238, "the unfilled part of the bar", lo=0, hi=255),
+    "color_text": _spec("color", 252, "primary text", lo=0, hi=255),
+
+    # estimation behaviour
+    "blend_full_at": _spec("estimation", 6,
+                           "observations after which the measured rate fully replaces the prior", lo=1),
+    "rate_window": _spec("estimation", 12, "samples used for the throughput estimate", lo=2),
+    "rate_min_span": _spec("estimation", 3.0,
+                           "seconds a sample window must cover before it is trusted", "float", lo=0.0),
+    "drift_threshold": _spec("estimation", 0.2,
+                             "relative change in the total estimate before it is flagged",
+                             "float", lo=0.0, hi=10.0),
+
+    # behaviour
+    "notify": _spec("behaviour", True, "desktop notification on completion (macOS)", "bool"),
+    "crash_alert": _spec("behaviour", True,
+                         "interrupt Claude when a job crashes, so it tells you right away", "bool"),
+    "notify_sound_ok": _spec("behaviour", "Glass", "sound for a successful finish", "str"),
+    "notify_sound_fail": _spec("behaviour", "Basso", "sound for a failure", "str"),
+}
+
+DEFAULT_CONFIG = dict((k, s["default"]) for k, s in CONFIG_SPEC.items())
+
+CONFIG_GROUPS = [
+    ("visibility", "What appears"),
+    ("cadence", "Update cadence"),
+    ("bar", "Bar shape"),
+    ("fields", "Fields on the line"),
+    ("color", "Colour (256-colour codes)"),
+    ("estimation", "Estimation"),
+    ("behaviour", "Behaviour"),
+]
+
+CONFIG_PRESETS = {
+    "minimal": {"show_counts": False, "show_rate": False, "show_eta_clock": False,
+                "show_note": False, "show_drift": False, "bar_width": 14, "name_width": 12},
+    "rich": {"show_counts": True, "show_rate": True, "show_eta_clock": True,
+             "show_note": True, "show_drift": True, "bar_width": 30, "max_jobs": 5},
+    "tqdm": {"style": "tqdm", "show_eta_clock": False, "show_drift": False, "bar_width": 24},
+    "plain": {"style": "ascii", "color": False, "show_spinner": False},
+    "quiet": {"min_duration_seconds": 600, "max_jobs": 1, "notify": False},
+}
+
+
+def coerce(key, value):
+    """Validate and convert one setting. Raises ValueError with a usable message."""
+    spec = CONFIG_SPEC[key]
+    t = spec["type"]
+    if isinstance(value, str):
+        s = value.strip()
+        if t == "bool":
+            if s.lower() in ("1", "true", "yes", "on"):
+                value = True
+            elif s.lower() in ("0", "false", "no", "off"):
+                value = False
+            else:
+                raise ValueError("expected true or false")
+        elif t == "int":
+            value = int(float(s))
+        elif t == "float":
+            value = float(s)
+        else:
+            value = s
+    elif t == "bool":
+        value = bool(value)
+    elif t == "int":
+        value = int(value)
+    elif t == "float":
+        value = float(value)
+    else:
+        value = str(value)
+    if spec["choices"] and value not in spec["choices"]:
+        raise ValueError("must be one of: %s" % ", ".join(str(c) for c in spec["choices"]))
+    if spec["lo"] is not None and value < spec["lo"]:
+        raise ValueError("must be >= %s" % spec["lo"])
+    if spec["hi"] is not None and value > spec["hi"]:
+        raise ValueError("must be <= %s" % spec["hi"])
+    return value
+
+
+def ensure_dirs():
+    for d in (ROOT, LOGS):
+        try:
+            os.makedirs(d)
+        except OSError as e:
+            if e.errno != errno.EEXIST:
+                raise
+
+
+_CFG_CACHE = {"mtime": None, "cfg": None}
+
+
+def load_config(force=False):
+    """Defaults, overlaid with the config file, overlaid with the environment.
+
+    Any setting can be overridden for one invocation as AGENT_TQDM_<KEY>, e.g.
+    AGENT_TQDM_BAR_WIDTH=40. Cached on the config file's mtime because the
+    statusline renders many times a second."""
+    try:
+        mtime = os.path.getmtime(CONFIG)
+    except OSError:
+        mtime = 0
+    if not force and _CFG_CACHE["cfg"] is not None and _CFG_CACHE["mtime"] == mtime:
+        return _CFG_CACHE["cfg"]
+
+    cfg = dict(DEFAULT_CONFIG)
+    try:
+        with open(CONFIG) as f:
+            for k, v in json.load(f).items():
+                if k in CONFIG_SPEC:
+                    try:
+                        cfg[k] = coerce(k, v)
+                    except ValueError:
+                        pass          # a bad value in the file must not break rendering
+    except Exception:
+        pass
+    for k in CONFIG_SPEC:
+        env = os.environ.get("AGENT_TQDM_" + k.upper())
+        if env is not None:
+            try:
+                cfg[k] = coerce(k, env)
+            except ValueError:
+                pass
+    if os.environ.get("NO_COLOR"):
+        cfg["color"] = False
+    _CFG_CACHE["mtime"], _CFG_CACHE["cfg"] = mtime, cfg
+    return cfg
+
+
+# --------------------------------------------------------------------------- state
+
+def _read_state():
+    try:
+        with open(STATE) as f:
+            st = json.load(f)
+    except Exception:
+        st = {}
+    if not isinstance(st, dict):
+        st = {}
+    st.setdefault("version", STATE_VERSION)
+    st.setdefault("jobs", {})
+    st.setdefault("inbox", [])
+    return st
+
+
+def _write_state(st):
+    tmp = STATE + ".tmp.%d" % os.getpid()
+    with open(tmp, "w") as f:
+        json.dump(st, f, indent=1)
+    os.replace(tmp, STATE)
+
+
+@contextlib.contextmanager
+def state_rw():
+    """Read-modify-write the state file under an exclusive flock."""
+    ensure_dirs()
+    lf = open(LOCK, "a+")
+    try:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        st = _read_state()
+        yield st
+        _prune(st)
+        _write_state(st)
+    finally:
+        try:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+        finally:
+            lf.close()
+
+
+def state_ro():
+    """Lock-free read. Rendering runs many times a second; a torn read just
+    means one stale frame, which is cheaper than contending on the lock."""
+    return _read_state()
+
+
+def _prune(st):
+    cfg = load_config()
+    cutoff = time.time() - cfg["prune_after_hours"] * 3600
+    for jid in list(st["jobs"]):
+        j = st["jobs"][jid]
+        if j.get("state") != "running" and (j.get("ended") or 0) < cutoff:
+            del st["jobs"][jid]
+
+
+def slug(text):
+    s = re.sub(r"[^a-zA-Z0-9._-]+", "-", (text or "job").strip()).strip("-.")
+    return (s or "job")[:32]
+
+
+def new_id(st, name):
+    base = slug(name)
+    if base not in st["jobs"]:
+        return base
+    # reuse the slot if the previous job of this name is finished
+    if st["jobs"][base].get("state") != "running":
+        return base
+    n = 2
+    while "%s-%d" % (base, n) in st["jobs"]:
+        n += 1
+    return "%s-%d" % (base, n)
+
+
+def resolve(st, ref):
+    """Find a job by exact id, then unique prefix, then substring."""
+    jobs = st["jobs"]
+    if ref in jobs:
+        return ref
+    for match in (
+        [k for k in jobs if k.startswith(ref)],
+        [k for k in jobs if ref.lower() in k.lower()],
+    ):
+        running = [k for k in match if jobs[k].get("state") == "running"]
+        pool = running or match
+        if len(pool) == 1:
+            return pool[0]
+        if len(pool) > 1:
+            raise SystemExit("ambiguous job ref %r: matches %s" % (ref, ", ".join(sorted(pool))))
+    raise SystemExit("no such job: %r (try: agent-tqdm ls)" % ref)
+
+
+def alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except OSError as e:
+        return e.errno == errno.EPERM
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+# ----------------------------------------------------------------- log parsing
+
+# Ordered most-specific first. Each yields some of: step, total, pct.
+BUILTIN_PATTERNS = [
+    # PyTorch Lightning: "Epoch 3: 45%|███ | 450/1000 [..]"  -> outer epoch + inner bar
+    ("lightning", re.compile(
+        r"(?i)\bepoch\s+(?P<step>\d+)\s*:\s*(?P<sub>\d{1,3})%\|")),
+    # "Epoch 12/50", "epoch: 12 / 50", "Epoch [12/50]"
+    ("epoch", re.compile(
+        r"(?i)\bepochs?\b[:\s\[]*(?P<step>\d+)\s*/\s*(?P<total>\d+)")),
+    # "step 1200/10000", "iteration 5/20", "batch 3/40"
+    ("step", re.compile(
+        r"(?i)\b(?:global[_ ]?step|steps?|iters?|iterations?|batch(?:es)?)\b[:\s\[]*"
+        r"(?P<step>\d+)\s*/\s*(?P<total>\d+)")),
+    # bare tqdm: " 45%|█████     | 45/100 [00:12<00:14,  3.9it/s]"
+    ("tqdm", re.compile(
+        r"(?P<pct>\d{1,3})%\|[^|\n]*\|\s*(?P<step>\d+)/(?P<total>\d+)")),
+    # keras: "  32/1875 [>.............]"
+    ("keras", re.compile(r"^\s*(?P<step>\d+)/(?P<total>\d+)\s*\[")),
+    # "Progress: 45/100", "trial 3 of 20"
+    ("progress", re.compile(
+        r"(?i)\b(?:progress|trial|fold|shard|chunk|file)\b[:\s]*"
+        r"(?P<step>\d+)\s*(?:/|of)\s*(?P<total>\d+)")),
+    # "45% complete", "done: 45.0%"
+    ("percent", re.compile(r"(?P<pct>\d{1,3}(?:\.\d+)?)\s*%")),
+    # last resort: a bare "45/100" not part of a path, date or version
+    ("bare", re.compile(r"(?<![\w./-])(?P<step>\d+)\s*/\s*(?P<total>\d+)(?![\w./-])")),
+]
+
+
+def parse_progress(text, pattern=None, known_total=None):
+    """Scan a chunk of log text and return the most recent progress reading.
+
+    Returns {"step", "total", "pct", "sub", "src"} with missing keys as None,
+    or None if nothing matched. Scans patterns in priority order and, within a
+    pattern, takes the *last* match in the chunk (the freshest line).
+    """
+    pats = [("custom", re.compile(pattern))] if pattern else BUILTIN_PATTERNS
+
+    for name, rx in pats:
+        last = None
+        for m in rx.finditer(text):
+            last = m
+        if last is None:
+            continue
+        g = last.groupdict()
+        step = _int(g.get("step"))
+        total = _int(g.get("total"))
+        pct = _float(g.get("pct"))
+        sub = _float(g.get("sub"))
+
+        if name == "bare":
+            # only trust a bare a/b if it looks like a real counter
+            if not total or total <= 1 or step is None or step > total:
+                continue
+        if total is not None and step is not None and step > total:
+            # e.g. matched something unrelated; ignore the total
+            total = None
+        if name == "lightning":
+            total = known_total  # epoch count comes from the caller
+            if sub is not None:
+                sub = sub / 100.0
+        if pct is not None and name in ("percent", "tqdm"):
+            pct = max(0.0, min(100.0, pct)) / 100.0
+
+        return {
+            "step": step,
+            "total": total if total is not None else known_total,
+            "pct": pct if name in ("percent", "tqdm") else None,
+            "sub": sub,
+            "src": name,
+        }
+    return None
+
+
+def _int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def read_tail(path, offset, max_bytes=262144):
+    """Read new bytes from `offset`. Returns (text, new_offset). Handles the log
+    being truncated or rotated out from under us."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return "", offset
+    if size < offset:      # truncated / rotated
+        offset = 0
+    start = max(offset, size - max_bytes)
+    try:
+        with open(path, "rb") as f:
+            f.seek(start)
+            raw = f.read()
+    except OSError:
+        return "", offset
+    text = raw.decode("utf-8", "replace")
+    # tqdm redraws with \r; treat those as line breaks so we see each redraw
+    return text.replace("\r", "\n"), size
+
+
+# ------------------------------------------------------------------- estimating
+
+def _measured_rate(job, now, cfg):
+    """Units per second from recent samples, or None."""
+    samples = job.get("samples") or []
+    if len(samples) < 2:
+        return None, 0
+    win = samples[-int(cfg["rate_window"]):]
+    t0, s0 = win[0]
+    t1, s1 = win[-1]
+    if (t1 - t0) < cfg["rate_min_span"] or s1 <= s0:
+        return None, len(win) - 1
+    return (s1 - s0) / (t1 - t0), len(win) - 1
+
+
+def estimate(job, now=None, cfg=None):
+    """Fuse Claude's prior ETA with the rate measured from the log.
+
+    Returns a dict the renderers consume. `source` explains which signal won:
+      measured - purely from observed throughput
+      claude   - purely from Claude's up-front guess
+      blend    - weighted mix, weight shifting to `measured` as samples arrive
+    """
+    now = now or time.time()
+    cfg = cfg or load_config()
+    started = job.get("started") or now
+    ended = job.get("ended")
+    elapsed = (ended or now) - started
+
+    total = job.get("total")
+    units = job.get("units")            # step + sub-step fraction, a float
+    if units is None:
+        units = job.get("step")
+
+    # --- fraction complete -------------------------------------------------
+    frac = None
+    frac_from_data = False
+    if job.get("pct") is not None:
+        frac = job["pct"]
+        frac_from_data = True
+    elif total and units is not None and total > 0:
+        frac = units / float(total)
+        frac_from_data = True
+    eta_end = job.get("eta_end")
+    if frac is None and eta_end and eta_end > started:
+        # no countable progress: fall back to wall-clock against Claude's guess
+        frac = (now - started) / (eta_end - started)
+        frac = min(frac, 0.99)          # never claim done on a guess alone
+    if frac is not None:
+        frac = max(0.0, min(1.0, frac))
+
+    # --- remaining time ----------------------------------------------------
+    rate, nobs = _measured_rate(job, now, cfg)
+    measured_rem = None
+    if rate and total and units is not None:
+        measured_rem = max(0.0, (total - units) / rate)
+    if measured_rem is None and frac_from_data and frac and 0 < frac < 1 and nobs >= 2:
+        # no countable total (percent-only logs): extrapolate from the fraction.
+        # only valid when frac came from the log, never from the prior itself.
+        measured_rem = elapsed * (1 - frac) / frac
+
+    prior_rem = None
+    overdue = False
+    if eta_end:
+        prior_rem = eta_end - now
+        if prior_rem < 0:
+            overdue = True
+            prior_rem = None            # a blown guess is worse than no guess
+
+    if measured_rem is not None and prior_rem is not None:
+        w = min(1.0, nobs / float(cfg["blend_full_at"]))
+        remaining = w * measured_rem + (1 - w) * prior_rem
+        source = "measured" if w >= 0.999 else "blend"
+    elif measured_rem is not None:
+        remaining, source = measured_rem, "measured"
+    elif prior_rem is not None:
+        remaining, source = prior_rem, "claude"
+    else:
+        remaining, source = None, None
+
+    if job.get("state") != "running":
+        remaining, source, overdue = 0.0, None, False
+        if job.get("state") == "done" and frac is None:
+            frac = 1.0
+
+    return {
+        "frac": frac,
+        "determinate": frac is not None,
+        "elapsed": elapsed,
+        "remaining": remaining,
+        "rate": rate,
+        "nobs": nobs,
+        "source": source,
+        "overdue": overdue,
+        "eta_wall": (now + remaining) if remaining is not None else None,
+        # the whole point of re-estimating: total duration as currently believed
+        "total_est": (elapsed + remaining) if remaining is not None else None,
+    }
+
+
+# -------------------------------------------------------------------- formatting
+
+def fmt_dur(s):
+    """tqdm's clock format: MM:SS, or H:MM:SS past an hour."""
+    if s is None:
+        return "--:--"
+    s = int(max(0, s))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return "%d:%02d:%02d" % (h, m, sec)
+    return "%02d:%02d" % (m, sec)
+
+
+def fmt_short(s):
+    """Compact human duration: 2h14m / 45m / 38s."""
+    if s is None:
+        return "?"
+    s = int(max(0, s))
+    if s < 60:
+        return "%ds" % s
+    if s < 3600:
+        return "%dm" % (s // 60)
+    h, m = divmod(s // 60, 60)
+    return "%dh%02dm" % (h, m) if m else "%dh" % h
+
+
+def fmt_rate(rate, unit):
+    if not rate:
+        return ""
+    unit = unit or "it"
+    if rate >= 1:
+        return "%.2f%s/s" % (rate, unit)
+    return "%.1fs/%s" % (1.0 / rate, unit)
+
+
+def fmt_clock(ts, cfg=None):
+    if ts is None:
+        return "?"
+    fmt = (cfg or load_config())["clock_format"]
+    return time.strftime(fmt, time.localtime(ts))
+
+
+def parse_duration(text):
+    """'90', '90s', '5m', '2h30m', '1h', '1:30:00' -> seconds."""
+    if text is None:
+        return None
+    text = str(text).strip().lower()
+    if not text:
+        return None
+    if ":" in text:
+        parts = [float(p) for p in text.split(":")]
+        while len(parts) < 3:
+            parts.insert(0, 0.0)
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    total, found = 0.0, False
+    for val, unit in re.findall(r"(\d+(?:\.\d+)?)\s*([hms]?)", text):
+        if not val:
+            continue
+        found = True
+        mult = {"h": 3600, "m": 60, "s": 1, "": 1}[unit]
+        total += float(val) * mult
+    if not found:
+        raise SystemExit("could not parse duration: %r (try 45m, 2h30m, 90s)" % text)
+    return total
+
+
+# ---------------------------------------------------------------------- drawing
+
+BLOCKS = " \u258f\u258e\u258d\u258c\u258b\u258a\u2589\u2588"   # 1/8ths through full
+
+STYLES = {
+    #          left        right       fill        partials  track
+    "blocks": ("\u2595",  "\u258f",  "\u2588",  BLOCKS,   "\u00b7"),
+    "tqdm":   ("|",        "|",        "\u2588",  BLOCKS,   " "),
+    "ascii":  ("[",        "]",        "#",        None,     "-"),
+    "dots":   ("",         "",         "\u25cf",  None,     "\u25cb"),
+    "bars":   ("",         "",         "\u2501",  None,     "\u2500"),
+}
+
+# Both are replaced from the user's config by apply_theme() before rendering.
+PALETTE = {"run": 44, "done": 42, "fail": 203, "warn": 179,
+           "dim": 244, "track": 238, "text": 252}
+SPINNER = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
+
+
+def apply_theme(cfg):
+    """Fold the configured colours and spinner into the render globals."""
+    global PALETTE, SPINNER
+    PALETTE = {"run": cfg["color_running"], "done": cfg["color_done"],
+               "fail": cfg["color_failed"], "warn": cfg["color_warn"],
+               "dim": cfg["color_dim"], "track": cfg["color_track"],
+               "text": cfg["color_text"]}
+    if cfg["spinner"]:
+        SPINNER = cfg["spinner"]
+    return cfg
+
+
+def paint(text, key, on=True):
+    if not on or not text:
+        return text
+    return "\033[38;5;%dm%s\033[0m" % (PALETTE.get(key, 252), text)
+
+
+def bar_chars(cfg):
+    """Style preset, with any per-character override applied on top."""
+    left, right, fill, partials, track = STYLES.get(cfg["style"], STYLES["blocks"])
+    if cfg["fill_char"]:
+        fill, partials = cfg["fill_char"], None   # custom fill cannot have 1/8ths
+    return (cfg["left_cap"] or left, cfg["right_cap"] or right,
+            fill, partials, cfg["track_char"] or track)
+
+
+def draw_bar(frac, cfg, tone="run"):
+    left, right, fill, partials, track = bar_chars(cfg)
+    color = cfg["color"]
+    width = max(4, int(cfg["bar_width"]))
+
+    if frac is None:                       # indeterminate: a block sliding back and forth
+        span = max(3, width // 5)
+        period = max(1, (width - span) * 2)
+        pos = int(time.time() * 4) % period
+        if pos > (width - span):
+            pos = period - pos
+        cells = [track] * width
+        for i in range(pos, min(width, pos + span)):
+            cells[i] = fill
+        return (paint(left, "dim", color) + paint("".join(cells), tone, color)
+                + paint(right, "dim", color))
+
+    frac = max(0.0, min(1.0, frac))
+    exact = frac * width
+    full = int(exact)
+    body = fill * full
+    if partials and full < width:
+        eighth = int((exact - full) * 8)
+        if eighth:
+            body += partials[eighth]
+    pad = track * (width - len(body))
+    return (paint(left, "dim", color) + paint(body, tone, color)
+            + paint(pad, "track", color) + paint(right, "dim", color))
+
+
+def tone_for(job):
+    st = job.get("state")
+    if st == "done":
+        return "done"
+    if st in ("failed", "cancelled"):
+        return "fail"
+    if st == "stalled":
+        return "warn"
+    return "run"
+
+
+def status_glyph(job, cfg):
+    color = cfg["color"]
+    st = job.get("state")
+    if st == "done":
+        return paint(cfg["glyph_done"], "done", color)
+    if st == "failed":
+        return paint(cfg["glyph_failed"], "fail", color)
+    if st == "cancelled":
+        return paint(cfg["glyph_cancelled"], "dim", color)
+    if st == "stalled":
+        return paint(cfg["glyph_stalled"], "warn", color)
+    fps = cfg["spinner_fps"] or 0
+    idx = int(time.time() * fps) % len(SPINNER) if fps else 0
+    return paint(SPINNER[idx], "run", color)
+
+
+# ------------------------------------------------------------- line composition
+
+def render_line(job, cfg, width=None, now=None):
+    """One statusline row for one job. Every field here is individually
+    switchable from config; see `agent-tqdm config`."""
+    now = now or time.time()
+    apply_theme(cfg)
+    color = cfg["color"]
+    e = estimate(job, now, cfg)
+    tone = tone_for(job)
+    unit = job.get("unit") or ""
+
+    parts = []
+    if cfg["show_spinner"]:
+        parts.append(status_glyph(job, cfg))
+    if cfg["show_name"]:
+        parts.append(paint(job.get("id", "job")[:cfg["name_width"]], "text", color))
+    parts.append(draw_bar(e["frac"], cfg, tone))
+
+    if cfg["show_percent"] and e["frac"] is not None:
+        parts.append(paint("%3d%%" % int(e["frac"] * 100), "text", color))
+
+    total, units = job.get("total"), job.get("units")
+    if cfg["show_counts"] and total and units is not None:
+        parts.append(paint("%g/%g%s" % (round(units, 1), total, unit), "dim", color))
+
+    if job.get("state") == "running":
+        if cfg["show_clock"]:
+            # tqdm's signature elapsed<remaining pair
+            rem = fmt_dur(e["remaining"]) if e["remaining"] is not None else "?"
+            mark = "~" if e["source"] in ("claude", "blend") else ""
+            parts.append(paint("%s<%s%s" % (fmt_dur(e["elapsed"]), mark, rem),
+                               "warn" if e["source"] == "claude" else "text", color))
+        if cfg["show_rate"] and e["rate"] and job.get("total"):
+            parts.append(paint(fmt_rate(e["rate"], unit or "it"), "dim", color))
+        if cfg["show_eta_clock"] and e["eta_wall"]:
+            parts.append(paint("\u2192" + fmt_clock(e["eta_wall"], cfg), "dim", color))
+        init, tot = job.get("initial_est_total_s"), e.get("total_est")
+        if (cfg["show_drift"] and init and tot
+                and abs(tot - init) / float(init) > cfg["drift_threshold"]):
+            # the job is taking materially longer (or less) than first thought
+            d = tot - init
+            parts.append(paint("est %s (%s%s)" % (
+                fmt_short(tot), "+" if d > 0 else "-", fmt_short(abs(d))), "warn", color))
+        if e["overdue"]:
+            parts.append(paint("(past estimate)", "warn", color))
+    else:
+        tail = "in " + fmt_dur(e["elapsed"])
+        parts.append(paint(tail, "dim", color))
+        if job.get("state") == "failed":
+            parts.append(paint(crash_reason(job.get("exit_code"))[0], "fail", color))
+
+    if cfg["show_note"] and job.get("note"):
+        parts.append(paint("\u00b7 " + job["note"][:cfg["note_width"]], "dim", color))
+
+    line = " ".join(p for p in parts if p)
+    return clip(line, width) if width else line
+
+
+def char_width(ch):
+    """Terminal columns one character occupies. Emoji and CJK take two."""
+    if unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def visible_len(s):
+    return sum(char_width(c) for c in re.sub(r"\033\[[0-9;]*m", "", s))
+
+
+def clip(s, width):
+    """Truncate to `width` visible columns, keeping ANSI codes balanced."""
+    if visible_len(s) <= width:
+        return s
+    out, seen = [], 0
+    i = 0
+    while i < len(s):
+        if s[i] == "\033":
+            j = s.find("m", i)
+            if j == -1:
+                break
+            out.append(s[i:j + 1])
+            i = j + 1
+            continue
+        w = char_width(s[i])
+        if seen + w > width - 1:
+            break
+        out.append(s[i])
+        seen += w
+        i += 1
+    return "".join(out) + "…\033[0m"
+
+
+def render_block(job, cfg, width):
+    """Two-line detailed view used by the `watch` dashboard."""
+    now = time.time()
+    e = estimate(job, now)
+    color = cfg["color"]
+    head = render_line(job, cfg, width=width, now=now)
+    bits = []
+    if job.get("desc"):
+        bits.append(job["desc"])
+    if job.get("cmd"):
+        bits.append("$ " + job["cmd"])
+    bits.append("watching " + describe_monitor(job))
+    if e.get("total_est"):
+        init = job.get("initial_est_total_s")
+        bits.append("est total %s%s" % (
+            fmt_short(e["total_est"]),
+            " (first guess %s)" % fmt_short(init) if init and abs(
+                e["total_est"] - init) / float(init) > 0.2 else ""))
+    if job.get("interval_s"):
+        bits.append("updates every " + fmt_short(job["interval_s"]))
+    if e["source"]:
+        bits.append("eta: " + {"measured": "measured from log",
+                               "claude": "Claude's estimate",
+                               "blend": "blended (%d obs)" % e["nobs"]}[e["source"]])
+    if job.get("log"):
+        bits.append(job["log"])
+    sub = paint("   " + "  ·  ".join(bits), "dim", color)
+    return head + "\n" + clip(sub, width)
+
+
+def job_visible(job, cfg, now=None):
+    """Short jobs are tracked but never clutter the statusline.
+
+    A job qualifies as short only while we still believe it is short: once it
+    has actually been running past the threshold it appears regardless, so a
+    job that was estimated at 90s and is still going at 5 minutes shows up."""
+    now = now or time.time()
+    if job.get("force_show"):
+        return True
+    if job.get("state") in ("failed", "stalled"):
+        return True          # a crash is always worth showing, however short the job
+    threshold = cfg["min_duration_seconds"]
+    if threshold <= 0:
+        return True
+    e = estimate(job, now, cfg)
+    if e["elapsed"] >= threshold:
+        return True
+    total = e.get("total_est")
+    return total is not None and total >= threshold
+
+
+def pick_jobs(st, cfg, session_id=None, apply_visibility=True):
+    """Jobs worth showing: everything running, plus recently finished ones."""
+    now = time.time()
+    out = []
+    for j in st["jobs"].values():
+        if j.get("state") == "running":
+            pass
+        else:
+            linger = (cfg["keep_failed_seconds"] if j.get("state") in ("failed", "stalled")
+                      else cfg["keep_done_seconds"])
+            if now - (j.get("ended") or 0) >= linger:
+                continue
+        if apply_visibility and not job_visible(j, cfg, now):
+            continue
+        out.append(j)
+    # current session first, then oldest-started first (stable ordering)
+    out.sort(key=lambda j: (j.get("session_id") != session_id, j.get("started") or 0))
+    return out
+
+
+# ------------------------------------------------------------------- crashes
+#
+# When a job dies, three things have to happen: the bar gets a skull, the
+# desktop gets a notification, and the Claude session gets told. The session is
+# the awkward one - nothing can push a message into a running session from
+# outside - so the crash is queued here and the plugin's hooks deliver it at the
+# first opportunity (see hooks/inject_status.py).
+
+SIGNAL_NAMES = {
+    1: "SIGHUP", 2: "SIGINT", 3: "SIGQUIT", 4: "SIGILL", 6: "SIGABRT",
+    8: "SIGFPE", 9: "SIGKILL", 11: "SIGSEGV", 13: "SIGPIPE", 15: "SIGTERM",
+    24: "SIGXCPU", 25: "SIGXFSZ", 31: "SIGSYS",
+}
+SIGNAL_HINTS = {
+    9: "killed outright - most often the OOM killer",
+    11: "segfault",
+    6: "aborted",
+    15: "terminated",
+    2: "interrupted",
+    24: "hit the CPU time limit",
+    31: "bad system call",
+}
+
+
+def crash_reason(code):
+    """(short, explanatory) description of a non-zero exit."""
+    if code is None:
+        return "no exit code", "died without reporting an exit code"
+    if code > 128:
+        sig = code - 128
+        name = SIGNAL_NAMES.get(sig, "signal %d" % sig)
+        hint = SIGNAL_HINTS.get(sig)
+        return name, ("%s - %s" % (name, hint)) if hint else name
+    return "exit %d" % code, "exited with status %d" % code
+
+
+def enqueue_crash(st, job, now):
+    """Queue a crash for delivery to whichever Claude session asks next."""
+    tail = ""
+    if job.get("log"):
+        text, _ = read_tail(job["log"], 0, 65536)
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        tail = "\n".join(lines[-15:])
+    short, why = crash_reason(job.get("exit_code"))
+    st.setdefault("inbox", []).append({
+        "job": job.get("id"),
+        "ts": now,
+        "exit_code": job.get("exit_code"),
+        "reason": why,
+        "reason_short": short,
+        "cmd": job.get("cmd"),
+        "log": job.get("log"),
+        "log_tail": tail,
+        "duration": (job.get("ended") or now) - (job.get("started") or now),
+        "session_id": job.get("session_id"),
+        "delivered": None,
+    })
+    del st["inbox"][:-50]
+
+
+def take_crash(session_id=None):
+    """Claim the oldest undelivered crash. Returns it, or None."""
+    claimed = None
+    with state_rw() as st:
+        for ev in st.get("inbox", []):
+            if not ev.get("delivered"):
+                ev["delivered"] = {"session_id": session_id, "ts": time.time()}
+                claimed = dict(ev)
+                break
+    return claimed
+
+
+def pending_crashes():
+    return [e for e in state_ro().get("inbox", []) if not e.get("delivered")]
+
+
+def format_crash(ev, cfg=None):
+    """The message a Claude session is handed when a job dies."""
+    cfg = cfg or load_config()
+    lines = [
+        "%s A tracked job CRASHED while you were working: '%s'" % (
+            cfg["glyph_failed"], ev.get("job")),
+        "  %s after %s" % (ev.get("reason"), fmt_dur(ev.get("duration"))),
+    ]
+    if ev.get("cmd"):
+        cmd = " ".join(ev["cmd"].split())          # collapse multi-line commands
+        lines.append("  command: %s" % (cmd[:200] + ("..." if len(cmd) > 200 else "")))
+    if ev.get("log"):
+        lines.append("  log: %s" % ev["log"])
+    if ev.get("log_tail"):
+        lines.append("  last output:")
+        for ln in ev["log_tail"].splitlines()[-15:]:
+            lines.append("    " + ln[:200])
+    lines.append("Tell the user this job crashed, summarise why from the output above, "
+                 "and suggest a fix if the cause is clear. Do not re-run it without asking.")
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------------- monitors
+#
+# A job only has a progress bar if something observable moves. Rather than
+# assuming every job prints "Epoch 3/50", the caller declares *how* to watch
+# this particular job, once, at start. Everything after that is automatic.
+
+MONITOR_KINDS = ("auto", "log", "milestones", "files", "size", "probe", "time")
+
+MONITOR_HELP = """\
+auto        (default) tail the log and look for any known progress marker;
+            fall back to wall-clock against the estimate if none appear
+log         same, with your own regex:  --pattern 'done (?P<step>\\d+)/(?P<total>\\d+)'
+milestones  ordered stages that appear in the log, each worth an equal slice:
+            --milestones 'loading data;training;evaluating;writing output'
+files       count files produced so far:  --glob 'out/shard-*.parquet' --total 500
+size        an output file or directory growing toward a size:
+            --path out/index.bin --target-size 12GB
+probe       run any shell command that prints 'k/N', 'k', or 'NN%':
+            --probe 'psql -tAc "select count(*) from rows"' --total 2000000
+time        no observable signal; the bar runs on the estimate alone
+"""
+
+
+def parse_size(text):
+    """'12GB', '500 MB', '1.5t', '4096' -> bytes."""
+    if text is None:
+        return None
+    m = re.match(r"^\s*([\d.]+)\s*([kmgtp]?)i?b?\s*$", str(text).strip().lower())
+    if not m:
+        raise SystemExit("could not parse size: %r (try 500MB, 12GB)" % text)
+    mult = {"": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3,
+            "t": 1024 ** 4, "p": 1024 ** 5}[m.group(2)]
+    return int(float(m.group(1)) * mult)
+
+
+def fmt_size(n):
+    if n is None:
+        return "?"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return "%.0f%s" % (n, unit) if unit == "B" else "%.1f%s" % (n, unit)
+        n /= 1024.0
+
+
+def path_size(path):
+    """Bytes at `path`, whether it is a file or a directory tree."""
+    if not path or not os.path.exists(path):
+        return None
+    if os.path.isfile(path):
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return None
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total
+
+
+def parse_probe_output(out, known_total=None):
+    """A probe command may print 'k/N', a bare 'k', or 'NN%'."""
+    lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    if not lines:
+        return None
+    s = lines[-1]
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*%$", s)
+    if m:
+        return {"step": None, "total": None, "pct": float(m.group(1)) / 100.0,
+                "sub": None, "src": "probe"}
+    m = re.match(r"^(\d+)\s*/\s*(\d+)$", s)
+    if m:
+        return {"step": int(m.group(1)), "total": int(m.group(2)),
+                "pct": None, "sub": None, "src": "probe"}
+    m = re.match(r"^(\d+)$", s)
+    if m:
+        return {"step": int(m.group(1)), "total": known_total,
+                "pct": None, "sub": None, "src": "probe"}
+    return parse_progress(out, None, known_total)   # fall back to the generic parser
+
+
+def tail_job_log(job, max_bytes=262144):
+    """Incremental read of the job's log, remembering the offset in job state."""
+    log = job.get("log")
+    if not log or not os.path.exists(log):
+        return ""
+    text, new_off = read_tail(log, job.get("log_offset", 0), max_bytes)
+    job["log_offset"] = new_off
+    return text
+
+
+def monitor_reading(job, now=None):
+    """Observe the job once, however this job is configured to be observed.
+
+    Returns a reading dict shaped like parse_progress(), or None if the job
+    offers no observable signal right now (which is fine - the estimate carries
+    the bar in that case)."""
+    mon = job.get("monitor") or {"kind": "auto"}
+    kind = mon.get("kind") or "auto"
+
+    if kind == "time":
+        return None
+
+    if kind in ("auto", "log"):
+        text = tail_job_log(job)
+        if not text.strip():
+            return None
+        return parse_progress(text, job.get("pattern"), job.get("total"))
+
+    if kind == "milestones":
+        names = mon.get("milestones") or []
+        if not names:
+            return None
+        hit = list(job.get("milestones_hit") or [])
+        text = tail_job_log(job)
+        if text:
+            for n in names:
+                if n in hit:
+                    continue
+                try:
+                    found = re.search(n, text, re.I) is not None
+                except re.error:
+                    found = n.lower() in text.lower()
+                if found:
+                    hit.append(n)
+        job["milestones_hit"] = [n for n in names if n in hit]   # keep declared order
+        return {"step": len(job["milestones_hit"]), "total": len(names),
+                "pct": None, "sub": None, "src": "milestones"}
+
+    if kind == "files":
+        pat = mon.get("glob")
+        if not pat:
+            return None
+        n = len(globmod.glob(os.path.expanduser(pat), recursive=True))
+        return {"step": n, "total": mon.get("total") or job.get("total"),
+                "pct": None, "sub": None, "src": "files"}
+
+    if kind == "size":
+        cur = path_size(os.path.expanduser(mon.get("path") or ""))
+        if cur is None:
+            return None
+        job["size_bytes"] = cur
+        target = mon.get("target_bytes")
+        if not target:
+            return None            # growing, but with no target there is no fraction
+        return {"step": None, "total": None,
+                "pct": max(0.0, min(1.0, cur / float(target))),
+                "sub": None, "src": "size"}
+
+    if kind == "probe":
+        cmd = mon.get("cmd")
+        if not cmd:
+            return None
+        try:
+            out = subprocess.check_output(
+                ["/bin/sh", "-c", cmd], stderr=subprocess.DEVNULL,
+                timeout=float(mon.get("timeout", 30)),
+                cwd=job.get("cwd") if os.path.isdir(job.get("cwd") or "") else None,
+            ).decode("utf-8", "replace")
+        except Exception:
+            return None
+        return parse_probe_output(out, mon.get("total") or job.get("total"))
+
+    return None
+
+
+def describe_monitor(job):
+    mon = job.get("monitor") or {"kind": "auto"}
+    kind = mon.get("kind", "auto")
+    if kind == "milestones":
+        hit = len(job.get("milestones_hit") or [])
+        return "milestones %d/%d" % (hit, len(mon.get("milestones") or []))
+    if kind == "files":
+        return "files matching %s" % mon.get("glob")
+    if kind == "size":
+        return "size of %s%s" % (mon.get("path"),
+                                 " -> %s" % fmt_size(mon.get("target_bytes"))
+                                 if mon.get("target_bytes") else "")
+    if kind == "probe":
+        return "probe: %s" % mon.get("cmd")
+    if kind == "time":
+        return "wall clock only"
+    return "log markers" + (" (custom pattern)" if job.get("pattern") else "")
+
+
+def poll_interval(job, cfg, est_total_s):
+    """How often to observe. Never more than once per `min_interval_seconds`,
+    and never more than `interval_fraction` of the job's own estimated length -
+    so a 10-hour job is not polled every 2 seconds."""
+    if job.get("interval_override"):
+        return max(1.0, float(job["interval_override"]))
+    base = float(cfg.get("min_interval_seconds", 120))
+    frac = float(cfg.get("interval_fraction", 0.05)) * float(est_total_s or 0)
+    return max(base, frac)
+
+
+# ------------------------------------------------------------------ the watcher
+
+def spawn_watcher(jid):
+    """Detach a tiny process that tails the log and keeps the job's state fresh."""
+    script = os.path.abspath(__file__)
+    err = open(os.path.join(ROOT, "watcher.log"), "a")
+    p = subprocess.Popen(
+        [sys.executable, script, "_watch", jid],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
+        start_new_session=True,
+    )
+    return p.pid
+
+
+def notify(title, message, ok=True):
+    if not load_config()["notify"] or sys.platform != "darwin":
+        return
+    cfg = load_config()
+    sound = cfg["notify_sound_ok"] if ok else cfg["notify_sound_fail"]
+    script = 'display notification %s with title %s sound name "%s"' % (
+        json.dumps(message), json.dumps(title), sound)
+    try:
+        subprocess.Popen(["osascript", "-e", script],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def record_sample(job, units, now):
+    """Append to the rate-estimation ring buffer, ignoring non-advances."""
+    samples = job.setdefault("samples", [])
+    if samples and units <= samples[-1][1]:
+        return
+    samples.append([now, units])
+    del samples[:-int(load_config()["rate_window"]) * 3]
+
+
+def apply_reading(job, reading, now):
+    """Fold one parsed log reading into the job's counters."""
+    if not reading:
+        return False
+    changed = False
+    total = reading.get("total")
+    if total and not job.get("total_locked"):
+        if job.get("total") != total:
+            job["total"] = total
+            changed = True
+
+    step, sub = reading.get("step"), reading.get("sub")
+    units = None
+    if step is not None:
+        if step == 0:
+            # Lightning prints "Epoch 0:" first, so this log is 0-indexed
+            job["zero_indexed"] = True
+        if sub is None:
+            # a plain counter: "Epoch 12/50" means 12 are finished
+            units = float(step)
+        else:
+            # outer counter + inner bar: epoch `step` is only `sub` done
+            base = step if job.get("zero_indexed") else max(0, step - 1)
+            units = float(base) + sub
+    elif reading.get("pct") is not None and job.get("total"):
+        units = reading["pct"] * job["total"]
+
+    if units is not None and units != job.get("units"):
+        job["units"] = units
+        job["step"] = int(units)
+        record_sample(job, units, now)
+        changed = True
+
+    if reading.get("pct") is not None and not job.get("total"):
+        if job.get("pct") != reading["pct"]:
+            job["pct"] = reading["pct"]
+            record_sample(job, reading["pct"] * 1000.0, now)
+            changed = True
+
+    if changed:
+        job["updated"] = now
+        job["progress_source"] = reading.get("src")
+    return changed
+
+
+def finalize(job, exit_code, now, st=None):
+    """Close a job out. Pass `st` when the failure was detected automatically -
+    that queues a crash report for the Claude session; a failure the caller
+    already knows about (agent-tqdm fail) should not."""
+    job["state"] = "done" if exit_code in (0, None) else "failed"
+    job["exit_code"] = exit_code
+    job["ended"] = now
+    job["updated"] = now
+    if job["state"] == "done" and job.get("total") and job.get("units"):
+        job["units"] = job["total"]
+        job["step"] = job["total"]
+    if job["state"] == "failed" and st is not None:
+        enqueue_crash(st, job, now)
+
+
+def cmd_watch_daemon(args):
+    """Background loop that keeps one job's state fresh.
+
+    Two clocks run here. A cheap liveness check (a signal-0 kill) ticks every
+    few seconds so completion is noticed promptly. The actual progress probe -
+    the only part that costs anything - runs on the job's own slow cadence from
+    poll_interval(): at most once every 2 minutes, and for a long job at most
+    once per 5% of its estimated length. The estimate is recomputed after each
+    probe, so the cadence stretches or tightens as the estimate does.
+    """
+    jid = args.job
+    idle_since = time.time()
+    last_probe = 0.0
+    interval = float(load_config().get("min_interval_seconds", 120))
+
+    while True:
+        now = time.time()
+        finished = None
+        has_pid = False
+
+        with state_rw() as st:
+            job = st["jobs"].get(jid)
+            if job is None or job.get("state") != "running":
+                return 0
+            job["watcher_pid"] = os.getpid()
+            has_pid = bool(job.get("pid"))
+            cfg = load_config()
+            interval = args.interval or poll_interval(
+                job, cfg, estimate(job, now).get("total_est"))
+
+            if last_probe == 0.0 or (now - last_probe) >= interval:
+                last_probe = now
+                job["last_probe"] = now
+                try:
+                    reading = monitor_reading(job, now)
+                except Exception:
+                    reading = None            # a broken probe must not kill the bar
+                if apply_reading(job, reading, now):
+                    idle_since = now
+                # a fresh observation means a fresh total estimate
+                e = estimate(job, now)
+                if e.get("total_est"):
+                    job["est_total_s"] = e["total_est"]
+                    if not job.get("initial_est_total_s"):
+                        job["initial_est_total_s"] = e["total_est"]
+                interval = args.interval or poll_interval(job, cfg, job.get("est_total_s"))
+
+            job["next_probe"] = last_probe + interval
+            job["interval_s"] = interval
+
+            pid = job.get("pid")
+            if pid and not alive(pid):
+                try:
+                    apply_reading(job, monitor_reading(job, now), now)   # last look
+                except Exception:
+                    pass
+                code = job.get("exit_code")
+                try:
+                    with open((job.get("log") or "") + ".exit") as f:
+                        code = int(f.read().strip())
+                except Exception:
+                    pass
+                finalize(job, code, now, st)
+                finished = dict(job)
+
+            if not finished and (now - idle_since) > args.max_idle:
+                job["note"] = ((job.get("note") or "") + " [no progress seen]").strip()
+                job["state"] = "stalled"
+                job["ended"] = now
+                return 0
+
+        if finished:
+            ok = finished.get("state") == "done"
+            cfg = load_config()
+            dur = fmt_dur((finished.get("ended") or now) - (finished.get("started") or now))
+            if ok:
+                notify("%s %s" % (cfg["glyph_done"], finished.get("id")),
+                       "finished after %s" % dur, True)
+            else:
+                notify("%s %s crashed" % (cfg["glyph_failed"], finished.get("id")),
+                       "%s after %s" % (crash_reason(finished.get("exit_code"))[1], dur), False)
+            return 0
+
+        # liveness ticks stay frequent; progress probes do not
+        if has_pid:
+            time.sleep(min(15.0, max(1.0, interval / 20.0)))
+        else:
+            time.sleep(max(1.0, min(interval, (last_probe + interval) - time.time())))
+
+
+# ------------------------------------------------------------------- commands
+
+def build_monitor(args, existing=None):
+    """Turn the monitor flags into the job's monitor spec. Declared once, at
+    start; the watcher needs no further instruction."""
+    mon = dict(existing or {})
+    kind = getattr(args, "monitor", None)
+
+    miles = list(getattr(args, "milestone", None) or [])
+    if getattr(args, "milestones", None):
+        miles += [m.strip() for m in re.split(r"[;\n]", args.milestones) if m.strip()]
+    if miles:
+        mon["milestones"] = miles
+        kind = kind or "milestones"
+    if getattr(args, "glob", None):
+        mon["glob"] = args.glob
+        kind = kind or "files"
+    if getattr(args, "path", None):
+        mon["path"] = args.path
+        kind = kind or "size"
+    if getattr(args, "target_size", None):
+        mon["target_bytes"] = parse_size(args.target_size)
+        kind = kind or "size"
+    if getattr(args, "probe", None):
+        mon["cmd"] = args.probe
+        kind = kind or "probe"
+    if getattr(args, "total", None):
+        mon["total"] = args.total
+    if kind:
+        mon["kind"] = kind
+    if not mon:
+        return None
+    mon.setdefault("kind", "auto")
+    return mon
+
+
+UNIT_BY_MONITOR = {"milestones": "stage", "files": "file", "size": "", "time": ""}
+
+
+def _new_job(args, cmd=None, log=None, pid=None):
+    now = time.time()
+    eta = parse_duration(getattr(args, "eta", None))
+    mon = build_monitor(args)
+    unit = (getattr(args, "unit", None)
+            or UNIT_BY_MONITOR.get((mon or {}).get("kind"), "it"))
+    job = {
+        "id": None,
+        "desc": getattr(args, "desc", None),
+        "cmd": cmd,
+        "log": log,
+        "pid": pid,
+        "unit": unit,
+        "total": getattr(args, "total", None),
+        "total_locked": bool(getattr(args, "total", None)),
+        "step": None,
+        "units": None,
+        "pct": None,
+        "state": "running",
+        "exit_code": None,
+        "started": now,
+        "updated": now,
+        "ended": None,
+        "eta_end": (now + eta) if eta else None,
+        "eta_prior_s": eta,
+        "note": getattr(args, "note", None),
+        "pattern": getattr(args, "pattern", None),
+        "monitor": mon,
+        "interval_override": parse_duration(getattr(args, "interval", None)),
+        "est_total_s": eta,
+        "initial_est_total_s": eta,
+        "log_offset": 0,
+        "force_show": bool(getattr(args, "force_show", False)),
+        "samples": [],
+        "session_id": os.environ.get("CLAUDE_SESSION_ID"),
+        "cwd": os.getcwd(),
+    }
+    return job
+
+
+def _announce(job):
+    cfg = load_config()
+    print(render_line(job, cfg))
+    e = estimate(job)
+    iv = poll_interval(job, cfg, e.get("total_est") or job.get("est_total_s"))
+    est = job.get("est_total_s")
+    print("  watching: %s   ·   updates every %s%s" % (
+        describe_monitor(job), fmt_short(iv),
+        " (5%% of the %s estimate)" % fmt_short(est)
+        if est and iv > cfg.get("min_interval_seconds", 120) else ""))
+    if not job_visible(job, cfg):
+        print("  (short job: tracked, but under the %s statusline threshold - "
+              "--force-show to pin it)" % fmt_short(cfg["min_duration_seconds"]))
+    if job.get("log"):
+        print("  log: %s" % job["log"])
+    print("  id:  %s   (agent-tqdm update %s --eta 40m --note '...')" % (job["id"], job["id"]))
+
+
+def cmd_start(args):
+    log = os.path.abspath(args.log) if args.log else None
+    with state_rw() as st:
+        job = _new_job(args, cmd=args.cmd, log=log, pid=args.pid)
+        job["id"] = new_id(st, args.name)
+        st["jobs"][job["id"]] = job
+        jid = job["id"]
+    if (log or args.pid) and not args.no_watch:
+        with state_rw() as st:
+            st["jobs"][jid]["watcher_pid"] = spawn_watcher(jid)
+    with state_rw() as st:
+        job = st["jobs"][jid]
+    _announce(job)
+    return 0
+
+
+def cmd_run(args):
+    cmd_parts = list(args.command)
+    if cmd_parts and cmd_parts[0] == "--":
+        cmd_parts = cmd_parts[1:]
+    if not cmd_parts:
+        raise SystemExit("nothing to run: agent-tqdm run --name train -- python train.py")
+    # Re-quote each argument: the caller's shell already tokenised them, so a
+    # naive join would break `-c "..."`, paths with spaces, and quoted flags.
+    # A single argument is passed through raw, so `run -- "a && b"` still works.
+    cmd = (" ".join(shlex.quote(p) for p in cmd_parts)
+           if len(cmd_parts) > 1 else cmd_parts[0])
+
+    ensure_dirs()
+    with state_rw() as st:
+        jid = new_id(st, args.name or slug(cmd_parts[0] if len(cmd_parts) == 1 else cmd_parts[-1]))
+        # reserve the id; "running" so a concurrent prune cannot reclaim it
+        st["jobs"][jid] = {"id": jid, "state": "running", "started": time.time()}
+
+    log = os.path.abspath(args.log) if args.log else os.path.join(LOGS, "%s.log" % jid)
+    exitf = log + ".exit"
+    for stale in (log, exitf):
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
+
+    wrapper = "%s > %s 2>&1; echo $? > %s" % (cmd, shlex.quote(log), shlex.quote(exitf))
+    proc = subprocess.Popen(
+        ["/bin/sh", "-c", wrapper],
+        cwd=args.cwd or os.getcwd(),
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    with state_rw() as st:
+        job = _new_job(args, cmd=cmd, log=log, pid=proc.pid)
+        job["id"] = jid
+        st["jobs"][jid] = job
+    wpid = spawn_watcher(jid)
+    with state_rw() as st:
+        st["jobs"][jid]["watcher_pid"] = wpid
+        job = dict(st["jobs"][jid])
+    _announce(job)
+    return 0
+
+
+def cmd_update(args):
+    with state_rw() as st:
+        jid = resolve(st, args.job)
+        job = st["jobs"][jid]
+        now = time.time()
+        if args.step is not None:
+            job["units"] = float(args.step)
+            job["step"] = args.step
+            record_sample(job, float(args.step), now)
+        if args.total is not None:
+            job["total"] = args.total
+            job["total_locked"] = True
+        if args.pct is not None:
+            job["pct"] = max(0.0, min(1.0, args.pct / 100.0))
+        if args.eta is not None:
+            secs = parse_duration(args.eta)
+            job["eta_end"] = now + secs
+            job["eta_prior_s"] = secs
+            # a fresh human/model estimate outranks a stale measured rate
+            if args.reset_rate:
+                job["samples"] = []
+        if args.note is not None:
+            job["note"] = args.note or None
+        if args.desc is not None:
+            job["desc"] = args.desc or None
+        if args.unit is not None:
+            job["unit"] = args.unit
+        if args.pattern is not None:
+            job["pattern"] = args.pattern or None
+        mon = build_monitor(args, job.get("monitor"))
+        if mon and mon != job.get("monitor"):
+            job["monitor"] = mon
+            if mon.get("kind") == "milestones":
+                job.setdefault("milestones_hit", [])
+                job["log_offset"] = 0        # rescan for stages already passed
+        if args.interval is not None:
+            job["interval_override"] = parse_duration(args.interval)
+        if args.force_show:
+            job["force_show"] = True
+        job["updated"] = now
+        out = dict(job)
+    if not args.quiet:
+        _announce(out)
+    return 0
+
+
+def cmd_finish(args, state):
+    with state_rw() as st:
+        jid = resolve(st, args.job)
+        job = st["jobs"][jid]
+        if state == "cancelled" and job.get("pid") and alive(job["pid"]):
+            try:
+                os.killpg(os.getpgid(job["pid"]), signal.SIGTERM)
+            except Exception:
+                try:
+                    os.kill(job["pid"], signal.SIGTERM)
+                except Exception:
+                    pass
+        code = getattr(args, "exit_code", None)
+        finalize(job, 0 if state == "done" else (code if code is not None else 1), time.time())
+        job["state"] = state
+        if getattr(args, "note", None):
+            job["note"] = args.note
+        out = dict(job)
+    _announce(out)
+    return 0
+
+
+def cmd_ls(args):
+    st = state_ro()
+    cfg = load_config()
+    jobs = sorted(st["jobs"].values(), key=lambda j: j.get("started") or 0)
+    if args.running:
+        jobs = [j for j in jobs if j.get("state") == "running"]
+    if args.json:
+        enriched = []
+        for j in jobs:
+            e = estimate(j)
+            enriched.append({
+                "id": j.get("id"), "state": j.get("state"), "desc": j.get("desc"),
+                "cmd": j.get("cmd"), "log": j.get("log"), "note": j.get("note"),
+                "unit": j.get("unit"), "step": j.get("step"), "total": j.get("total"),
+                "percent": round(e["frac"] * 100, 1) if e["frac"] is not None else None,
+                "elapsed_s": round(e["elapsed"]), "remaining_s": (
+                    round(e["remaining"]) if e["remaining"] is not None else None),
+                "elapsed_human": fmt_dur(e["elapsed"]),
+                "remaining_human": fmt_short(e["remaining"]),
+                "eta_clock": fmt_clock(e["eta_wall"]),
+                "eta_source": e["source"], "overdue": e["overdue"],
+                "total_estimate_s": round(e["total_est"]) if e.get("total_est") else None,
+                "total_estimate_human": fmt_short(e.get("total_est")),
+                "initial_estimate_human": fmt_short(j.get("initial_est_total_s")),
+                "monitor": describe_monitor(j),
+                "monitor_kind": (j.get("monitor") or {}).get("kind", "auto"),
+                "update_interval_human": fmt_short(j.get("interval_s")),
+                "next_update_in_s": (max(0, round(j["next_probe"] - time.time()))
+                                     if j.get("next_probe") else None),
+                "rate_per_s": e["rate"], "observations": e["nobs"],
+                "exit_code": j.get("exit_code"),
+                "progress_source": j.get("progress_source"),
+            })
+        print(json.dumps(enriched, indent=2))
+        return 0
+    if not jobs:
+        print("no tracked jobs. start one:  agent-tqdm run --name train --eta 2h -- python train.py")
+        return 0
+    for j in jobs:
+        print(render_line(j, cfg))
+    return 0
+
+
+def cmd_show(args):
+    st = state_ro()
+    jid = resolve(st, args.job)
+    job = st["jobs"][jid]
+    if args.json:
+        out = dict(job)
+        out["estimate"] = estimate(job)
+        print(json.dumps(out, indent=2, default=str))
+        return 0
+    cfg = load_config()
+    print(render_block(job, cfg, term_width()))
+    return 0
+
+
+def cmd_log(args):
+    st = state_ro()
+    job = st["jobs"][resolve(st, args.job)]
+    log = job.get("log")
+    if not log or not os.path.exists(log):
+        raise SystemExit("job %s has no log file" % job.get("id"))
+    text, _ = read_tail(log, 0, max_bytes=args.bytes)
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    print("\n".join(lines[-args.lines:]))
+    return 0
+
+
+def cmd_rm(args):
+    with state_rw() as st:
+        if args.all:
+            n = len(st["jobs"])
+            st["jobs"] = {}
+            print("removed %d job(s)" % n)
+            return 0
+        if args.finished:
+            gone = [k for k, v in st["jobs"].items() if v.get("state") != "running"]
+            for k in gone:
+                del st["jobs"][k]
+            print("removed %d finished job(s)" % len(gone))
+            return 0
+        for ref in args.job:
+            jid = resolve(st, ref)
+            del st["jobs"][jid]
+            print("removed %s" % jid)
+    return 0
+
+
+def term_width(default=100):
+    try:
+        import shutil
+        return shutil.get_terminal_size((default, 24)).columns
+    except Exception:
+        return default
+
+
+def cmd_statusline(args):
+    """Entry point wired into settings.json `statusLine`. Reads Claude's JSON on stdin."""
+    payload = {}
+    try:
+        if not sys.stdin.isatty():
+            payload = json.loads(sys.stdin.read() or "{}")
+    except Exception:
+        payload = {}
+    cfg = load_config()
+    width = args.width or int(payload.get("terminal_width") or 0) or term_width(120)
+    st = state_ro()
+    jobs = pick_jobs(st, cfg, payload.get("session_id"))
+
+    lines = []
+    for job in jobs[: cfg["max_jobs"]]:
+        lines.append(render_line(job, cfg, width=width))
+    extra = len(jobs) - cfg["max_jobs"]
+    if extra > 0:
+        lines.append(paint("  +%d more job(s) · agent-tqdm ls" % extra, "dim", cfg["color"]))
+
+    if not lines and cfg["show_context_line"]:
+        lines.append(context_line(payload, cfg))
+    print("\n".join(lines))
+    return 0
+
+
+def context_line(payload, cfg):
+    """What the statusline shows when nothing is running - keep the usual context."""
+    color = cfg["color"]
+    bits = []
+    model = (payload.get("model") or {}).get("display_name")
+    if model:
+        bits.append(model)
+    cwd = (payload.get("workspace") or {}).get("current_dir") or payload.get("cwd") or os.getcwd()
+    bits.append(os.path.basename(cwd.rstrip("/")) or cwd)
+    try:
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd,
+            stderr=subprocess.DEVNULL, timeout=0.4).decode().strip()
+        if branch:
+            bits.append("⎇ " + branch)
+    except Exception:
+        pass
+    return paint("⏺ " + "  ·  ".join(bits), "dim", color)
+
+
+def cmd_watch(args):
+    """Full-terminal dashboard. Run it in a second pane next to Claude Code."""
+    cfg = load_config()
+    cfg["bar_width"] = args.bar_width or max(20, min(48, term_width() - 60))
+    try:
+        while True:
+            st = state_ro()
+            jobs = pick_jobs(st, cfg, apply_visibility=False)
+            w = term_width()
+            out = ["\033[H\033[J", paint("agent-tqdm  ·  %s" % time.strftime("%H:%M:%S"), "dim", cfg["color"]), ""]
+            if not jobs:
+                out.append(paint("  no active jobs", "dim", cfg["color"]))
+            for j in jobs:
+                out.append(render_block(j, cfg, w))
+                out.append("")
+            out.append(paint("  ctrl-c to exit", "dim", cfg["color"]))
+            sys.stdout.write("\n".join(out) + "\n")
+            sys.stdout.flush()
+            if args.once:
+                return 0
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        sys.stdout.write("\n")
+        return 0
+
+
+def cmd_demo(args):
+    """End-to-end smoke test: launch a fake 'training run' and track it for real."""
+    ensure_dirs()
+    script = os.path.join(ROOT, "_demo_job.py")
+    with open(script, "w") as f:
+        f.write(
+            "import time, sys\n"
+            "N=%d\n"
+            "for i in range(1, N+1):\n"
+            "    time.sleep(%f)\n"
+            "    print('Epoch %%d/%%d  loss %%.3f' %% (i, N, 2.5/(i**0.5)), flush=True)\n"
+            "print('done')\n" % (args.steps, args.step_seconds)
+        )
+    class A(object):
+        pass
+    a = A()
+    a.name = "demo"
+    a.desc = "simulated training run"
+    a.eta = args.eta
+    a.total = args.steps
+    a.unit = "ep"
+    a.log = None
+    a.pattern = None
+    a.note = "demo job"
+    a.cwd = None
+    a.interval = args.interval      # demos update fast so there is something to see
+    a.force_show = True             # and are short, so pin them past the length floor
+    a.command = [sys.executable, script]
+    cmd_run(a)
+    print("\nA real job updates every %s / 5%% of its estimate; this demo is forced to %s"
+          % (fmt_short(load_config()["min_interval_seconds"]), args.interval))
+    print("watch it live:   agent-tqdm watch")
+    print("or just look at your Claude Code statusline.")
+    return 0
+
+
+def cmd_inbox(args):
+    """Crash reports waiting to be handed to a Claude session."""
+    if args.drain:
+        ev = take_crash(os.environ.get("CLAUDE_SESSION_ID"))
+        if not ev:
+            print("no undelivered crash reports")
+            return 0
+        print(format_crash(ev))
+        return 0
+    evs = state_ro().get("inbox", [])
+    if args.json:
+        print(json.dumps(evs, indent=2))
+        return 0
+    if not evs:
+        print("no crash reports")
+        return 0
+    cfg = load_config()
+    for e in evs[-args.limit:]:
+        print("%s %-16s %s  %-34s %s" % (
+            cfg["glyph_failed"], e.get("job"),
+            time.strftime("%m-%d %H:%M", time.localtime(e.get("ts") or 0)),
+            e.get("reason"), "PENDING" if not e.get("delivered") else "delivered"))
+    return 0
+
+
+def cmd_monitors(args):
+    print("Ways a job's progress can be observed (pick one at start):\n")
+    print(MONITOR_HELP)
+    cfg = load_config()
+    print("Update cadence: every max(%s, %d%% of the estimated total).\n"
+          "Override per job with --interval, globally with\n"
+          "  agent-tqdm config --set min_interval_seconds=%d --set interval_fraction=%s"
+          % (fmt_short(cfg["min_interval_seconds"]), int(cfg["interval_fraction"] * 100),
+             cfg["min_interval_seconds"], cfg["interval_fraction"]))
+    return 0
+
+
+def _fmt_val(v):
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, str):
+        return repr(v) if (v == "" or v.strip() != v) else v
+    return str(v)
+
+
+def cmd_config(args):
+    ensure_dirs()
+    if args.path:
+        print(CONFIG)
+        return 0
+
+    user = {}
+    try:
+        with open(CONFIG) as f:
+            user = json.load(f)
+    except Exception:
+        pass
+
+    if args.edit:
+        if not os.path.exists(CONFIG):
+            with open(CONFIG, "w") as f:
+                json.dump(user, f, indent=2)
+        subprocess.call([os.environ.get("EDITOR", "vi"), CONFIG])
+        load_config(force=True)
+        return 0
+
+    changed = False
+    if args.reset:
+        user, changed = {}, True
+    if args.preset:
+        user.update(CONFIG_PRESETS[args.preset])
+        changed = True
+    for k in (args.unset or []):
+        if k not in CONFIG_SPEC:
+            raise SystemExit(_unknown_key(k))
+        user.pop(k, None)
+        changed = True
+    for pair in (args.set or []):
+        if "=" not in pair:
+            raise SystemExit("--set expects KEY=VALUE, got %r" % pair)
+        k, v = pair.split("=", 1)
+        k = k.strip()
+        if k not in CONFIG_SPEC:
+            raise SystemExit(_unknown_key(k))
+        try:
+            user[k] = coerce(k, v)
+        except ValueError as ex:
+            raise SystemExit("bad value for %s: %s\n  %s" % (k, ex, CONFIG_SPEC[k]["help"]))
+        changed = True
+
+    if changed:
+        with open(CONFIG, "w") as f:
+            json.dump(user, f, indent=2, sort_keys=True)
+    cfg = load_config(force=True)
+
+    if args.json:
+        print(json.dumps(cfg, indent=2, sort_keys=True))
+        return 0
+
+    for group, title in CONFIG_GROUPS:
+        keys = sorted(k for k, s in CONFIG_SPEC.items() if s["group"] == group)
+        if not keys:
+            continue
+        print("\n%s" % title)
+        for k in keys:
+            spec = CONFIG_SPEC[k]
+            mine = k in user
+            default_hint = ""
+            if mine and cfg[k] != spec["default"]:
+                default_hint = "  (default %s)" % _fmt_val(spec["default"])
+            print("  %s %-22s %-10s %s%s" % (
+                "*" if mine else " ", k, _fmt_val(cfg[k]), spec["help"], default_hint))
+
+    print("\n  * = set by you.  File: %s" % CONFIG)
+    print("  change:  agent-tqdm config --set bar_width=30 --set style=tqdm")
+    print("  revert:  agent-tqdm config --unset bar_width   |   --reset")
+    print("  presets: %s" % "  ".join("--preset %s" % p for p in sorted(CONFIG_PRESETS)))
+    print("  env:     AGENT_TQDM_<KEY>=value overrides any key for one command")
+    print("  see it:  agent-tqdm preview")
+    return 0
+
+
+def _unknown_key(k):
+    near = difflib.get_close_matches(k, list(CONFIG_SPEC), 3, 0.5)
+    msg = "unknown setting %r" % k
+    if near:
+        msg += " - did you mean %s?" % ", ".join(near)
+    return msg + "\nrun `agent-tqdm config` to see every setting"
+
+
+def cmd_preview(args):
+    """Render sample bars with the current settings, so they can be tuned
+    without waiting on a real job."""
+    cfg = load_config(force=True)
+    if args.set:
+        for pair in args.set:
+            k, v = pair.split("=", 1)
+            if k in CONFIG_SPEC:
+                cfg[k] = coerce(k, v)
+    apply_theme(cfg)
+    now = time.time()
+    samples = [[now - 600 + i * 12, i] for i in range(51)]
+    demo = [
+        {"id": "training", "state": "running", "started": now - 600, "total": 100,
+         "unit": "ep", "units": 50.0, "eta_end": now + 700, "samples": samples,
+         "initial_est_total_s": 900, "note": "eval every 5 ep"},
+        {"id": "no-counter", "state": "running", "started": now - 900,
+         "eta_end": now + 900, "unit": "", "samples": []},
+        {"id": "unknown", "state": "running", "started": now - 120, "unit": "", "samples": []},
+        {"id": "finished", "state": "done", "started": now - 1400, "ended": now - 5,
+         "total": 100, "unit": "ep", "units": 100.0, "samples": samples},
+        {"id": "crashed", "state": "failed", "started": now - 700, "ended": now - 5,
+         "exit_code": 137, "total": 100, "unit": "ep", "units": 61.0, "samples": samples},
+    ]
+    print("current settings, rendered:\n")
+    for j in demo:
+        print("  " + render_line(j, cfg, now=now))
+    print("\nstyles:")
+    for style in sorted(STYLES):
+        c = dict(cfg)
+        c["style"] = style
+        c["fill_char"] = c["track_char"] = c["left_cap"] = c["right_cap"] = ""
+        print("  %-8s %s" % (style, draw_bar(0.56, c, "run")))
+    if args.colors:
+        print("\n256-colour codes for the color_* settings:")
+        for row in range(0, 256, 16):
+            print("  " + " ".join("\033[38;5;%dm%3d\033[0m" % (c, c)
+                                  for c in range(row, min(row + 16, 256))))
+    return 0
+
+
+def cmd_doctor(args):
+    ensure_dirs()
+    cfg = load_config()
+    print("state file : %s (%s)" % (STATE, "exists" if os.path.exists(STATE) else "not created yet"))
+    print("logs dir   : %s" % LOGS)
+    print("python     : %s" % sys.version.split()[0])
+    st = state_ro()
+    running = [j for j in st["jobs"].values() if j.get("state") == "running"]
+    print("jobs       : %d total, %d running" % (len(st["jobs"]), len(running)))
+    for j in running:
+        w = j.get("watcher_pid")
+        print("  %-16s watcher=%s%s  pid=%s%s" % (
+            j.get("id"), w, "" if alive(w) else " (DEAD)",
+            j.get("pid"), "" if alive(j.get("pid")) else " (exited)"))
+    settings = os.path.join(HOME, ".claude", "settings.json")
+    wired = False
+    try:
+        with open(settings) as f:
+            wired = "agent_tqdm" in json.dumps(json.load(f).get("statusLine", {}))
+    except Exception:
+        pass
+    print("statusline : %s" % ("wired into settings.json" if wired else
+                               "NOT wired - run scripts/install-statusline.sh"))
+    print("config     : %s" % json.dumps(cfg))
+    return 0
+
+
+# ----------------------------------------------------------------------- main
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="agent-tqdm",
+        description="tqdm-style progress bars for long-running jobs, for Claude Code.")
+    sub = p.add_subparsers(dest="cmd")
+
+    def monitor_flags(sp):
+        sp.add_argument("--monitor", choices=MONITOR_KINDS,
+                        help="how to observe progress (see: agent-tqdm monitors)")
+        sp.add_argument("--milestone", action="append", metavar="TEXT",
+                        help="a stage to look for in the log (repeatable, in order)")
+        sp.add_argument("--milestones", metavar="A;B;C",
+                        help="';'-separated stages, in order")
+        sp.add_argument("--glob", metavar="PATTERN",
+                        help="files monitor: glob of the outputs being produced")
+        sp.add_argument("--path", help="size monitor: file or directory to measure")
+        sp.add_argument("--target-size", metavar="SIZE",
+                        help="size monitor: expected final size, e.g. 12GB")
+        sp.add_argument("--probe", metavar="CMD",
+                        help="probe monitor: shell command printing k/N, k or NN%%")
+        sp.add_argument("--interval", metavar="DUR",
+                        help="override the update cadence, e.g. 5m")
+
+    def common(sp):
+        sp.add_argument("--eta", help="estimated time REMAINING, e.g. 45m, 2h30m, 90s")
+        sp.add_argument("--total", type=int, help="total steps/epochs, if known")
+        sp.add_argument("--unit", default=None, help="unit label, e.g. ep, step, img")
+        sp.add_argument("--desc", help="human description of the job")
+        sp.add_argument("--note", help="short status note shown on the bar")
+        sp.add_argument("--pattern", help="custom regex with (?P<step>) (?P<total>) groups")
+        sp.add_argument("--log", help="log file to tail for progress")
+        sp.add_argument("--force-show", action="store_true",
+                        help="show on the statusline even if it is a short job")
+
+    sp = sub.add_parser("run", help="launch a command detached and track it")
+    sp.add_argument("--name", help="short job name (default: derived from the command)")
+    sp.add_argument("--cwd", help="working directory for the command")
+    common(sp)
+    monitor_flags(sp)
+    sp.add_argument("command", nargs=argparse.REMAINDER, help="-- the command to run")
+    sp.set_defaults(fn=cmd_run)
+
+    sp = sub.add_parser("start", help="track an already-running job (by pid and/or log)")
+    sp.add_argument("name")
+    sp.add_argument("--pid", type=int, help="pid to watch for completion")
+    sp.add_argument("--cmd", help="command string, for display")
+    sp.add_argument("--no-watch", action="store_true", help="do not spawn the log watcher")
+    common(sp)
+    monitor_flags(sp)
+    sp.set_defaults(fn=cmd_start)
+
+    sp = sub.add_parser("update", help="revise progress or the ETA (Claude calls this)")
+    sp.add_argument("job")
+    sp.add_argument("--step", type=int, help="current step or count")
+    sp.add_argument("--total", type=int)
+    sp.add_argument("--pct", type=float, help="percent complete, 0-100")
+    sp.add_argument("--eta", help="revised time REMAINING from now")
+    sp.add_argument("--reset-rate", action="store_true",
+                    help="discard measured samples (use after a phase change)")
+    sp.add_argument("--note")
+    sp.add_argument("--desc")
+    sp.add_argument("--unit")
+    sp.add_argument("--pattern")
+    sp.add_argument("--quiet", action="store_true")
+    sp.add_argument("--force-show", action="store_true")
+    monitor_flags(sp)
+    sp.set_defaults(fn=cmd_update)
+
+    for name, state in (("done", "done"), ("fail", "failed"), ("cancel", "cancelled")):
+        sp = sub.add_parser(name, help="mark a job %s" % state)
+        sp.add_argument("job")
+        sp.add_argument("--note")
+        if name == "fail":
+            sp.add_argument("--exit-code", type=int, default=1)
+        sp.set_defaults(fn=(lambda s: (lambda a: cmd_finish(a, s)))(state))
+
+    sp = sub.add_parser("ls", help="list tracked jobs")
+    sp.add_argument("--json", action="store_true", help="machine-readable (Claude reads this)")
+    sp.add_argument("--running", action="store_true")
+    sp.set_defaults(fn=cmd_ls)
+
+    sp = sub.add_parser("show", help="details for one job")
+    sp.add_argument("job")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(fn=cmd_show)
+
+    sp = sub.add_parser("log", help="tail a tracked job's log")
+    sp.add_argument("job")
+    sp.add_argument("-n", "--lines", type=int, default=40)
+    sp.add_argument("--bytes", type=int, default=262144)
+    sp.set_defaults(fn=cmd_log)
+
+    sp = sub.add_parser("rm", help="forget jobs")
+    sp.add_argument("job", nargs="*")
+    sp.add_argument("--all", action="store_true")
+    sp.add_argument("--finished", action="store_true")
+    sp.set_defaults(fn=cmd_rm)
+
+    sp = sub.add_parser("statusline", help="render for the Claude Code statusline")
+    sp.add_argument("--width", type=int)
+    sp.set_defaults(fn=cmd_statusline)
+
+    sp = sub.add_parser("watch", help="live dashboard for a second terminal pane")
+    sp.add_argument("--interval", type=float, default=1.0)
+    sp.add_argument("--bar-width", type=int)
+    sp.add_argument("--once", action="store_true")
+    sp.set_defaults(fn=cmd_watch)
+
+    sp = sub.add_parser("demo", help="run a simulated job end-to-end")
+    sp.add_argument("--steps", type=int, default=40)
+    sp.add_argument("--step-seconds", type=float, default=1.5)
+    sp.add_argument("--eta", default="30s", help="deliberately-wrong prior, to show blending")
+    sp.add_argument("--interval", default="2s", help="probe cadence for the demo")
+    sp.set_defaults(fn=cmd_demo)
+
+    sp = sub.add_parser("config", help="show or change any setting")
+    sp.add_argument("--set", action="append", metavar="KEY=VALUE",
+                    help="change a setting (repeatable)")
+    sp.add_argument("--unset", action="append", metavar="KEY",
+                    help="restore one setting to its default")
+    sp.add_argument("--preset", choices=sorted(CONFIG_PRESETS),
+                    help="apply a bundle of settings")
+    sp.add_argument("--reset", action="store_true", help="restore every default")
+    sp.add_argument("--json", action="store_true", help="print the effective config as JSON")
+    sp.add_argument("--path", action="store_true", help="print the config file path")
+    sp.add_argument("--edit", action="store_true", help="open the config file in $EDITOR")
+    sp.set_defaults(fn=cmd_config)
+
+    sp = sub.add_parser("preview", help="render sample bars with the current settings")
+    sp.add_argument("--set", action="append", metavar="KEY=VALUE",
+                    help="try a setting without saving it")
+    sp.add_argument("--colors", action="store_true", help="also print the 256-colour codes")
+    sp.set_defaults(fn=cmd_preview)
+
+    sp = sub.add_parser("inbox", help="crash reports queued for the Claude session")
+    sp.add_argument("--drain", action="store_true",
+                    help="claim and print the next undelivered report")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--limit", type=int, default=10)
+    sp.set_defaults(fn=cmd_inbox)
+
+    sp = sub.add_parser("monitors", help="explain the ways progress can be observed")
+    sp.set_defaults(fn=cmd_monitors)
+
+    sp = sub.add_parser("doctor", help="check the install")
+    sp.set_defaults(fn=cmd_doctor)
+
+    sp = sub.add_parser("_watch", help=argparse.SUPPRESS)
+    sp.add_argument("job")
+    sp.add_argument("--interval", type=float, default=None,
+                    help="force a fixed probe interval (default: the cadence policy)")
+    sp.add_argument("--max-idle", type=float, default=86400.0)
+    sp.set_defaults(fn=cmd_watch_daemon)
+
+    return p
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    if not getattr(args, "fn", None):
+        build_parser().print_help()
+        return 1
+    return args.fn(args) or 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except BrokenPipeError:
+        pass
+    except KeyboardInterrupt:
+        sys.exit(130)

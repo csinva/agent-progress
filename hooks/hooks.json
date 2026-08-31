@@ -1,0 +1,14 @@
+{
+  "description": "agent-tqdm: surface tracked jobs to Claude, and deliver crash reports into the session",
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/inject_status.py\" SessionStart", "timeout": 10 } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/inject_status.py\" UserPromptSubmit", "timeout": 10 } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/inject_status.py\" Stop", "timeout": 10 } ] }
+    ]
+  }
+}

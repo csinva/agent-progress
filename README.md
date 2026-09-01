@@ -181,27 +181,38 @@ agent-tqdm autotrack 'python train.py --epochs 50'
 
 | `auto_track` | behavior |
 | --- | --- |
-| `instruct` *(default)* | the command is stopped once, and Claude is told to relaunch it through `agent-tqdm` — choosing a monitor and an estimate first |
-| `wrap` | the command is rewritten silently into `agent-tqdm run …`; no round-trip, but the job starts with no estimate until Claude sets one |
+| `wrap` *(default)* | the command is rewritten into `agent-tqdm run …` and runs immediately — tracked, detached, no round-trip |
+| `instruct` | the command is stopped once, and Claude is told to relaunch it through `agent-tqdm`, choosing a monitor and an estimate first |
 | `off` | never intervene |
 
-`instruct` costs one round-trip and buys the two things only a model can supply:
-a guess at how long the job will take, and a decision about what to watch for
-progress. `wrap` is instant but starts blind — Claude is prompted to fill the
-estimate in afterwards.
+Under `wrap` the job starts with **no estimate** — a hook cannot produce one.
+Claude is handed the job id and told to fill it in, and is reminded on each
+prompt while any auto-tracked job still lacks one. The bar works from the first
+moment either way: progress comes from the log, and the ETA follows measured
+throughput once there is enough of it.
 
-Any given command is interrupted **at most once per session**. If Claude decides
-it needs the output inline after all, it re-runs the command unchanged and it
-goes straight through. Nothing is ever silently allowed past a permission
-prompt: in `wrap` mode the rewritten command still goes through the normal
-approval flow.
+The trade is one round-trip. `instruct` pays it and gets a job that is correct
+from the first frame — an estimate, and a monitor chosen for that job. `wrap`
+starts instantly and fills the estimate in afterwards. Under `instruct`, a given
+command is interrupted **at most once per session**, so if Claude decides it
+needs the output inline it re-runs the command unchanged and it goes through.
+
+One thing to know about `wrap`: the command is detached, so **its output no
+longer appears inline** — it goes to the job's log, and Claude reads it with
+`agent-tqdm log <id>`. That is the point for a two-hour training run, and a
+nuisance for something you wanted to watch. Set `auto_track=instruct` (or
+`--preset guided`) if you would rather be asked.
+
+Nothing is ever silently allowed past a permission prompt: the rewritten command
+still goes through the normal approval flow.
 
 Turning it off, wholly or in part:
 
 ```bash
-agent-tqdm config --set auto_track=off
-agent-tqdm config --set auto_track_ignore='^\./scripts/quick'   # never catch these
-AGENT_TQDM_NO_AUTO=1 <command>                                 # just this once
+agent-tqdm config --set auto_track=instruct            # ask before taking over
+agent-tqdm config --set auto_track=off                 # leave everything alone
+agent-tqdm config --set auto_track_ignore='^\./scripts/quick'
+AGENT_TQDM_NO_AUTO=1 <command>                         # just this once
 ```
 
 ## What counts as progress

@@ -59,11 +59,28 @@ def emit(payload):
     print(json.dumps(payload))
 
 
-def main():
+def read_payload(timeout=3.0):
+    """The JSON Claude Code sends on stdin.
+
+    Guarded with select(): a hook is handed its payload on a pipe that is then
+    closed, but if it is ever run with stdin left open - by hand, or by a
+    harness that forgets - a bare read() would block until the hook is killed.
+    Returning an empty payload instead makes the hook a no-op, which is the
+    right failure for something that sits in front of every command."""
     try:
-        data = json.loads(sys.stdin.read() or "{}")
+        if sys.stdin.isatty():
+            return {}
+        import select
+        ready, _w, _e = select.select([sys.stdin], [], [], timeout)
+        if not ready:
+            return {}
+        return json.loads(sys.stdin.read() or "{}")
     except Exception:
-        return 0
+        return {}
+
+
+def main():
+    data = read_payload()
     if data.get("tool_name") != "Bash":
         return 0
 

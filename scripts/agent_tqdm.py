@@ -128,9 +128,9 @@ CONFIG_SPEC = {
 
     # Automatic tracking: catch long jobs as they are launched, with no
     # /agent-tqdm:track needed. See `agent-tqdm autotrack`.
-    "auto_track": _spec("auto", "instruct",
+    "auto_track": _spec("auto", "wrap",
                         "what to do when a long-running command is launched", "str",
-                        choices=["instruct", "wrap", "off"]),
+                        choices=["wrap", "instruct", "off"]),
     "auto_track_timeout_seconds": _spec(
         "auto", 120,
         "treat a command given at least this long a timeout as long-running", lo=0),
@@ -166,7 +166,7 @@ CONFIG_PRESETS = {
     "plain": {"style": "ascii", "color": False, "show_spinner": False},
     "quiet": {"min_duration_seconds": 600, "max_jobs": 1, "notify": False},
     "manual": {"auto_track": "off"},
-    "hands-off": {"auto_track": "wrap"},
+    "guided": {"auto_track": "instruct"},
 }
 
 
@@ -1677,9 +1677,17 @@ def _announce(job):
         describe_monitor(job), fmt_short(iv),
         " (5%% of the %s estimate)" % fmt_short(est)
         if est and iv > cfg.get("min_interval_seconds", 120) else ""))
-    if job.get("auto_launched") and not job.get("eta_end"):
-        print("  tracked automatically. no estimate yet - set one with:")
-        print("    agent-tqdm update %s --eta <duration>" % job["id"])
+    if job.get("auto_launched"):
+        print("  Tracked automatically, and now running detached - this command will not")
+        print("  print its output here. To work with it:")
+        print("    agent-tqdm log %s -n 40        read what it has printed so far"
+              % job["id"])
+        print("    agent-tqdm ls --json              progress, ETA and state")
+        if not job.get("eta_end"):
+            print("    agent-tqdm update %s --eta <duration>   give it an estimate"
+                  % job["id"])
+            print("  It has no estimate yet. Work out roughly how long it should take and")
+            print("  set one - the bar has no ETA until you do.")
     if not job_visible(job, cfg):
         print("  (short job: tracked, but under the %s statusline threshold - "
               "--force-show to pin it)" % fmt_short(cfg["min_duration_seconds"]))
@@ -2060,9 +2068,10 @@ def cmd_autotrack(args):
     cfg = load_config()
     if not args.command:
         print("Auto-tracking is %s.\n" % cfg["auto_track"])
+        print("  wrap      rewrite the command silently so it is tracked, and let it")
+        print("            run; Claude fills in the estimate afterwards (default)")
         print("  instruct  interrupt the command once and ask Claude to relaunch it")
-        print("            through agent-tqdm, with an estimate and a monitor (default)")
-        print("  wrap      rewrite it silently; no estimate until Claude sets one")
+        print("            through agent-tqdm, with an estimate and a monitor already")
         print("  off       never intervene\n")
         print("Caught when a command is backgrounded, is given a timeout of %s or\n"
               "more, or matches one of %d built-in patterns.\n"

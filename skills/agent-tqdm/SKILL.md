@@ -23,35 +23,53 @@ Use `agent-tqdm`. If it is not on PATH, use
 `agent-tqdm autotrack '<command>'` shows whether a given command would be caught
 automatically, and why.
 
-## You will usually be told, not asked
+## It usually starts without you
 
-Long-running commands are caught automatically. When you run something through
-Bash that looks like a long job, a hook stops it once and hands you a note
-saying so. **That note is the trigger** - nobody has to invoke this skill by
-name, and you should not wait to be asked.
+Long-running commands are tracked automatically. When you run something through
+Bash that looks like a long job, a hook rewrites it into `agent-tqdm run`, so
+**the job is already tracked and already detached** by the time you see the
+result. You did not ask for this and cannot prevent it per-command; what matters
+is how you handle it.
 
-What to do when it happens:
+The tool result you get back is a launch banner, not the command's output. It
+tells you the job id and where its log is. Two consequences:
 
-1. Work out how progress can be observed, and roughly how long it will take
-   (the two sections below).
-2. Relaunch through `agent-tqdm run` with those flags.
-3. Say in one line what you estimated and what you are watching. Then carry on.
+- **The command's output is not in front of you.** Read it with
+  `agent-tqdm log <id> -n 40`, and the job's state with `agent-tqdm ls --json`.
+  Do not re-run the command to see its output; it is running right now.
+- **The job has no estimate.** The hook cannot make one - that is your job.
+  Work out roughly how long it should take and set it:
 
-If the job genuinely should not be tracked - it is quick, or you need its output
-in front of you to decide what to do next - run the original command again
-unchanged. It goes through untouched the second time; the interruption happens
-at most once per command.
+  ```bash
+  agent-tqdm update <id> --eta 40m --note "what it is doing"
+  ```
 
-You can also start tracking without being prompted, and should whenever you are
-about to launch something slow. Being told is the safety net, not the mechanism.
+  Do this promptly, in the same turn where you can. Until you do, the bar has no
+  ETA and cannot tell anyone when the job will finish. You will also be reminded
+  on your next prompt while any auto-tracked job still lacks one.
 
-In `wrap` mode the command is rewritten silently instead, and you will see a job
-that is already running with **no estimate**. When you notice one - the bar says
-so, and so does the job list - give it one as soon as you can:
+While you are there, check the monitor it guessed. The hook picks none, so the
+job falls back to reading progress markers out of the log. If the command
+produces no such markers but does something else observable - writing files,
+growing one file, printing stage names - say so:
 
 ```bash
-agent-tqdm update <id> --eta 40m --note "what it is doing"
+agent-tqdm update <id> --monitor files --glob 'out/*.parquet' --total 500
 ```
+
+You can also start tracking yourself, with `agent-tqdm run`, whenever you are
+about to launch something slow and want the estimate right from the start. That
+is better than letting the hook catch it, because the bar is correct from the
+first frame.
+
+If a job should not have been tracked - it turned out to be quick, or you needed
+its output to decide what to do next - just let it finish and read the log. It
+is not worth undoing.
+
+Under the `instruct` setting the hook stops the command instead and asks you to
+relaunch it yourself with an estimate and a monitor already chosen. If you get
+that message, follow it: it is the same two decisions, made before the job
+starts rather than after.
 
 ## Step 1: how will progress be observed?
 

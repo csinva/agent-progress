@@ -132,6 +132,7 @@ agent-tqdm update ingest --eta 90m --note "hit the slow shards"
 agent-tqdm watch                 # live dashboard for a second pane
 agent-tqdm inbox                 # crash reports
 agent-tqdm monitors              # explain the monitor kinds
+agent-tqdm autotrack '<cmd>'     # would this be tracked automatically?
 agent-tqdm preview               # see your settings rendered
 agent-tqdm demo                  # simulated job, end to end
 agent-tqdm doctor                # check the install
@@ -141,6 +142,67 @@ agent-tqdm doctor                # check the install
 records the real exit code.
 
 ---
+
+## It triggers itself
+
+You do not have to ask for a progress bar. When a long-running command is
+launched through Claude Code, a `PreToolUse` hook catches it and it gets tracked
+— no slash command, no "please track this".
+
+A command is caught when **any** of these is true:
+
+- it was launched in the background,
+- it was given a timeout of two minutes or more — whoever wrote the command has
+  already said it is slow,
+- it matches one of ~30 built-in patterns: training scripts, `torchrun`,
+  `accelerate launch`, `deepspeed`, sweeps, `spark-submit`, `terraform apply`,
+  `ansible-playbook`, `docker build`, `rsync`, `aws s3 sync`, `huggingface-cli
+  download`, `dvc repro`, `dbt run`, `pg_restore`, `git clone`, and so on.
+
+Test suites and ordinary builds — `pytest`, `npm test`, `make`, `cargo build` —
+are **not** caught by default. They are quick as often as they are slow, Claude
+usually wants their output in front of it, and anything under two minutes would
+not earn a bar anyway. They are still caught if you background them or give them
+a long timeout, and you can opt in permanently:
+
+```bash
+agent-tqdm config --set auto_track_patterns='\bpytest\b;\bmake\b;\bgo\s+test\b'
+```
+
+Check any command against the detector:
+
+```bash
+agent-tqdm autotrack 'python train.py --epochs 50'
+#   TRACK        python train.py --epochs 50
+#                it looks like a training or evaluation script
+```
+
+### What happens when one is caught
+
+| `auto_track` | behavior |
+| --- | --- |
+| `instruct` *(default)* | the command is stopped once, and Claude is told to relaunch it through `agent-tqdm` — choosing a monitor and an estimate first |
+| `wrap` | the command is rewritten silently into `agent-tqdm run …`; no round-trip, but the job starts with no estimate until Claude sets one |
+| `off` | never intervene |
+
+`instruct` costs one round-trip and buys the two things only a model can supply:
+a guess at how long the job will take, and a decision about what to watch for
+progress. `wrap` is instant but starts blind — Claude is prompted to fill the
+estimate in afterwards.
+
+Any given command is interrupted **at most once per session**. If Claude decides
+it needs the output inline after all, it re-runs the command unchanged and it
+goes straight through. Nothing is ever silently allowed past a permission
+prompt: in `wrap` mode the rewritten command still goes through the normal
+approval flow.
+
+Turning it off, wholly or in part:
+
+```bash
+agent-tqdm config --set auto_track=off
+agent-tqdm config --set auto_track_ignore='^\./scripts/quick'   # never catch these
+AGENT_TQDM_NO_AUTO=1 <command>                                 # just this once
+```
 
 ## What counts as progress
 
@@ -288,6 +350,7 @@ AGENT_TQDM_BAR_WIDTH=40 AGENT_TQDM_STYLE=bars agent-tqdm ls
 | **color** | `color`, `color_running`, `color_done`, `color_failed`, `color_warn`, `color_dim`, `color_track`, `color_text` |
 | **estimation** | `blend_full_at`, `rate_window`, `rate_min_span`, `drift_threshold` |
 | **behavior** | `notify`, `notify_sound_ok`, `notify_sound_fail`, `crash_alert` |
+| **auto** | `auto_track`, `auto_track_timeout_seconds`, `auto_track_background`, `auto_track_patterns`, `auto_track_ignore` |
 
 Styles are `blocks`, `tqdm`, `ascii`, `dots`, `bars`, and any of them can be
 overridden character by character:
@@ -305,7 +368,8 @@ agent-tqdm config --set style=bars --set fill_char=▓ --set track_char=░
 skills/agent-tqdm/SKILL.md   teaches Claude when and how to use it
 commands/track.md            /agent-tqdm:track
 commands/progress.md         /agent-tqdm:progress
-hooks/hooks.json             SessionStart, UserPromptSubmit, Stop
+hooks/hooks.json             PreToolUse, SessionStart, UserPromptSubmit, Stop
+hooks/auto_track.py          catches long commands as they are launched
 hooks/inject_status.py       job status into context; crash delivery
 scripts/agent_tqdm.py        the engine - state, monitors, estimation, rendering
 scripts/install-statusline.sh

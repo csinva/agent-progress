@@ -17,6 +17,7 @@ import errno
 import difflib
 import fcntl
 import glob as globmod
+import hashlib
 import json
 import os
 import re
@@ -124,6 +125,21 @@ CONFIG_SPEC = {
     "notify": _spec("behavior", True, "desktop notification on completion (macOS)", "bool"),
     "crash_alert": _spec("behavior", True,
                          "interrupt Claude when a job crashes, so it tells you right away", "bool"),
+
+    # Automatic tracking: catch long jobs as they are launched, with no
+    # /agent-tqdm:track needed. See `agent-tqdm autotrack`.
+    "auto_track": _spec("auto", "instruct",
+                        "what to do when a long-running command is launched", "str",
+                        choices=["instruct", "wrap", "off"]),
+    "auto_track_timeout_seconds": _spec(
+        "auto", 120,
+        "treat a command given at least this long a timeout as long-running", lo=0),
+    "auto_track_background": _spec(
+        "auto", True, "also catch commands launched in the background", "bool"),
+    "auto_track_patterns": _spec(
+        "auto", "", "extra ';'-separated regexes that mean 'this is a long job'", "str"),
+    "auto_track_ignore": _spec(
+        "auto", "", "';'-separated regexes to never auto-track", "str"),
     "notify_sound_ok": _spec("behavior", "Glass", "sound for a successful finish", "str"),
     "notify_sound_fail": _spec("behavior", "Basso", "sound for a failure", "str"),
 }
@@ -138,6 +154,7 @@ CONFIG_GROUPS = [
     ("color", "Color (256-color codes)"),
     ("estimation", "Estimation"),
     ("behavior", "Behavior"),
+    ("auto", "Automatic tracking"),
 ]
 
 CONFIG_PRESETS = {
@@ -148,6 +165,8 @@ CONFIG_PRESETS = {
     "tqdm": {"style": "tqdm", "show_eta_clock": False, "show_drift": False, "bar_width": 24},
     "plain": {"style": "ascii", "color": False, "show_spinner": False},
     "quiet": {"min_duration_seconds": 600, "max_jobs": 1, "notify": False},
+    "manual": {"auto_track": "off"},
+    "hands-off": {"auto_track": "wrap"},
 }
 
 
@@ -885,6 +904,205 @@ def pick_jobs(st, cfg, session_id=None, apply_visibility=True):
     return out
 
 
+# --------------------------------------------------------------- auto-tracking
+#
+# Deciding, from a shell command alone, whether it is worth a progress bar.
+#
+# Two rules govern everything here. Missing a long job is a small loss - the
+# user simply gets no bar, as before. Catching a short one is a real cost: an
+# interrupted tool call for something that would have finished already. So the
+# evidence has to be good, and anything ambiguous is left alone.
+
+# Signals that cost nothing to trust, because they are the caller's own words:
+# a command handed a long timeout, or explicitly sent to the background, has
+# already been declared slow by whoever wrote it.
+
+AUTO_TRACK_PATTERNS = [
+    # training and other GPU work
+    (r"\b(?:python3?|uv\s+run|poetry\s+run|pipenv\s+run)\s+[^|;&]*\b"
+     r"(?:train|finetune|fine_tune|pretrain|sweep|eval|evaluate|benchmark|experiment)"
+     r"[\w.-]*\.py\b", "a training or evaluation script"),
+    (r"\btorchrun\b", "torchrun"),
+    (r"\baccelerate\s+launch\b", "accelerate launch"),
+    (r"\bdeepspeed\b", "deepspeed"),
+    (r"\bpython3?\s+-m\s+(?:torch\.distributed|accelerate|vllm)\b", "a distributed run"),
+    (r"\bwandb\s+(?:agent|sweep)\b", "a wandb sweep"),
+    (r"\b(?:optuna|ray)\s+\w+", "a hyperparameter sweep"),
+    # builds that are usually slow. Ordinary builds and test suites are
+    # deliberately absent: they are more often quick than not, Claude generally
+    # wants their output inline, and anything under two minutes would not earn
+    # a bar anyway. AUTO_TRACK_OPT_IN below has them for whoever disagrees.
+    (r"\bcargo\s+build\b[^|;&]*--release", "a release build"),
+    (r"\bdocker(?:\s+compose)?\s+build\b", "a docker build"),
+    (r"\bdocker\s+compose\s+up\b", "docker compose up"),
+    (r"\bbazel\s+(?:build|test)\b", "bazel"),
+    (r"\b(?:gradlew?|mvn)\b", "a JVM build"),
+    (r"\b(?:cmake\s+--build|xcodebuild)\b", "a native build"),
+    # data and infrastructure
+    (r"\bdvc\s+repro\b", "a dvc pipeline"),
+    (r"\bdbt\s+(?:run|build|test)\b", "a dbt run"),
+    (r"\bspark-submit\b", "a spark job"),
+    (r"\bterraform\s+(?:apply|plan|destroy)\b", "terraform"),
+    (r"\bansible-playbook\b", "an ansible playbook"),
+    (r"\bpulumi\s+(?:up|preview)\b", "pulumi"),
+    (r"\balembic\s+upgrade\b", "a database migration"),
+    (r"\b(?:pg_restore|pg_dump|mysqldump)\b", "a database dump or restore"),
+    # moving data
+    (r"\brsync\b", "an rsync transfer"),
+    (r"\baws\s+s3\s+(?:sync|cp)\b", "an S3 transfer"),
+    (r"\b(?:gsutil|gcloud\s+storage)\b", "a GCS transfer"),
+    (r"\bhuggingface-cli\s+download\b", "a model download"),
+    (r"\b(?:wget|curl)\b[^|;&]*\s-[a-zA-Z]*[oO]\b", "a download"),
+    (r"\bgit\s+clone\b", "a git clone"),
+    (r"\bsleep\s+(?:[2-9]\d\d|\d{4,})\b", "a long sleep"),
+]
+
+# Not on by default - each is quick as often as it is slow. Copy any you want:
+#   agent-tqdm config --set auto_track_patterns='\bpytest\b;\bmake\b'
+AUTO_TRACK_OPT_IN = [
+    (r"\b(?:pytest|py\.test)\b", "a pytest run"),
+    (r"\b(?:npm|pnpm|yarn)\s+(?:run\s+)?test\b", "a JS test run"),
+    (r"\bgo\s+test\b", "go test"),
+    (r"\b(?:tox|nox)\b", "tox or nox"),
+    (r"\bmake\b(?!\s+(?:clean|help|list))", "make"),
+    (r"\b(?:npm|pnpm|yarn)\s+(?:run\s+)?build\b", "a JS build"),
+    (r"\bcargo\s+(?:build|test)\b", "a cargo build"),
+]
+
+# Checked before anything else. Anything matching here is never auto-tracked.
+AUTO_TRACK_IGNORE = [
+    r"^\s*(?:sudo\s+)?agent[-_]tqdm\b",          # never re-wrap ourselves
+    r"\bagent_tqdm\.py\b",
+    r"(?:^|\s)(?:--help|-h|--version|-V)(?:\s|$)",
+    # note: \b before a dash never matches - a space and a dash are both
+    # non-word characters, so there is no boundary between them
+    r"(?:^|\s)--(?:dry-run|collect-only|list-tests|check|noop|version)(?:\s|=|$)",
+    r"^\s*(?:ls|cat|head|tail|pwd|echo|printf|which|type|env|date|whoami|wc|"
+    r"grep|rg|fd|find|stat|file|du|df|ps|kill|touch|mkdir|rm|cp|mv|chmod|export|"
+    r"source|test|true|false|sed|awk|jq|diff|open|code)\b",
+    r"^\s*git\s+(?:status|log|diff|show|branch|rev-parse|add|commit|config|remote)\b",
+    r"^\s*(?:npm|pnpm|yarn|pip|pip3|brew|apt|apt-get)\s+(?:ls|list|info|view|show)\b",
+    r"^\s*docker\s+(?:ps|images|logs)\b",
+]
+
+# A name for the bar, taken from whatever in the command looks most like the
+# thing being run.
+_NAME_HINTS = [
+    r"([\w.-]+)\.py\b",
+    r"\b(?:npm|pnpm|yarn|cargo|go|docker|terraform|dbt|dvc|bazel)\s+(?:run\s+)?(\w+)",
+    r"^\s*(?:sudo\s+)?([\w.-]+)",
+]
+
+
+def _split_patterns(text):
+    return [p for p in re.split(r"[;\n]", text or "") if p.strip()]
+
+
+def suggest_job_name(command):
+    for rx in _NAME_HINTS:
+        m = re.search(rx, command)
+        if m:
+            name = slug(os.path.basename(m.group(1)))
+            name = re.sub(r"\.(py|sh|js|ts)$", "", name)
+            if name and name not in ("python", "python3", "uv", "poetry", "sudo", "env"):
+                return name[:18]
+    return "job"
+
+
+def classify_command(command, tool_input=None, cfg=None):
+    """Decide whether a Bash command deserves a progress bar.
+
+    Returns {"track": bool, "why": str, "signal": str, "name": str}. `why` is
+    written to be read by Claude, so it explains itself in one clause."""
+    cfg = cfg or load_config()
+    tool_input = tool_input or {}
+    command = (command or "").strip()
+    result = {"track": False, "why": "", "signal": "", "name": suggest_job_name(command)}
+
+    if not command or cfg["auto_track"] == "off":
+        result["why"] = "auto-tracking is off" if command else "empty command"
+        return result
+
+    for rx in AUTO_TRACK_IGNORE + _split_patterns(cfg["auto_track_ignore"]):
+        try:
+            if re.search(rx, command):
+                result["why"] = "matches an ignore rule"
+                return result
+        except re.error:
+            continue
+
+    background = bool(tool_input.get("run_in_background"))
+    if background and not cfg["auto_track_background"]:
+        result["why"] = "backgrounded, and auto_track_background is off"
+        return result
+
+    timeout_s = (tool_input.get("timeout") or 0) / 1000.0
+    limit = cfg["auto_track_timeout_seconds"]
+
+    if background:
+        result.update(track=True, signal="background",
+                      why="it was launched in the background")
+        return result
+    if limit and timeout_s >= limit:
+        result.update(track=True, signal="timeout",
+                      why="it was given a %s timeout" % fmt_short(timeout_s))
+        return result
+    for rx, label in AUTO_TRACK_PATTERNS:
+        try:
+            if re.search(rx, command):
+                result.update(track=True, signal="pattern", why="it looks like %s" % label)
+                return result
+        except re.error:
+            continue
+    for rx in _split_patterns(cfg["auto_track_patterns"]):
+        try:
+            if re.search(rx, command):
+                result.update(track=True, signal="pattern",
+                              why="it matches one of your auto_track_patterns")
+                return result
+        except re.error:
+            continue
+
+    result["why"] = "nothing suggests this is long-running"
+    return result
+
+
+def launcher_prefix():
+    """How to invoke this tool from a shell: the shim if it is on PATH, else
+    this very file, so wrapping works on a machine that never ran the installer."""
+    for d in (os.environ.get("PATH") or "").split(os.pathsep):
+        if d and os.path.exists(os.path.join(d, "agent-tqdm")):
+            return "agent-tqdm"
+    return "%s %s" % (shlex.quote(sys.executable), shlex.quote(os.path.abspath(__file__)))
+
+
+def wrap_command(command, name, launcher=None):
+    """The `agent-tqdm run` form of a command, for transparent wrapping."""
+    return "%s run --name %s --auto-launched -- %s" % (
+        launcher or launcher_prefix(), shlex.quote(name), command)
+
+
+def auto_seen(command, session_id, remember=True, ttl=6 * 3600):
+    """True when this exact command was already flagged in this session.
+
+    Without this, a command Claude deliberately re-runs untracked would be
+    interrupted every single time."""
+    # hashlib, not hash(): str hashing is salted per process, and every hook
+    # invocation is a new process, so builtin hash() would never match
+    digest = hashlib.sha1(command.strip().encode("utf-8")).hexdigest()[:16]
+    key = "%s:%s" % (session_id or "-", digest)
+    now = time.time()
+    with state_rw() as st:
+        seen = st.setdefault("auto_track_seen", {})
+        for k, ts in list(seen.items()):
+            if now - ts > ttl:
+                del seen[k]
+        hit = key in seen
+        if remember and not hit:
+            seen[key] = now
+        return hit
+
+
 # ------------------------------------------------------------------- crashes
 #
 # When a job dies, three things have to happen: the bar gets a skull, the
@@ -1441,6 +1659,7 @@ def _new_job(args, cmd=None, log=None, pid=None):
         "initial_est_total_s": eta,
         "log_offset": 0,
         "force_show": bool(getattr(args, "force_show", False)),
+        "auto_launched": bool(getattr(args, "auto_launched", False)),
         "samples": [],
         "session_id": os.environ.get("CLAUDE_SESSION_ID"),
         "cwd": os.getcwd(),
@@ -1458,6 +1677,9 @@ def _announce(job):
         describe_monitor(job), fmt_short(iv),
         " (5%% of the %s estimate)" % fmt_short(est)
         if est and iv > cfg.get("min_interval_seconds", 120) else ""))
+    if job.get("auto_launched") and not job.get("eta_end"):
+        print("  tracked automatically. no estimate yet - set one with:")
+        print("    agent-tqdm update %s --eta <duration>" % job["id"])
     if not job_visible(job, cfg):
         print("  (short job: tracked, but under the %s statusline threshold - "
               "--force-show to pin it)" % fmt_short(cfg["min_duration_seconds"]))
@@ -1833,6 +2055,45 @@ def cmd_inbox(args):
     return 0
 
 
+def cmd_autotrack(args):
+    """Explain what auto-tracking would do with a command - the hook's own view."""
+    cfg = load_config()
+    if not args.command:
+        print("Auto-tracking is %s.\n" % cfg["auto_track"])
+        print("  instruct  interrupt the command once and ask Claude to relaunch it")
+        print("            through agent-tqdm, with an estimate and a monitor (default)")
+        print("  wrap      rewrite it silently; no estimate until Claude sets one")
+        print("  off       never intervene\n")
+        print("Caught when a command is backgrounded, is given a timeout of %s or\n"
+              "more, or matches one of %d built-in patterns.\n"
+              % (fmt_short(cfg["auto_track_timeout_seconds"]), len(AUTO_TRACK_PATTERNS)))
+        print("  agent-tqdm autotrack '<command>'    what would happen to this command")
+        print("  agent-tqdm config --set auto_track=off")
+        print("  agent-tqdm config --set auto_track_ignore='^my-script'\n")
+        print("Test suites and ordinary builds are left alone by default - they are")
+        print("quick as often as they are slow. To catch them too:\n")
+        print("  agent-tqdm config --set auto_track_patterns=%s"
+              % shlex.quote(";".join(rx for rx, _l in AUTO_TRACK_OPT_IN)))
+        return 0
+
+    command = " ".join(args.command)
+    ti = {}
+    if args.background:
+        ti["run_in_background"] = True
+    if args.timeout:
+        ti["timeout"] = int(args.timeout * 1000)
+    verdict = classify_command(command, ti, cfg)
+    mark = "TRACK" if verdict["track"] else "leave alone"
+    print("  %-12s %s" % (mark, command))
+    print("  %-12s %s" % ("", verdict["why"]))
+    if verdict["track"]:
+        print("  %-12s %s" % ("name", verdict["name"]))
+        print("  %-12s %s" % ("mode", cfg["auto_track"]))
+        if cfg["auto_track"] == "wrap":
+            print("  %-12s %s" % ("becomes", wrap_command(command, verdict["name"])))
+    return 0
+
+
 def cmd_monitors(args):
     print("Ways a job's progress can be observed (pick one at start):\n")
     print(MONITOR_HELP)
@@ -1918,7 +2179,7 @@ def cmd_config(args):
             default_hint = ""
             if mine and cfg[k] != spec["default"]:
                 default_hint = "  (default %s)" % _fmt_val(spec["default"])
-            print("  %s %-22s %-10s %s%s" % (
+            print("  %s %-26s %-10s %s%s" % (
                 "*" if mine else " ", k, _fmt_val(cfg[k]), spec["help"], default_hint))
 
     print("\n  * = set by you.  File: %s" % CONFIG)
@@ -2000,6 +2261,7 @@ def cmd_doctor(args):
             wired = "agent_tqdm" in json.dumps(json.load(f).get("statusLine", {}))
     except Exception:
         pass
+    print("autotrack  : %s" % cfg["auto_track"])
     print("statusline : %s" % ("wired into settings.json" if wired else
                                "NOT wired - run scripts/install-statusline.sh"))
     print("config     : %s" % json.dumps(cfg))
@@ -2045,6 +2307,8 @@ def build_parser():
     sp = sub.add_parser("run", help="launch a command detached and track it")
     sp.add_argument("--name", help="short job name (default: derived from the command)")
     sp.add_argument("--cwd", help="working directory for the command")
+    sp.add_argument("--auto-launched", action="store_true",
+                    help="mark as started by the auto-track hook rather than a person")
     common(sp)
     monitor_flags(sp)
     sp.add_argument("command", nargs=argparse.REMAINDER, help="-- the command to run")
@@ -2144,6 +2408,12 @@ def build_parser():
                     help="try a setting without saving it")
     sp.add_argument("--colors", action="store_true", help="also print the 256-color codes")
     sp.set_defaults(fn=cmd_preview)
+
+    sp = sub.add_parser("autotrack", help="explain automatic tracking, or test a command")
+    sp.add_argument("command", nargs="*", help="a command to classify")
+    sp.add_argument("--background", action="store_true", help="as if run in the background")
+    sp.add_argument("--timeout", type=float, help="as if given this timeout, in seconds")
+    sp.set_defaults(fn=cmd_autotrack)
 
     sp = sub.add_parser("inbox", help="crash reports queued for the Claude session")
     sp.add_argument("--drain", action="store_true",

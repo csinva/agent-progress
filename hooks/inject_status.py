@@ -94,6 +94,9 @@ def job_lines(cc, cfg):
                         % cc.fmt_short(max(0, j["next_probe"] - time.time())))
         if j.get("note"):
             bits.append("note: %s" % j["note"])
+        if j.get("auto_launched") and not j.get("eta_end"):
+            bits.append("TRACKED AUTOMATICALLY, still has no estimate - set one with "
+                        "`agent-tqdm update %s --eta <duration>`" % j.get("id"))
         lines.append("- " + ", ".join(bits))
     return lines, hidden
 

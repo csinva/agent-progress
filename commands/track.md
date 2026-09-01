@@ -5,6 +5,10 @@ argument-hint: "<command to run, e.g. python pipeline.py --input raw/>"
 
 # Track a long-running job
 
+Long jobs are normally caught automatically, so this command is for when the
+user wants to be explicit, or wants to track something the detector would let
+through (`agent-tqdm autotrack '<command>'` says which).
+
 The user wants to run this with a progress bar:
 
 ```

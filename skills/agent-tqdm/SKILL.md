@@ -20,6 +20,39 @@ no repeated `ls`, no waiting. Check in only when you have a reason to.
 Use `agent-tqdm`. If it is not on PATH, use
 `python3 ~/.claude/skills/agent-tqdm/scripts/agent_tqdm.py`.
 
+`agent-tqdm autotrack '<command>'` shows whether a given command would be caught
+automatically, and why.
+
+## You will usually be told, not asked
+
+Long-running commands are caught automatically. When you run something through
+Bash that looks like a long job, a hook stops it once and hands you a note
+saying so. **That note is the trigger** - nobody has to invoke this skill by
+name, and you should not wait to be asked.
+
+What to do when it happens:
+
+1. Work out how progress can be observed, and roughly how long it will take
+   (the two sections below).
+2. Relaunch through `agent-tqdm run` with those flags.
+3. Say in one line what you estimated and what you are watching. Then carry on.
+
+If the job genuinely should not be tracked - it is quick, or you need its output
+in front of you to decide what to do next - run the original command again
+unchanged. It goes through untouched the second time; the interruption happens
+at most once per command.
+
+You can also start tracking without being prompted, and should whenever you are
+about to launch something slow. Being told is the safety net, not the mechanism.
+
+In `wrap` mode the command is rewritten silently instead, and you will see a job
+that is already running with **no estimate**. When you notice one - the bar says
+so, and so does the job list - give it one as soon as you can:
+
+```bash
+agent-tqdm update <id> --eta 40m --note "what it is doing"
+```
+
 ## Step 1: how will progress be observed?
 
 This is the part that needs your judgement, and it is the whole reason a model

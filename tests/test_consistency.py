@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Self-consistency: the tables the code reads from itself.
+
+Settings, presets, patterns, styles, monitors and hooks are all declared in one
+place and consumed in another. Nothing here exercises behaviour; it checks that
+the declarations still agree with the code that reads them, which is the kind of
+thing that rots quietly as a project changes.
+"""
+import importlib.util
+import json
+import os
+import re
+import subprocess
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ENGINE = os.path.join(ROOT, "scripts", "agent_tqdm.py")
+spec = importlib.util.spec_from_file_location("agent_tqdm", ENGINE)
+cc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cc)
+
+FAILS = []
+CHECKS = [0]
+
+
+def ck(name, cond, detail=""):
+    CHECKS[0] += 1
+    if not cond:
+        print("  FAIL %s   <- %s" % (name, detail))
+        FAILS.append(name)
+
+
+print("=== every declared setting is self-consistent ===")
+for k, spc in cc.CONFIG_SPEC.items():
+    d = spc["default"]
+    try:
+        rt = cc.coerce(k, d)
+        ok = True
+    except Exception as ex:
+        ok, rt = False, str(ex)
+    ck("default of %s survives its own validator" % k, ok, str(rt))
+    ck("%s has help" % k, bool(spc["help"]) and not spc["help"][0].isupper(),
+       spc["help"][:40])
+    ck("%s is in a known group" % k,
+       spc["group"] in {g for g, _t in cc.CONFIG_GROUPS}, spc["group"])
+
+print()
+print("=== every preset sets real keys to legal values ===")
+for name, preset in cc.CONFIG_PRESETS.items():
+    for k, v in preset.items():
+        ck("preset %s: %s" % (name, k), k in cc.CONFIG_SPEC, "unknown key")
+        if k in cc.CONFIG_SPEC:
+            try:
+                cc.coerce(k, v); okv = True; why = ""
+            except Exception as ex:
+                okv, why = False, str(ex)
+            ck("preset %s: %s=%r legal" % (name, k, v), okv, why)
+
+print()
+print("=== every regex compiles ===")
+for group, items in [("AUTO_TRACK_PATTERNS", [p for p, _l in cc.AUTO_TRACK_PATTERNS]),
+                     ("AUTO_TRACK_IGNORE", cc.AUTO_TRACK_IGNORE),
+                     ("_NAME_HINTS", cc._NAME_HINTS),
+                     ("BUILTIN_PATTERNS", [p.pattern for _n, p in cc.BUILTIN_PATTERNS])]:
+    okall, first = True, ""
+    for rx in items:
+        try:
+            re.compile(rx)
+        except re.error as ex:
+            okall, first = False, "%s: %s" % (rx[:30], ex)
+    ck("%s (%d) all compile" % (group, len(items)), okall, first)
+
+print()
+print("=== every bar style is well formed ===")
+for name, tup in cc.STYLES.items():
+    ck("style %s has 5 parts" % name, len(tup) == 5, str(tup))
+    left, right, fill, partials, track = tup
+    ck("style %s uses single cells" % name,
+       all(len(x) <= 1 for x in (left, right, fill, track)), repr(tup))
+ck("every style is offered by the config",
+   set(cc.STYLES) == set(cc.CONFIG_SPEC["style"]["choices"]),
+   "%s vs %s" % (sorted(cc.STYLES), sorted(cc.CONFIG_SPEC["style"]["choices"])))
+
+print()
+print("=== every monitor kind is implemented ===")
+for kind in cc.MONITOR_KINDS:
+    try:
+        cc.monitor_reading({"monitor": {"kind": kind}, "log": None}, None)
+        ok = True; why = ""
+    except Exception as ex:
+        ok, why = False, "%s: %s" % (type(ex).__name__, ex)
+    ck("monitor %s runs" % kind, ok, why)
+ck("MONITOR_HELP documents each kind",
+   all(k in cc.MONITOR_HELP for k in cc.MONITOR_KINDS),
+   [k for k in cc.MONITOR_KINDS if k not in cc.MONITOR_HELP])
+
+print()
+print("=== signal names ===")
+for code, name in cc.SIGNAL_NAMES.items():
+    ck("crash_reason knows %s" % name, cc.crash_reason(128 + code)[0] == name)
+ck("every hint refers to a known signal",
+   all(s in cc.SIGNAL_NAMES for s in cc.SIGNAL_HINTS),
+   [s for s in cc.SIGNAL_HINTS if s not in cc.SIGNAL_NAMES])
+
+print()
+print("=== every subcommand has help and runs --help ===")
+top = subprocess.run([sys.executable, ENGINE, "--help"], capture_output=True, text=True).stdout
+cmds = [c for c in re.findall(r"^\s{4}(\w[\w-]*)", top, re.M) if not c.startswith("_")]
+for c in sorted(set(cmds)):
+    r = subprocess.run([sys.executable, ENGINE, c, "--help"], capture_output=True, text=True)
+    ck("%s --help" % c, r.returncode == 0 and len(r.stdout) > 30, r.stderr[:50])
+
+print()
+print("=== plugin metadata ===")
+man = json.load(open(os.path.join(ROOT, ".claude-plugin", "plugin.json")))
+ck("manifest names the plugin", man.get("name") == "agent-tqdm")
+ck("manifest has a version", bool(man.get("version")))
+hooks = json.load(open(os.path.join(ROOT, "hooks", "hooks.json")))
+for ev, entries in hooks["hooks"].items():
+    for e in entries:
+        for h in e["hooks"]:
+            path = h["command"].split('"')[1]
+            real = path.replace("${CLAUDE_PLUGIN_ROOT}", ROOT)
+            ck("%s hook script exists" % ev, os.path.exists(real), real)
+for f in ["skills/agent-tqdm/SKILL.md", "commands/track.md", "commands/progress.md"]:
+    head = open(os.path.join(ROOT, f)).read()
+    ck("%s has frontmatter" % f, head.startswith("---") and head.count("---") >= 2)
+
+
+print("  %d declarations checked" % CHECKS[0])
+print()
+print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
+for f in FAILS:
+    print("   -", f)
+sys.exit(1 if FAILS else 0)

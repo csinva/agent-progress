@@ -2231,6 +2231,8 @@ def cmd_statusline(args):
             payload = json.loads(sys.stdin.read() or "{}")
     except Exception:
         payload = {}
+    if not isinstance(payload, dict):
+        payload = {}          # valid json, wrong shape; the bar still has to draw
     cfg = load_config()
     width = args.width or int(payload.get("terminal_width") or 0) or term_width(120)
     st = state_ro()

@@ -155,6 +155,61 @@ run("config", "--reset")
 run("rm", "--all")
 
 print()
+print("=== hostile input on stdin ===")
+AUTO = os.path.join(ROOT, "hooks", "auto_track.py")
+INJECT = os.path.join(ROOT, "hooks", "inject_status.py")
+for label, payload in [("not json", "{{{"), ("a list", "[1,2]"), ("empty", ""),
+                       ("null", "null"), ("a huge string", json.dumps({"x": "y" * 100000}))]:
+    rs = [subprocess.run([sys.executable, AUTO], input=payload,
+                         capture_output=True, text=True),
+          subprocess.run([sys.executable, INJECT, "UserPromptSubmit"], input=payload,
+                         capture_output=True, text=True),
+          subprocess.run([sys.executable, ENGINE, "statusline"], input=payload,
+                         capture_output=True, text=True)]
+    ck("stdin is %s" % label,
+       all(r.returncode == 0 and "Traceback" not in r.stderr for r in rs),
+       " | ".join((r.stderr.strip().splitlines() or [""])[-1] for r in rs)[:70])
+
+print()
+print("=== the installer will not touch a settings.json it cannot read ===")
+import shutil
+import tempfile
+fake = tempfile.mkdtemp()
+os.makedirs(os.path.join(fake, ".claude"))
+sp = os.path.join(fake, ".claude", "settings.json")
+open(sp, "w").write("{ broken")
+r = subprocess.run(["bash", os.path.join(ROOT, "scripts", "install-statusline.sh")],
+                   capture_output=True, text=True, env=dict(os.environ, HOME=fake))
+ck("it explains itself instead of raising", "Traceback" not in r.stderr and r.returncode != 0,
+   r.stderr.strip()[:70])
+ck("and leaves the file alone", open(sp).read() == "{ broken")
+shutil.rmtree(fake, ignore_errors=True)
+
+print()
+print("=== invariants ===")
+with cc.state_rw() as st:
+    st["inbox"] = [{"job": "j%d" % i, "ts": time.time(), "delivered": None} for i in range(80)]
+    cc.enqueue_crash(st, {"id": "one-more", "exit_code": 1, "started": 1, "ended": 2}, time.time())
+ck("the crash inbox stays capped",
+   len(json.loads(open(STATE).read())["inbox"]) <= 50,
+   str(len(json.loads(open(STATE).read())["inbox"])))
+with cc.state_rw() as st:
+    st["inbox"] = []
+r = run("exec", "--shell", "printf 'a\\000b\\377c\\n'")
+ck("binary output does not crash exec", r.returncode == 0 and "Traceback" not in r.stderr)
+r = run("exec", "--shell", "echo 'h\u00e9llo \U0001f680'")
+ck("unicode survives exec", "\U0001f680" in r.stdout, repr(r.stdout[:30]))
+before = subprocess.run(["git", "-C", ROOT, "status", "--porcelain"],
+                        capture_output=True, text=True).stdout
+run("start", "dirty", "--eta", "1h", "--monitor", "time", "--no-watch")
+run("exec", "--shell", "echo hi")
+sl()
+run("rm", "--all")
+after = subprocess.run(["git", "-C", ROOT, "status", "--porcelain"],
+                       capture_output=True, text=True).stdout
+ck("running jobs never write inside the repo", before == after, repr(after[:80]))
+
+print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

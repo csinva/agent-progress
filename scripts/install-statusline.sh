@@ -15,8 +15,16 @@ settings, engine, mode = sys.argv[1], sys.argv[2], sys.argv[3]
 
 data = {}
 if os.path.exists(settings):
-    with open(settings) as f:
-        data = json.load(f)
+    try:
+        with open(settings) as f:
+            data = json.load(f)
+    except ValueError as ex:
+        # refuse rather than overwrite: this file is the user's, and a parse
+        # error here almost always means they are mid-edit
+        sys.stderr.write(
+            "%s is not valid JSON (%s).\nFix it and run this again; nothing was "
+            "changed.\n" % (settings, ex))
+        raise SystemExit(1)
     backup = "%s.bak-%s" % (settings, time.strftime("%Y%m%d-%H%M%S"))
     shutil.copy2(settings, backup)
     print("backed up settings -> %s" % backup)

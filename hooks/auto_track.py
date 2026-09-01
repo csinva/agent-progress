@@ -74,7 +74,8 @@ def read_payload(timeout=3.0):
         ready, _w, _e = select.select([sys.stdin], [], [], timeout)
         if not ready:
             return {}
-        return json.loads(sys.stdin.read() or "{}")
+        payload = json.loads(sys.stdin.read() or "{}")
+        return payload if isinstance(payload, dict) else {}
     except Exception:
         return {}
 

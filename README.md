@@ -174,7 +174,7 @@ agent-tqdm config --preset eager                      # same thing
 
 Because a quick run now costs nothing, the detector can afford to be broad. A
 command is caught when it is backgrounded, when it is given a timeout of two
-minutes or more, or when it matches one of ~35 patterns — training scripts,
+minutes or more, or when it matches one of 33 patterns — training scripts,
 `torchrun`, `accelerate`, `deepspeed`, sweeps, `spark-submit`, `terraform`,
 `ansible`, `docker build`, `rsync`, `aws s3 sync`, model downloads, `dvc`,
 `dbt`, `pg_restore`, `git clone`, and ordinary work like `pytest`, `make`,
@@ -345,7 +345,18 @@ agent-tqdm preview --set style=dots     # try a setting without saving it
 agent-tqdm preview --colors             # the 256-color codes
 ```
 
-Presets: `minimal`, `rich`, `tqdm`, `plain`, `quiet`.
+Presets bundle common combinations:
+
+| preset | effect |
+| --- | --- |
+| `minimal` | bar and percentage only |
+| `rich` | every field, wider bar, five jobs |
+| `tqdm` | tqdm-faithful |
+| `plain` | ascii, no color |
+| `quiet` | only jobs over ten minutes, one at a time, no sound |
+| `guided` | ask before taking a command over (`auto_track=instruct`) |
+| `manual` | never take one over (`auto_track=off`) |
+| `eager` | start tracking from the first second |
 
 ```bash
 agent-tqdm config --preset minimal
@@ -397,12 +408,13 @@ tests/test_units.py          unit: parsing, the estimator, monitors, config
 tests/test_lifecycle.py      the watcher, old state, pruning, the installer
 tests/test_hooks.py          hook contracts and the statusline's shape
 tests/test_robust.py         damaged state, scale, settings
+tests/test_consistency.py    the declaration tables agree with the code
 demo/tour.py                 the narrated tour
 demo/record.py               renders the .mov and .gif from live job state
 demo/mov_encoder.swift       PNG frames -> .mov via AVFoundation
 ```
 
-Run the tests with `python3 tests/all.py` — 253 checks over real processes,
+Run the tests with `python3 tests/all.py` — 549 checks over real processes,
 nothing mocked. A couple of minutes, most of it spent waiting on actual
 commands, which is the only way to check a threshold or a watcher.
 

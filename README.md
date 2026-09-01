@@ -19,7 +19,8 @@
 </p>
 
 <p align="center">
-  <i>You send the command; Claude works out how to watch it and how long it should take.<br>
+  <i>A short build runs and is never tracked. A training run crosses 20 seconds,<br>
+  and only then gets a bar. Real session, waiting compressed — nothing re-enacted.<br>
   Full recording: <a href="demo/agent-tqdm.mov">demo/agent-tqdm.mov</a></i>
 </p>
 
@@ -68,10 +69,14 @@ you lose nothing.
 
 ## See it in action
 
-The clip above is `demo/agent-tqdm.mov`, recorded from live job state — the bars
-in it are real output, not a mock-up. Regenerate it with `python3 demo/record.py`:
-frames render through the same code the statusline uses, and encoding goes
-through AVFoundation, so no ffmpeg is needed.
+The clip above is a real session, recorded frame by frame from live job state
+through the same renderer the statusline uses. The commands go through the
+actual hook. Waiting is compressed by capturing fewer frames per second of real
+time, with the multiplier shown on screen — so the 20-second threshold in the
+clip really is 20 seconds.
+
+Regenerate it with `python3 demo/record.py`; encoding uses AVFoundation, so no
+ffmpeg is needed.
 
 For the full thing, including every monitor kind, run it yourself:
 

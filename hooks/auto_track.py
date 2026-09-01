@@ -11,7 +11,7 @@ Two modes, set by the `auto_track` setting:
             finishes first is untouched and costs nothing at all - no job, no
             message, no tokens.
   instruct  interrupt the command before it starts and tell Claude to relaunch
-            it through agent-tqdm, with an estimate and a monitor chosen first.
+            it through agent-progress, with an estimate and a monitor chosen first.
 
 Any command is interrupted at most once per session, so a command deliberately
 re-run untracked is left alone the second time.
@@ -22,12 +22,12 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ENGINE = os.path.join(os.path.dirname(HERE), "scripts", "agent_tqdm.py")
+ENGINE = os.path.join(os.path.dirname(HERE), "scripts", "agent_progress.py")
 
 
 def load_engine():
     import importlib.util
-    spec = importlib.util.spec_from_file_location("agent_tqdm", ENGINE)
+    spec = importlib.util.spec_from_file_location("agent_progress", ENGINE)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -35,17 +35,17 @@ def load_engine():
 
 INSTRUCTIONS = """\
 This command looks long-running (%(why)s), so it was stopped once to be tracked
-instead. Relaunch it through agent-tqdm, which gives it a live progress bar in
+instead. Relaunch it through agent-progress, which gives it a live progress bar in
 the statusline and tells you when it finishes or crashes:
 
-  agent-tqdm run --name %(name)s --eta <your estimate> <monitor flags> -- %(command)s
+  agent-progress run --name %(name)s --eta <your estimate> <monitor flags> -- %(command)s
 
-Two things to decide first, both covered by the agent-tqdm skill:
+Two things to decide first, both covered by the agent-progress skill:
 
 - How progress can be observed. Read the command or script: does it print a
   counter, narrate named stages, write output files, grow one file, or expose
   nothing? Pass the matching flags (--milestones, --glob, --path, --probe), or
-  nothing at all if it prints a normal counter. `agent-tqdm monitors` lists them.
+  nothing at all if it prints a normal counter. `agent-progress monitors` lists them.
 - Roughly how long it should take. Look for a previous run's logs or outputs,
   the size of the work, then the hardware. Rough is fine - the estimate corrects
   itself. If you have no basis at all, leave --eta off.
@@ -96,7 +96,7 @@ def main():
     except Exception:
         return 0            # a broken hook must never block a command
 
-    if cfg["auto_track"] == "off" or os.environ.get("AGENT_TQDM_NO_AUTO"):
+    if cfg["auto_track"] == "off" or os.environ.get("AGENT_PROGRESS_NO_AUTO"):
         return 0
 
     try:
@@ -124,7 +124,7 @@ def main():
             background=background)
         updated = dict(tool_input, command=wrapped)
         if background:
-            updated["run_in_background"] = False   # agent-tqdm detaches it itself
+            updated["run_in_background"] = False   # agent-progress detaches it itself
         emit({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             # deliberately no permissionDecision: the rewritten command still

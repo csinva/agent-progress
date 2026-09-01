@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""agent-tqdm - tqdm-style progress bars for long-running jobs, driven by Claude Code.
+"""agent-progress - tqdm-style progress bars for long-running jobs, driven by Claude Code.
 
 Design in one paragraph: a job's ETA starts as Claude's *prior* (a guess made from
 reading the training script), and is progressively replaced by a *measured* rate
@@ -31,7 +31,7 @@ import unicodedata
 # --------------------------------------------------------------------------- paths
 
 HOME = os.path.expanduser("~")
-ROOT = os.environ.get("AGENT_TQDM_HOME") or os.path.join(HOME, ".claude", "agent-tqdm")
+ROOT = os.environ.get("AGENT_PROGRESS_HOME") or os.path.join(HOME, ".claude", "agent-progress")
 STATE = os.path.join(ROOT, "state.json")
 LOCK = os.path.join(ROOT, ".lock")
 LOGS = os.path.join(ROOT, "logs")
@@ -42,7 +42,7 @@ STATE_VERSION = 1
 # --------------------------------------------------------------------- config
 #
 # Every tunable lives in one table: default, type, valid range, and a one-line
-# explanation. `agent-tqdm config` renders this, validates writes against it,
+# explanation. `agent-progress config` renders this, validates writes against it,
 # and no default is hard-coded anywhere else in the file.
 
 
@@ -101,7 +101,7 @@ CONFIG_SPEC = {
     "note_width": _spec("fields", 40, "truncate notes to this many characters", lo=4),
     "clock_format": _spec("fields", "%H:%M", "strftime format for the finish time", "str"),
 
-    # color (256-color codes; see `agent-tqdm colors`)
+    # color (256-color codes; see `agent-progress colors`)
     "color": _spec("color", True, "use color at all", "bool"),
     "color_running": _spec("color", 44, "bar and spinner while running", lo=0, hi=255),
     "color_done": _spec("color", 42, "a finished job", lo=0, hi=255),
@@ -130,7 +130,7 @@ CONFIG_SPEC = {
         "least time between unchanged job summaries sent to Claude", lo=0),
 
     # Automatic tracking: catch long jobs as they are launched, with no
-    # /agent-tqdm:track needed. See `agent-tqdm autotrack`.
+    # /agent-progress:track needed. See `agent-progress autotrack`.
     "auto_track": _spec("auto", "defer",
                         "what to do when a long-running command is launched", "str",
                         choices=["defer", "instruct", "off"]),
@@ -221,7 +221,7 @@ def ensure_dirs():
             os.makedirs(d)
         except OSError as e:
             if e.errno != errno.EEXIST:
-                raise SystemExit("cannot use the agent-tqdm directory %s: %s" % (d, e))
+                raise SystemExit("cannot use the agent-progress directory %s: %s" % (d, e))
         if not os.path.isdir(d):
             raise SystemExit("not a directory: %s" % d)
 
@@ -232,8 +232,8 @@ _CFG_CACHE = {"mtime": None, "cfg": None}
 def load_config(force=False):
     """Defaults, overlaid with the config file, overlaid with the environment.
 
-    Any setting can be overridden for one invocation as AGENT_TQDM_<KEY>, e.g.
-    AGENT_TQDM_BAR_WIDTH=40. Cached on the config file's mtime because the
+    Any setting can be overridden for one invocation as AGENT_PROGRESS_<KEY>, e.g.
+    AGENT_PROGRESS_BAR_WIDTH=40. Cached on the config file's mtime because the
     statusline renders many times a second."""
     try:
         mtime = os.path.getmtime(CONFIG)
@@ -254,7 +254,7 @@ def load_config(force=False):
     except Exception:
         pass
     for k in CONFIG_SPEC:
-        env = os.environ.get("AGENT_TQDM_" + k.upper())
+        env = os.environ.get("AGENT_PROGRESS_" + k.upper())
         if env is not None:
             try:
                 cfg[k] = coerce(k, env)
@@ -401,7 +401,7 @@ def session_is_new(session_id, st=None):
 def statusline_wired():
     try:
         with open(os.path.join(HOME, ".claude", "settings.json")) as f:
-            return "agent_tqdm" in json.dumps(json.load(f).get("statusLine", {}))
+            return "agent_progress" in json.dumps(json.load(f).get("statusLine", {}))
     except Exception:
         return False
 
@@ -439,7 +439,7 @@ def resolve(st, ref):
             return pool[0]
         if len(pool) > 1:
             raise SystemExit("ambiguous job ref %r: matches %s" % (ref, ", ".join(sorted(pool))))
-    raise SystemExit("no such job: %r (try: agent-tqdm ls)" % ref)
+    raise SystemExit("no such job: %r (try: agent-progress ls)" % ref)
 
 
 def alive(pid):
@@ -846,7 +846,7 @@ def status_glyph(job, cfg):
 
 def render_line(job, cfg, width=None, now=None):
     """One statusline row for one job. Every field here is individually
-    switchable from config; see `agent-tqdm config`."""
+    switchable from config; see `agent-progress config`."""
     now = now or time.time()
     apply_theme(cfg)
     color = cfg["color"]
@@ -1088,8 +1088,11 @@ AUTO_TRACK_PATTERNS = [
 
 # Checked before anything else. Anything matching here is never auto-tracked.
 AUTO_TRACK_IGNORE = [
-    r"^\s*(?:sudo\s+)?agent[-_]tqdm\b",          # never re-wrap ourselves
-    r"\bagent_tqdm\.py\b",
+    # never re-wrap ourselves. The path prefix matters: the wrapper emits an
+    # absolute path, so a rule anchored on the bare name would not match the
+    # very command it exists to recognise.
+    r"^\s*(?:sudo\s+)?(?:\S*/)?agent[-_]progress\b",
+    r"\bagent_progress\.py\b",
     r"(?:^|\s)(?:--help|-h|--version|-V)(?:\s|$)",
     # note: \b before a dash never matches - a space and a dash are both
     # non-word characters, so there is no boundary between them
@@ -1201,7 +1204,7 @@ def launcher_prefix():
     was already running when the shim was installed still has the older one.
     A name that does not resolve there would fail the whole command, which is
     the user's command, not ours."""
-    shim = os.path.join(os.path.expanduser("~"), ".local", "bin", "agent-tqdm")
+    shim = os.path.join(os.path.expanduser("~"), ".local", "bin", "agent-progress")
     if os.path.isfile(shim) and os.access(shim, os.X_OK):
         return shlex.quote(shim)
     return "%s %s" % (shlex.quote(sys.executable), shlex.quote(os.path.abspath(__file__)))
@@ -1638,7 +1641,7 @@ def apply_reading(job, reading, now):
 def finalize(job, exit_code, now, st=None):
     """Close a job out. Pass `st` when the failure was detected automatically -
     that queues a crash report for the Claude session; a failure the caller
-    already knows about (agent-tqdm fail) should not."""
+    already knows about (agent-progress fail) should not."""
     job["state"] = "done" if exit_code in (0, None) else "failed"
     job["exit_code"] = exit_code
     job["ended"] = now
@@ -1852,18 +1855,18 @@ def _announce(job):
         " (5%% of the %s estimate)" % fmt_short(est)
         if est and iv > cfg.get("min_interval_seconds", 120) else ""))
     if session_is_new(current_session()) and statusline_wired():
-        print("  Note: this session started before agent-tqdm was loaded, so its")
+        print("  Note: this session started before agent-progress was loaded, so its")
         print("  statusline was fixed at startup and no bar will appear here.")
         print("  Restart Claude Code to get one; tracking itself works either way,")
-        print("  and `agent-tqdm ls` shows this job now.")
+        print("  and `agent-progress ls` shows this job now.")
     if job.get("auto_launched"):
         print("  Tracked automatically, and now running detached - this command will not")
         print("  print its output here. To work with it:")
-        print("    agent-tqdm log %s -n 40        read what it has printed so far"
+        print("    agent-progress log %s -n 40        read what it has printed so far"
               % job["id"])
-        print("    agent-tqdm ls --json              progress, ETA and state")
+        print("    agent-progress ls --json              progress, ETA and state")
         if not job.get("eta_end"):
-            print("    agent-tqdm update %s --eta <duration>   give it an estimate"
+            print("    agent-progress update %s --eta <duration>   give it an estimate"
                   % job["id"])
             print("  It has no estimate yet. Work out roughly how long it should take and")
             print("  set one - the bar has no ETA until you do.")
@@ -1872,7 +1875,7 @@ def _announce(job):
               "--force-show to pin it)" % fmt_short(cfg["min_duration_seconds"]))
     if job.get("log"):
         print("  log: %s" % job["log"])
-    print("  id:  %s   (agent-tqdm update %s --eta 40m --note '...')" % (job["id"], job["id"]))
+    print("  id:  %s   (agent-progress update %s --eta 40m --note '...')" % (job["id"], job["id"]))
 
 
 def cmd_start(args):
@@ -1899,7 +1902,7 @@ def cmd_run(args):
     if cmd_parts and cmd_parts[0] == "--":
         cmd_parts = cmd_parts[1:]
     if not cmd_parts or not "".join(cmd_parts).strip():
-        raise SystemExit("nothing to run: agent-tqdm run --name train -- python train.py")
+        raise SystemExit("nothing to run: agent-progress run --name train -- python train.py")
     # Re-quote each argument: the caller's shell already tokenized them, so a
     # naive join would break `-c "..."`, paths with spaces, and quoted flags.
     # A single argument is passed through raw, so `run -- "a && b"` still works.
@@ -2091,13 +2094,13 @@ def _handoff(command, name, log, pid, started, sent, cfg, args):
         st["jobs"][jid]["watcher_pid"] = wpid
 
     floor = fmt_short(cfg["min_duration_seconds"])
-    print("\n[agent-tqdm] Still going after %s, so it is now tracked as '%s' and left\n"
+    print("\n[agent-progress] Still going after %s, so it is now tracked as '%s' and left\n"
           "running in the background. Its remaining output goes to the log, not here.\n"
-          "  agent-tqdm log %s -n 40      what it has printed\n"
-          "  agent-tqdm ls --json            progress and state\n"
+          "  agent-progress log %s -n 40      what it has printed\n"
+          "  agent-progress ls --json            progress and state\n"
           "If you expect it to run for more than about %s, give it an estimate so the\n"
           "bar can say when it will finish. If not, just carry on - it needs nothing.\n"
-          "  agent-tqdm update %s --eta <duration>"
+          "  agent-progress update %s --eta <duration>"
           % (fmt_short(time.time() - started), jid, jid, floor, jid))
     return 0
 
@@ -2206,7 +2209,7 @@ def cmd_ls(args):
         print(json.dumps(enriched, indent=2))
         return 0
     if not jobs:
-        print("no tracked jobs. start one:  agent-tqdm run --name train --eta 2h -- python train.py")
+        print("no tracked jobs. start one:  agent-progress run --name train --eta 2h -- python train.py")
         return 0
     for j in jobs:
         print(render_line(j, cfg))
@@ -2287,7 +2290,7 @@ def cmd_statusline(args):
         lines.append(render_line(job, cfg, width=width))
     extra = len(jobs) - cfg["max_jobs"]
     if extra > 0:
-        lines.append(paint("  +%d more job(s) · agent-tqdm ls" % extra, "dim", cfg["color"]))
+        lines.append(paint("  +%d more job(s) · agent-progress ls" % extra, "dim", cfg["color"]))
 
     if not lines and cfg["show_context_line"]:
         lines.append(context_line(payload, cfg))
@@ -2324,7 +2327,7 @@ def cmd_watch(args):
             st = state_ro()
             jobs = pick_jobs(st, cfg, apply_visibility=False)
             w = term_width()
-            out = ["\033[H\033[J", paint("agent-tqdm  ·  %s" % time.strftime("%H:%M:%S"), "dim", cfg["color"]), ""]
+            out = ["\033[H\033[J", paint("agent-progress  ·  %s" % time.strftime("%H:%M:%S"), "dim", cfg["color"]), ""]
             if not jobs:
                 out.append(paint("  no active jobs", "dim", cfg["color"]))
             for j in jobs:
@@ -2379,7 +2382,7 @@ def cmd_demo(args):
     cmd_run(a)
     print("\nA real job updates every %s / 5%% of its estimate; this demo is forced to %s"
           % (fmt_short(load_config()["min_interval_seconds"]), args.interval))
-    print("watch it live:   agent-tqdm watch")
+    print("watch it live:   agent-progress watch")
     print("or just look at your Claude Code statusline.")
     return 0
 
@@ -2418,14 +2421,14 @@ def cmd_autotrack(args):
         print("            after %s; one that finishes first costs nothing (default)"
               % fmt_short(cfg["auto_track_after_seconds"]))
         print("  instruct  interrupt it before it starts and ask Claude to relaunch")
-        print("            it through agent-tqdm, with an estimate already chosen")
+        print("            it through agent-progress, with an estimate already chosen")
         print("  off       never intervene\n")
         print("Caught when a command is backgrounded, is given a timeout of %s or\n"
               "more, or matches one of %d built-in patterns.\n"
               % (fmt_short(cfg["auto_track_timeout_seconds"]), len(AUTO_TRACK_PATTERNS)))
-        print("  agent-tqdm autotrack '<command>'    what would happen to this command")
-        print("  agent-tqdm config --set auto_track=off")
-        print("  agent-tqdm config --set auto_track_ignore='^my-script'")
+        print("  agent-progress autotrack '<command>'    what would happen to this command")
+        print("  agent-progress config --set auto_track=off")
+        print("  agent-progress config --set auto_track_ignore='^my-script'")
         return 0
 
     command = " ".join(args.command)
@@ -2455,7 +2458,7 @@ def cmd_monitors(args):
     cfg = load_config()
     print("Update cadence: every max(%s, %d%% of the estimated total).\n"
           "Override per job with --interval, globally with\n"
-          "  agent-tqdm config --set min_interval_seconds=%d --set interval_fraction=%s"
+          "  agent-progress config --set min_interval_seconds=%d --set interval_fraction=%s"
           % (fmt_short(cfg["min_interval_seconds"]), int(cfg["interval_fraction"] * 100),
              cfg["min_interval_seconds"], cfg["interval_fraction"]))
     return 0
@@ -2542,11 +2545,11 @@ def cmd_config(args):
                 "*" if mine else " ", k, _fmt_val(cfg[k]), spec["help"], default_hint))
 
     print("\n  * = set by you.  File: %s" % CONFIG)
-    print("  change:  agent-tqdm config --set bar_width=30 --set style=tqdm")
-    print("  revert:  agent-tqdm config --unset bar_width   |   --reset")
+    print("  change:  agent-progress config --set bar_width=30 --set style=tqdm")
+    print("  revert:  agent-progress config --unset bar_width   |   --reset")
     print("  presets: %s" % "  ".join("--preset %s" % p for p in sorted(CONFIG_PRESETS)))
-    print("  env:     AGENT_TQDM_<KEY>=value overrides any key for one command")
-    print("  see it:  agent-tqdm preview")
+    print("  env:     AGENT_PROGRESS_<KEY>=value overrides any key for one command")
+    print("  see it:  agent-progress preview")
     return 0
 
 
@@ -2555,7 +2558,7 @@ def _unknown_key(k):
     msg = "unknown setting %r" % k
     if near:
         msg += " - did you mean %s?" % ", ".join(near)
-    return msg + "\nrun `agent-tqdm config` to see every setting"
+    return msg + "\nrun `agent-progress config` to see every setting"
 
 
 def cmd_preview(args):
@@ -2623,7 +2626,7 @@ def cmd_doctor(args):
     wired = False
     try:
         with open(settings) as f:
-            wired = "agent_tqdm" in json.dumps(json.load(f).get("statusLine", {}))
+            wired = "agent_progress" in json.dumps(json.load(f).get("statusLine", {}))
     except Exception:
         pass
     print("autotrack  : %s" % cfg["auto_track"])
@@ -2646,13 +2649,13 @@ def cmd_doctor(args):
 
 def build_parser():
     p = argparse.ArgumentParser(
-        prog="agent-tqdm",
+        prog="agent-progress",
         description="tqdm-style progress bars for long-running jobs, for Claude Code.")
     sub = p.add_subparsers(dest="cmd")
 
     def monitor_flags(sp):
         sp.add_argument("--monitor", choices=MONITOR_KINDS,
-                        help="how to observe progress (see: agent-tqdm monitors)")
+                        help="how to observe progress (see: agent-progress monitors)")
         sp.add_argument("--milestone", action="append", metavar="TEXT",
                         help="a stage to look for in the log (repeatable, in order)")
         sp.add_argument("--milestones", metavar="A;B;C",

@@ -1,4 +1,4 @@
-<h1 align="center">agent-tqdm</h1>
+<h1 align="center">agent-progress</h1>
 <p align="center">tqdm-style progress bars in the Claude Code statusline, for any long-running job.</p>
 
 <p align="center">
@@ -15,14 +15,14 @@
 </p>
 
 <p align="center">
-  <img src="demo/agent-tqdm.gif" width="100%" alt="three commands side by side: a build never tracked, a training run with a bar, a benchmark that crashes">
+  <img src="demo/agent-progress.gif" width="100%" alt="three commands side by side: a build never tracked, a training run with a bar, a benchmark that crashes">
 </p>
 
 <p align="center">
   <i>Three commands running at once. The build finishes in four seconds and is never<br>
   tracked; the training run and the benchmark both cross twenty seconds and get bars;<br>
   the benchmark then dies. A real session, waiting compressed — nothing re-enacted.<br>
-  Full recording: <a href="demo/agent-tqdm.mov">demo/agent-tqdm.mov</a></i>
+  Full recording: <a href="demo/agent-progress.mov">demo/agent-progress.mov</a></i>
 </p>
 
 ## Why
@@ -34,7 +34,7 @@ Most scripts don't print `Epoch 3/50`. Some narrate stages, some just write
 files, some are silent for an hour. And at second zero nothing knows how long
 the run will take.
 
-`agent-tqdm` puts a model in the loop for exactly the part that needs judgement —
+`agent-progress` puts a model in the loop for exactly the part that needs judgement —
 deciding *what to watch* and *roughly how long this will take* — then gets out of
 the way. Claude sets it up once. After that a detached watcher does the
 observing, and the ETA corrects itself from measured throughput.
@@ -54,12 +54,12 @@ Claude burns no tokens while the job runs.
 Requires Claude Code and Python 3.8+. No third-party dependencies.
 
 ```bash
-git clone https://github.com/csinva/agent-tqdm ~/.claude/skills/agent-tqdm
-~/.claude/skills/agent-tqdm/scripts/install-statusline.sh
+git clone https://github.com/csinva/agent-progress ~/.claude/skills/agent-progress
+~/.claude/skills/agent-progress/scripts/install-statusline.sh
 ```
 
 Claude Code auto-loads anything in `~/.claude/skills/` as a plugin. The install
-script wires the statusline and puts `agent-tqdm` on your `PATH`; it backs up
+script wires the statusline and puts `agent-progress` on your `PATH`; it backs up
 `~/.claude/settings.json` first, and `--uninstall` reverts it. Restart Claude
 Code afterwards.
 
@@ -67,13 +67,13 @@ Code afterwards.
 
 `/reload-plugins` activates the skills and hooks in a running session, and
 tracking starts working there immediately — jobs are caught, bars are drawn into
-the state file, `agent-tqdm ls` and the completion notification behave normally.
+the state file, `agent-progress ls` and the completion notification behave normally.
 
 The one thing it cannot do is show the bar. A session reads its statusline
 setting once, when it starts, so a session that was already open has no place to
 draw one however it is reloaded. Restart Claude Code for that. A job tracked
 from such a session says so when it starts rather than leaving you wondering
-where the bar went, and `agent-tqdm doctor` will tell you which kind of session
+where the bar went, and `agent-progress doctor` will tell you which kind of session
 you are in.
 
 When no job is running the statusline falls back to `⏺ model · dir · branch`, so
@@ -98,7 +98,7 @@ ffmpeg is needed.
 For the full thing, including every monitor kind, run it yourself:
 
 ```bash
-agent-tqdm demo --tour
+agent-progress demo --tour
 ```
 
 Seven real jobs — one per monitor kind, plus one that crashes and one too short
@@ -106,7 +106,7 @@ to display — with narration about what to look for, in the terminal and in you
 statusline. Takes about a minute and cleans up after itself.
 
 ```
-agent-tqdm tour  +24s
+agent-progress tour  +24s
 
   ⠹ demo-train   ▕████████████████▌·····▏  75%  18/24ep    00:26<00:08  1.4s/ep    est 34s (+9s)
   ⠹ demo-shards  ▕████████████████▌·····▏  75%  9/12file   00:26<00:08  2.7s/file  est 34s (-15s)
@@ -124,7 +124,7 @@ It ends by printing the crash report Claude receives, and the statusline view of
 the same jobs — filtered to 3 rows with the short job dropped — next to the full
 list, so the difference is visible.
 
-`agent-tqdm demo` is the quick one-job version. `--speed 2` runs the tour twice
+`agent-progress demo` is the quick one-job version. `--speed 2` runs the tour twice
 as fast.
 
 ---
@@ -135,8 +135,8 @@ Through Claude — say *"run this in the background and show me a progress bar"*
 or:
 
 ```
-/agent-tqdm:track python pipeline.py --input raw/
-/agent-tqdm:progress
+/agent-progress:track python pipeline.py --input raw/
+/agent-progress:progress
 ```
 
 Claude is told about running jobs at session start and on each prompt, so it can
@@ -145,20 +145,20 @@ volunteer *"that pipeline is 60% done, landing around 4:15pm"* unprompted.
 Or drive it yourself:
 
 ```bash
-agent-tqdm run --name ingest --eta 40m --glob 'out/*.parquet' --total 500 -- python pipeline.py
-agent-tqdm start reindex --pid 45123 --log /var/log/reindex.log --eta 3h
-agent-tqdm ls                    # rendered bars
-agent-tqdm ls --json             # structured status
-agent-tqdm log ingest -n 40      # tail the captured output
-agent-tqdm update ingest --eta 90m --note "hit the slow shards"
-agent-tqdm watch                 # live dashboard for a second pane
-agent-tqdm inbox                 # crash reports
-agent-tqdm monitors              # explain the monitor kinds
-agent-tqdm autotrack '<cmd>'     # would this be tracked automatically?
-agent-tqdm exec --after 20s -- <cmd>   # run it, track it only if it is slow
-agent-tqdm preview               # see your settings rendered
-agent-tqdm demo                  # simulated job, end to end
-agent-tqdm doctor                # check the install
+agent-progress run --name ingest --eta 40m --glob 'out/*.parquet' --total 500 -- python pipeline.py
+agent-progress start reindex --pid 45123 --log /var/log/reindex.log --eta 3h
+agent-progress ls                    # rendered bars
+agent-progress ls --json             # structured status
+agent-progress log ingest -n 40      # tail the captured output
+agent-progress update ingest --eta 90m --note "hit the slow shards"
+agent-progress watch                 # live dashboard for a second pane
+agent-progress inbox                 # crash reports
+agent-progress monitors              # explain the monitor kinds
+agent-progress autotrack '<cmd>'     # would this be tracked automatically?
+agent-progress exec --after 20s -- <cmd>   # run it, track it only if it is slow
+agent-progress preview               # see your settings rendered
+agent-progress demo                  # simulated job, end to end
+agent-progress doctor                # check the install
 ```
 
 `run` detaches the process, captures stdout and stderr, tracks the pid, and
@@ -183,9 +183,9 @@ can spend a moment on an estimate, because now there is something worth
 estimating.
 
 ```bash
-agent-tqdm config --set auto_track_after_seconds=60   # more patient
-agent-tqdm config --set auto_track_after_seconds=0    # track immediately
-agent-tqdm config --preset eager                      # same thing
+agent-progress config --set auto_track_after_seconds=60   # more patient
+agent-progress config --set auto_track_after_seconds=0    # track immediately
+agent-progress config --preset eager                      # same thing
 ```
 
 Because a quick run now costs nothing, the detector can afford to be broad. A
@@ -198,10 +198,10 @@ minutes or more, or when it matches one of 33 patterns — training scripts,
 takes four seconds, and useful when it takes four minutes.
 
 ```bash
-agent-tqdm autotrack 'pytest tests/'
+agent-progress autotrack 'pytest tests/'
 #   TRACK        pytest tests/
 #                it looks like a pytest run
-#   becomes      agent-tqdm exec --name pytest --after 20 --shell 'pytest tests/'
+#   becomes      agent-progress exec --name pytest --after 20 --shell 'pytest tests/'
 #                only tracked if still running after 20s
 ```
 
@@ -215,19 +215,19 @@ the scheduler writes:
 
 ```bash
 JOB=$(sbatch --parsable train.sbatch)
-agent-tqdm start train-$JOB --eta 6h --log slurm-$JOB.out
+agent-progress start train-$JOB --eta 6h --log slurm-$JOB.out
 ```
 
 Claude is told to do this when it submits a batch job. Because there is no local
 process, nothing notices such a job ending by itself — close it out with
-`agent-tqdm done <id>` when it is finished.
+`agent-progress done <id>` when it is finished.
 
 ### Modes
 
 | `auto_track` | behavior |
 | --- | --- |
 | `defer` *(default)* | run it normally; track it only once it outlives `auto_track_after_seconds` |
-| `instruct` | stop it before it starts and ask Claude to relaunch it through `agent-tqdm`, with an estimate and monitor chosen first |
+| `instruct` | stop it before it starts and ask Claude to relaunch it through `agent-progress`, with an estimate and monitor chosen first |
 | `off` | never intervene |
 
 `instruct` buys a bar that is correct from the first frame, at the price of a
@@ -246,10 +246,10 @@ Two more things kept cheap:
 Turning it down:
 
 ```bash
-agent-tqdm config --set auto_track=instruct            # ask before taking over
-agent-tqdm config --set auto_track=off                 # leave everything alone
-agent-tqdm config --set auto_track_ignore='^\./scripts/quick'
-AGENT_TQDM_NO_AUTO=1 <command>                         # just this once
+agent-progress config --set auto_track=instruct            # ask before taking over
+agent-progress config --set auto_track=off                 # leave everything alone
+agent-progress config --set auto_track_ignore='^\./scripts/quick'
+AGENT_PROGRESS_NO_AUTO=1 <command>                         # just this once
 ```
 
 Nothing is ever silently allowed past a permission prompt: the rewritten command
@@ -326,7 +326,7 @@ Claude finishing a turn, you sending a message, or a new session starting. It is
 delivered exactly once and never lost. The interrupt is one-shot per crash and
 guarded against stop-hook loops.
 
-`agent-tqdm config --set crash_alert=false` keeps the skull and the notification
+`agent-progress config --set crash_alert=false` keeps the skull and the notification
 but drops the interruption. A job you `cancel` isn't a crash — it gets `■` and
 stays silent.
 
@@ -339,8 +339,8 @@ a bar that flashes past is noise. It's still tracked, still notifies, still
 records its exit code.
 
 ```bash
-agent-tqdm config --set min_duration_seconds=0     # show everything
-agent-tqdm config --set min_duration_seconds=600   # only jobs over 10 minutes
+agent-progress config --set min_duration_seconds=0     # show everything
+agent-progress config --set min_duration_seconds=600   # only jobs over 10 minutes
 ```
 
 `--force-show` pins a job regardless. And a job estimated short that is *still
@@ -355,27 +355,27 @@ rather than staying invisible.
 explanation:
 
 ```bash
-agent-tqdm config                       # the whole table, * marks what you changed
-agent-tqdm config --set bar_width=30 --set style=tqdm
-agent-tqdm config --unset bar_width     # back to the default
-agent-tqdm config --reset               # back to all defaults
-agent-tqdm config --edit                # open the JSON in $EDITOR
+agent-progress config                       # the whole table, * marks what you changed
+agent-progress config --set bar_width=30 --set style=tqdm
+agent-progress config --unset bar_width     # back to the default
+agent-progress config --reset               # back to all defaults
+agent-progress config --edit                # open the JSON in $EDITOR
 ```
 
 Values are validated on the way in — a bad range, an invalid choice or a
 misspelled key is rejected with the reason and a suggestion:
 
 ```
-$ agent-tqdm config --set bar_widht=30
+$ agent-progress config --set bar_widht=30
 unknown setting 'bar_widht' - did you mean bar_width, name_width, note_width?
 ```
 
 See changes before keeping them:
 
 ```bash
-agent-tqdm preview                      # sample bars in every state
-agent-tqdm preview --set style=dots     # try a setting without saving it
-agent-tqdm preview --colors             # the 256-color codes
+agent-progress preview                      # sample bars in every state
+agent-progress preview --set style=dots     # try a setting without saving it
+agent-progress preview --colors             # the 256-color codes
 ```
 
 Presets bundle common combinations:
@@ -392,13 +392,13 @@ Presets bundle common combinations:
 | `eager` | start tracking from the first second |
 
 ```bash
-agent-tqdm config --preset minimal
+agent-progress config --preset minimal
 ```
 
 Any setting can be overridden for one command via the environment:
 
 ```bash
-AGENT_TQDM_BAR_WIDTH=40 AGENT_TQDM_STYLE=bars agent-tqdm ls
+AGENT_PROGRESS_BAR_WIDTH=40 AGENT_PROGRESS_STYLE=bars agent-progress ls
 ```
 
 `NO_COLOR` is honored.
@@ -418,7 +418,7 @@ Styles are `blocks`, `tqdm`, `ascii`, `dots`, `bars`, and any of them can be
 overridden character by character:
 
 ```bash
-agent-tqdm config --set style=bars --set fill_char=▓ --set track_char=░
+agent-progress config --set style=bars --set fill_char=▓ --set track_char=░
 ```
 
 ---
@@ -427,13 +427,13 @@ agent-tqdm config --set style=bars --set fill_char=▓ --set track_char=░
 
 ```
 .claude-plugin/plugin.json   plugin manifest
-skills/agent-tqdm/SKILL.md   teaches Claude when and how to use it
-commands/track.md            /agent-tqdm:track
-commands/progress.md         /agent-tqdm:progress
+skills/agent-progress/SKILL.md   teaches Claude when and how to use it
+commands/track.md            /agent-progress:track
+commands/progress.md         /agent-progress:progress
 hooks/hooks.json             PreToolUse, SessionStart, UserPromptSubmit, Stop
 hooks/auto_track.py          catches long commands as they are launched
 hooks/inject_status.py       job status into context; crash delivery
-scripts/agent_tqdm.py        the engine - state, monitors, estimation, rendering
+scripts/agent_progress.py        the engine - state, monitors, estimation, rendering
 scripts/install-statusline.sh
 tests/all.py                 runs every suite
 tests/run_tests.py           integration: the real CLI, hooks and processes
@@ -451,7 +451,7 @@ Run the tests with `python3 tests/all.py` — 549 checks over real processes,
 nothing mocked. A couple of minutes, most of it spent waiting on actual
 commands, which is the only way to check a threshold or a watcher.
 
-State lives in `~/.claude/agent-tqdm/` (`state.json`, `logs/`, `config.json`).
+State lives in `~/.claude/agent-progress/` (`state.json`, `logs/`, `config.json`).
 The statusline renders in ~40ms. A watcher killed by a reboot is respawned at
 the next session start, so bars don't freeze. A monitor that throws never kills
 the bar — the estimate carries it.

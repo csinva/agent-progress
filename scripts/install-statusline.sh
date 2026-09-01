@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Wire the progress bar into the Claude Code statusline, and put `agent-tqdm`
+# Wire the progress bar into the Claude Code statusline, and put `agent-progress`
 # on PATH. Re-runnable. Undo with: install-statusline.sh --uninstall
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENGINE="$HERE/agent_tqdm.py"
+ENGINE="$HERE/agent_progress.py"
 SETTINGS="$HOME/.claude/settings.json"
 BINDIR="$HOME/.local/bin"
 MODE="${1:-install}"
@@ -31,14 +31,14 @@ if os.path.exists(settings):
 
 if mode == "--uninstall":
     sl = data.get("statusLine") or {}
-    if "agent_tqdm" in json.dumps(sl):
+    if "agent_progress" in json.dumps(sl):
         data.pop("statusLine", None)
-        print("removed the agent-tqdm statusLine")
+        print("removed the agent-progress statusLine")
     else:
         print("statusLine was not ours; left alone")
 else:
     existing = data.get("statusLine") or {}
-    if existing and "agent_tqdm" not in json.dumps(existing):
+    if existing and "agent_progress" not in json.dumps(existing):
         print("NOTE: replacing your existing statusLine:\n  %s" % json.dumps(existing))
         print("      (restore it from the backup above if you want it back)")
     data["statusLine"] = {
@@ -58,19 +58,19 @@ PYEOF
 if [ "$MODE" != "--uninstall" ]; then
   mkdir -p "$BINDIR"
   PY="$(command -v python3 || echo /usr/bin/python3)"
-  cat > "$BINDIR/agent-tqdm" <<EOF
+  cat > "$BINDIR/agent-progress" <<EOF
 #!/bin/sh
 exec "$PY" "$ENGINE" "\$@"
 EOF
-  chmod +x "$BINDIR/agent-tqdm"
-  echo "shim installed -> $BINDIR/agent-tqdm"
+  chmod +x "$BINDIR/agent-progress"
+  echo "shim installed -> $BINDIR/agent-progress"
   case ":$PATH:" in
     *":$BINDIR:"*) ;;
     *) echo "NOTE: $BINDIR is not on your PATH. Add this to ~/.zshrc:"
        echo "      export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
   esac
 else
-  rm -f "$BINDIR/agent-tqdm" && echo "removed $BINDIR/agent-tqdm"
+  rm -f "$BINDIR/agent-progress" && echo "removed $BINDIR/agent-progress"
 fi
 
 echo
@@ -81,7 +81,7 @@ Sessions already running:
   restart           needed for the bar itself - a session reads its statusline
                     setting once, when it starts, so already-open sessions
                     cannot show one however they are reloaded
-Either way `agent-tqdm ls` and the desktop notification work immediately, and
+Either way `agent-progress ls` and the desktop notification work immediately, and
 a job tracked from an older session says so when it starts.
 MSG
 else

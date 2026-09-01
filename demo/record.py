@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Record a short .mov and .gif of agent-tqdm.
+"""Record a short .mov and .gif of agent-progress.
 
 Everything shown is real: the commands go through the actual PreToolUse hook,
 which rewrites them exactly as it would in a session, and the bars are rendered
@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-ENGINE = os.path.join(ROOT, "scripts", "agent_tqdm.py")
+ENGINE = os.path.join(ROOT, "scripts", "agent_progress.py")
 HOOK = os.path.join(ROOT, "hooks", "auto_track.py")
 
 BG = (13, 17, 23)
@@ -307,17 +307,17 @@ class Panel(object):
             line = raw.rstrip()
             if not line:
                 continue
-            tone = "warn" if line.startswith("[agent-tqdm]") else "dim"
+            tone = "warn" if line.startswith("[agent-progress]") else "dim"
             # the handoff message is written for a wide terminal; in a column
             # only its first sentence earns the space
             bare = line.strip()
-            if bare.startswith("[agent-tqdm]"):
+            if bare.startswith("[agent-progress]"):
                 if any("tracked, now" in l for l in self.lines):
                     continue
-                line = "[agent-tqdm] tracked, now in the background"
-            elif bare.startswith(("agent-tqdm ", "If you expect", "bar can say",
+                line = "[agent-progress] tracked, now in the background"
+            elif bare.startswith(("agent-progress ", "If you expect", "bar can say",
                                   "running in the background", "Note:", "statusline was",
-                                  "Restart Claude Code", "and `agent-tqdm")):
+                                  "Restart Claude Code", "and `agent-progress")):
                 continue        # the full banner is written for a wide terminal
             self.say(self.cc.paint("  " + line, tone, True))
 
@@ -361,8 +361,8 @@ SCRIPT = [
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default=os.path.join(HERE, "agent-tqdm.mov"))
-    ap.add_argument("--gif", default=os.path.join(HERE, "agent-tqdm.gif"))
+    ap.add_argument("--out", default=os.path.join(HERE, "agent-progress.mov"))
+    ap.add_argument("--gif", default=os.path.join(HERE, "agent-progress.gif"))
     ap.add_argument("--fps", type=int, default=12)
     ap.add_argument("--font-size", type=int, default=18)
     ap.add_argument("--gif-width", type=int, default=1040)
@@ -371,7 +371,7 @@ def main():
     args = ap.parse_args()
 
     import importlib.util
-    spec = importlib.util.spec_from_file_location("agent_tqdm", ENGINE)
+    spec = importlib.util.spec_from_file_location("agent_progress", ENGINE)
     cc = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cc)
 
@@ -393,7 +393,7 @@ def main():
     fallbacks = build_fallbacks(cfg["spinner"] + "\u2713\u2192\u00b7\u25b6\u2502\u2500",
                                 args.font_size)
 
-    scratch = tempfile.mkdtemp(prefix="agent-tqdm-rec-")
+    scratch = tempfile.mkdtemp(prefix="agent-progress-rec-")
     frames = os.path.join(scratch, "frames")
     os.makedirs(frames)
     for spec_ in PANELS:
@@ -434,14 +434,14 @@ def main():
             fired.add("eta")
             subprocess.run([sys.executable, ENGINE, "update", "rec-train",
                             "--eta", "45s", "--quiet"], capture_output=True)
-            panels[1].say(cc.paint("  $ agent-tqdm update rec-train --eta 45s",
+            panels[1].say(cc.paint("  $ agent-progress update rec-train --eta 45s",
                                    "run", True))
         for pan in panels:
             pan.drain()
 
         if now - last >= (speed / float(args.fps)):
             last = now
-            head = cc.paint("agent-tqdm", "dim", True)
+            head = cc.paint("agent-progress", "dim", True)
             if speed > 1:
                 head += cc.paint("   \u25b6\u25b6 %g\u00d7 faster" % speed, "warn", True)
             head += cc.paint("      probes forced to 2s for this clip "

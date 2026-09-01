@@ -1,5 +1,5 @@
 {
-  "description": "agent-tqdm: track long-running jobs automatically, surface them to Claude, and deliver crash reports into the session",
+  "description": "agent-progress: track long-running jobs automatically, surface them to Claude, and deliver crash reports into the session",
   "hooks": {
     "PreToolUse": [
       {

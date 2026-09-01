@@ -16,11 +16,11 @@ import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ENGINE = os.path.join(ROOT, "scripts", "agent_tqdm.py")
+ENGINE = os.path.join(ROOT, "scripts", "agent_progress.py")
 HOOKS = os.path.join(ROOT, "hooks")
 STATUS = os.path.join(HOOKS, "inject_status.py")
 AUTO = os.path.join(HOOKS, "auto_track.py")
-spec = importlib.util.spec_from_file_location("agent_tqdm", ENGINE)
+spec = importlib.util.spec_from_file_location("agent_progress", ENGINE)
 cc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cc)
 
@@ -125,8 +125,8 @@ time.sleep(2)
 
 print()
 print("=== a state directory whose path contains spaces ===")
-spacey = os.path.join(tempfile.mkdtemp(prefix="agent tqdm "), "state dir")
-env = dict(os.environ, AGENT_TQDM_HOME=spacey)
+spacey = os.path.join(tempfile.mkdtemp(prefix="agent progress "), "state dir")
+env = dict(os.environ, AGENT_PROGRESS_HOME=spacey)
 r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "1s", "--shell",
                     "echo hello from a spacey path"], capture_output=True, text=True, env=env)
 ck("a fast command works from a path with spaces",
@@ -174,7 +174,7 @@ env_old = dict(os.environ, CLAUDE_CODE_SESSION_ID="was-already-open")
 r = subprocess.run([sys.executable, ENGINE, "start", "s1", "--eta", "3h",
                     "--monitor", "time", "--no-watch"],
                    capture_output=True, text=True, env=env_old)
-warned = "started before agent-tqdm was loaded" in r.stdout
+warned = "started before agent-progress was loaded" in r.stdout
 ck("a job from an older session explains the missing bar",
    warned or not cc.statusline_wired(), r.stdout[-120:])
 ck("doctor says which kind of session this is",
@@ -186,7 +186,7 @@ r2 = subprocess.run([sys.executable, ENGINE, "start", "s2", "--eta", "3h",
                      "--monitor", "time", "--no-watch"],
                     capture_output=True, text=True, env=env_old)
 ck("and stops saying it once the session is known",
-   "started before agent-tqdm was loaded" not in r2.stdout, r2.stdout[-120:])
+   "started before agent-progress was loaded" not in r2.stdout, r2.stdout[-120:])
 ck("session_is_new is false for a recorded session",
    not cc.session_is_new("was-already-open"))
 ck("session_is_new is true for one never seen", cc.session_is_new("never-seen-before"))
@@ -206,6 +206,25 @@ for label, path in [("without ~/.local/bin",
                        env=dict(os.environ, PATH=path))
     ck("a rewritten command still runs %s" % label,
        r.returncode == 0 and "ran" in r.stdout, "exit=%d %s" % (r.returncode, r.stderr[:50]))
+
+print()
+print("=== the wrapper never wraps itself ===")
+
+
+def wrapped_form(cmd):
+    out = hook(AUTO, "PreToolUse", {"tool_name": "Bash", "session_id": "recur",
+                                    "tool_input": {"command": cmd}})
+    return json.loads(out)["hookSpecificOutput"]["updatedInput"]["command"] if out else None
+
+
+once = wrapped_form("python3 train.py")
+ck("a real command is wrapped", bool(once), str(once))
+ck("its wrapped form is not wrapped again", wrapped_form(once) is None, str(wrapped_form(once)))
+for form in ["agent-progress ls",
+             os.path.expanduser("~/.local/bin/agent-progress") + " exec --shell 'python3 train.py'",
+             "sudo /usr/local/bin/agent-progress run -- python3 train.py",
+             "python3 /somewhere/agent_progress.py exec --shell 'python3 train.py'"]:
+    ck("left alone: %s" % form[:44], wrapped_form(form) is None)
 
 print()
 print("=== the session a job belongs to is recorded ===")

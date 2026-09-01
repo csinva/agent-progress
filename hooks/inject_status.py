@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""agent-tqdm hooks.
+"""agent-progress hooks.
 
 Two jobs:
 
@@ -17,12 +17,12 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ENGINE = os.path.join(os.path.dirname(HERE), "scripts", "agent_tqdm.py")
+ENGINE = os.path.join(os.path.dirname(HERE), "scripts", "agent_progress.py")
 
 
 def load_engine():
     import importlib.util
-    spec = importlib.util.spec_from_file_location("agent_tqdm", ENGINE)
+    spec = importlib.util.spec_from_file_location("agent_progress", ENGINE)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -108,7 +108,7 @@ def job_lines(cc, cfg):
             bits.append("note: %s" % j["note"])
         if j.get("auto_launched") and not j.get("eta_end"):
             bits.append("TRACKED AUTOMATICALLY, still has no estimate - set one with "
-                        "`agent-tqdm update %s --eta <duration>`" % j.get("id"))
+                        "`agent-progress update %s --eta <duration>`" % j.get("id"))
         lines.append("- " + ", ".join(bits))
     # what counts as "the picture changed": which jobs exist, their state, and
     # whether each has an estimate yet. Not progress, which Claude can ask for.
@@ -230,14 +230,14 @@ def main():
     parts = list(blocks)
     if lines:
         parts.append(
-            "%d tracked job(s) running (agent-tqdm plugin). These observe themselves "
+            "%d tracked job(s) running (agent-progress plugin). These observe themselves "
             "on a timer - do not poll them, re-launch them, or wait on them.\n%s\n"
             "Intervene only if something looks wrong or the user asks: "
-            "`agent-tqdm log <id> -n 40` to read output, then "
-            "`agent-tqdm update <id> --eta <dur> --note '...'` to correct the estimate."
+            "`agent-progress log <id> -n 40` to read output, then "
+            "`agent-progress update <id> --eta <dur> --note '...'` to correct the estimate."
             % (len(lines), "\n".join(lines)))
     elif hidden:
-        parts.append("%d short job(s) tracked by the agent-tqdm plugin, below the "
+        parts.append("%d short job(s) tracked by the agent-progress plugin, below the "
                      "statusline threshold. Do not re-launch them." % hidden)
     if not parts:
         return 0

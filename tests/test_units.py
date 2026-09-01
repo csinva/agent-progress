@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for agent-tqdm's internals.
+"""Unit tests for agent-progress's internals.
 
 run_tests.py checks that the CLI behaves; this checks the parts underneath it -
 duration and size parsing, progress scraping, the estimator, line clipping, the
@@ -14,8 +14,8 @@ import tempfile
 import time
 
 ENGINE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                      "scripts", "agent_tqdm.py")
-spec = importlib.util.spec_from_file_location("agent_tqdm", ENGINE)
+                      "scripts", "agent_progress.py")
+spec = importlib.util.spec_from_file_location("agent_progress", ENGINE)
 cc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cc)
 
@@ -145,7 +145,7 @@ ck("no signal at all -> indeterminate", cc.estimate(job(), now, cfg)["frac"] is 
 
 print()
 print("=== monitors ===")
-scratch = tempfile.mkdtemp(prefix="agent-tqdm-unit-")
+scratch = tempfile.mkdtemp(prefix="agent-progress-unit-")
 log = os.path.join(scratch, "j.log")
 open(log, "w").write("loading data\nnormalizing (v2)\n")
 m = cc.monitor_reading({"log": log, "log_offset": 0,

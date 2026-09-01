@@ -1,11 +1,11 @@
 ---
-name: agent-tqdm
+name: agent-progress
 description: Track any long-running job with a tqdm-style progress bar in the Claude Code statusline - training runs, data pipelines, test suites, builds, migrations, downloads, simulations, backups, sweeps. Use when the user starts or asks about something that will take more than a couple of minutes, says "how long will this take", "how far along is it", "track this", "run this in the background", "show me a progress bar", or wants an ETA on something already running. Also use to set up monitoring for a job with no obvious progress output.
 ---
 
 # Progress bars for long-running jobs
 
-`agent-tqdm` puts a live bar in the user's statusline for any job that takes
+`agent-progress` puts a live bar in the user's statusline for any job that takes
 minutes to days. Your involvement is almost entirely **up front**:
 
 1. Decide **how this particular job's progress can be observed**.
@@ -17,10 +17,10 @@ cadence, recomputes the total estimate from what it sees, and marks the job done
 or failed with the real exit code. **Do not poll the job yourself** — no loops,
 no repeated `ls`, no waiting. Check in only when you have a reason to.
 
-Use `agent-tqdm`. If it is not on PATH, use
-`python3 ~/.claude/skills/agent-tqdm/scripts/agent_tqdm.py`.
+Use `agent-progress`. If it is not on PATH, use
+`python3 ~/.claude/skills/agent-progress/scripts/agent_progress.py`.
 
-`agent-tqdm autotrack '<command>'` shows whether a given command would be caught
+`agent-progress autotrack '<command>'` shows whether a given command would be caught
 automatically, and why.
 
 ## It costs nothing until a job proves slow
@@ -37,13 +37,13 @@ result ends with a note telling you so.
 When you get that note:
 
 - **The command is still running.** Do not re-run it. Its remaining output goes
-  to the job's log: `agent-tqdm log <id> -n 40`, and `agent-tqdm ls --json` for
+  to the job's log: `agent-progress log <id> -n 40`, and `agent-progress ls --json` for
   progress and state.
 - **Give it an estimate if it is worth one.** The hook cannot guess a duration -
   that is the one thing only you can supply:
 
   ```bash
-  agent-tqdm update <id> --eta 40m --note "what it is doing"
+  agent-progress update <id> --eta 40m --note "what it is doing"
   ```
 
   Judge whether it is worth doing. A job that will be over in a minute never
@@ -54,10 +54,10 @@ When you get that note:
   file, or prints stage names, say so:
 
   ```bash
-  agent-tqdm update <id> --monitor files --glob 'out/*.parquet' --total 500
+  agent-progress update <id> --monitor files --glob 'out/*.parquet' --total 500
   ```
 
-You can still start a job yourself with `agent-tqdm run`, and it is better when
+You can still start a job yourself with `agent-progress run`, and it is better when
 you already know something will be slow: the bar is then correct from the first
 frame instead of starting blind 20 seconds in.
 
@@ -81,7 +81,7 @@ Look at what the job actually *does*, and pick the signal that moves:
 | has state queryable from outside | `probe` | `--probe 'psql -tAc "select count(*) from rows"' --total 2000000` |
 | exposes nothing at all | `time` | `--monitor time` |
 
-`agent-tqdm monitors` prints this list with examples.
+`agent-progress monitors` prints this list with examples.
 
 How to choose: read the script or command, and skim any output it has already
 produced (`head`, or `--help`). Ask what changes on disk or in the log as it
@@ -106,14 +106,14 @@ output to a file, which is all a bar needs:
 
 ```bash
 JOB=$(sbatch --parsable train.sbatch)
-agent-tqdm start train-$JOB --eta 6h --log slurm-$JOB.out
+agent-progress start train-$JOB --eta 6h --log slurm-$JOB.out
 ```
 
 Progress then comes from the log exactly as it would for a local run. If the
 script prints nothing countable, watch the queue instead:
 
 ```bash
-agent-tqdm start train-$JOB --eta 6h \
+agent-progress start train-$JOB --eta 6h \
   --probe "squeue -j $JOB -h -o %T | grep -c RUNNING" --total 1
 ```
 
@@ -122,7 +122,7 @@ ending on its own. Check on it when you are next in the conversation - `squeue
 -j $JOB` or the tail of the log - and close it out yourself:
 
 ```bash
-agent-tqdm done train-$JOB          # or: agent-tqdm fail train-$JOB --note "OOM"
+agent-progress done train-$JOB          # or: agent-progress fail train-$JOB --note "OOM"
 ```
 
 ## Step 2: estimate the duration
@@ -154,7 +154,7 @@ threshold appears on its own, so an underestimate is not a problem.
 ## Step 3: launch
 
 ```bash
-agent-tqdm run --name ingest --eta 40m --glob 'out/*.parquet' --total 500 --unit file \
+agent-progress run --name ingest --eta 40m --glob 'out/*.parquet' --total 500 --unit file \
   -- python pipeline.py --input raw/
 ```
 
@@ -165,7 +165,7 @@ background mode when the user wants to see progress — only `run` makes a bar.
 For something already running:
 
 ```bash
-agent-tqdm start reindex --pid 45123 --log /var/log/reindex.log --eta 3h
+agent-progress start reindex --pid 45123 --log /var/log/reindex.log --eta 3h
 ```
 
 Then tell the user the expected wall-clock finish time and stop. The job is
@@ -185,19 +185,19 @@ can volunteer status without checking anything.
 **Intervene only when you know something the watcher cannot see:**
 
 ```bash
-agent-tqdm ls --json                      # status of everything, structured
-agent-tqdm log ingest -n 40               # read recent output
-agent-tqdm update ingest --eta 90m --note "hit the slow shard set"
-agent-tqdm update ingest --monitor files --glob 'out/**/*.parquet'   # fix the monitor
+agent-progress ls --json                      # status of everything, structured
+agent-progress log ingest -n 40               # read recent output
+agent-progress update ingest --eta 90m --note "hit the slow shard set"
+agent-progress update ingest --monitor files --glob 'out/**/*.parquet'   # fix the monitor
 ```
 
 Reasons to intervene: the log shows an error, a stall, or a retry loop; the job
 has phases with very different costs and it just changed phase (add
 `--reset-rate` so the old throughput is discarded); the monitor you picked is
-clearly not tracking anything (`agent-tqdm ls --json` shows no movement and
+clearly not tracking anything (`agent-progress ls --json` shows no movement and
 `monitor_kind` is not `time`); or the user asks.
 
-Do not re-run `agent-tqdm ls` repeatedly in one turn, and never sleep-loop
+Do not re-run `agent-progress ls` repeatedly in one turn, and never sleep-loop
 waiting for a job. If the user wants genuinely periodic reporting, use the
 `/loop` skill.
 
@@ -221,7 +221,7 @@ were doing, and even if it is unrelated to the current task. Then:
 2. Read the cause out of the last output you were given. `SIGKILL` usually means
    the OOM killer; `SIGSEGV` a native crash; a plain non-zero exit means the
    traceback in the log tail is the real story. Read more with
-   `agent-tqdm log <id> -n 60` if the tail is not enough.
+   `agent-progress log <id> -n 60` if the tail is not enough.
 3. Suggest a concrete fix if the cause is clear (smaller batch size, more
    memory, a missing file).
 4. **Do not re-run the job without asking.** It may have burned hours, and
@@ -233,7 +233,7 @@ reported this way.
 
 ## Reporting status
 
-`agent-tqdm ls --json` gives `percent`, `elapsed_human`, `remaining_human`,
+`agent-progress ls --json` gives `percent`, `elapsed_human`, `remaining_human`,
 `eta_clock`, `total_estimate_human`, `initial_estimate_human`, `eta_source`,
 `monitor` and `next_update_in_s`.
 
@@ -248,16 +248,16 @@ Jobs launched with `run` finish themselves and fire a desktop notification. Mark
 state by hand only for jobs whose end the tool cannot see:
 
 ```bash
-agent-tqdm done ingest
-agent-tqdm fail ingest --exit-code 137 --note "OOM killed"
-agent-tqdm cancel ingest        # also SIGTERMs the process
+agent-progress done ingest
+agent-progress fail ingest --exit-code 137 --note "OOM killed"
+agent-progress cancel ingest        # also SIGTERMs the process
 ```
 
 ## Appearance
 
 Everything about the bar is configurable — width, style, which fields appear,
 colors, thresholds. If the user asks for it to look different, do not edit the
-script: `agent-tqdm config` lists every setting with its default, `agent-tqdm
-config --set key=value` changes one, and `agent-tqdm preview` renders sample
-bars so they can see the result immediately. `agent-tqdm config --preset
+script: `agent-progress config` lists every setting with its default, `agent-progress
+config --set key=value` changes one, and `agent-progress preview` renders sample
+bars so they can see the result immediately. `agent-progress config --preset
 minimal|rich|tqdm|plain|quiet` covers the common requests in one step.

@@ -16,9 +16,9 @@ import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ENGINE = os.path.join(ROOT, "scripts", "agent_tqdm.py")
+ENGINE = os.path.join(ROOT, "scripts", "agent_progress.py")
 HOOKS = os.path.join(ROOT, "hooks")
-spec = importlib.util.spec_from_file_location("agent_tqdm", ENGINE)
+spec = importlib.util.spec_from_file_location("agent_progress", ENGINE)
 cc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cc)
 
@@ -63,7 +63,7 @@ except Exception as ex:
 
 print()
 print("=== the watcher's stall rule ===")
-scratch = tempfile.mkdtemp(prefix="agent-tqdm-life-")
+scratch = tempfile.mkdtemp(prefix="agent-progress-life-")
 log = os.path.join(scratch, "quiet.log")
 open(log, "w").write("starting up\n")
 # a real, living process that will never print anything again
@@ -96,7 +96,7 @@ cli("rm", "--all")
 print()
 print("=== only one watcher, however many sessions start at once ===")
 import threading
-subprocess.run(["pkill", "-f", "agent_tqdm.py _watch"], capture_output=True)
+subprocess.run(["pkill", "-f", "agent_progress.py _watch"], capture_output=True)
 time.sleep(1)
 cli("start", "orph", "--eta", "2h", "--monitor", "time", "--no-watch")
 with cc.state_rw() as st:
@@ -120,7 +120,7 @@ for _ in range(20):
         gone = True
         break
 ck("a watcher notices its job was removed within ~15s", gone, "still running")
-subprocess.run(["pkill", "-f", "agent_tqdm.py _watch"], capture_output=True)
+subprocess.run(["pkill", "-f", "agent_progress.py _watch"], capture_output=True)
 
 print()
 print("=== a log that is truncated under the watcher ===")
@@ -210,7 +210,7 @@ cli("config", "--reset")
 
 print()
 print("=== the installer round-trips ===")
-fake = tempfile.mkdtemp(prefix="agent-tqdm-home-")
+fake = tempfile.mkdtemp(prefix="agent-progress-home-")
 os.makedirs(os.path.join(fake, ".claude"))
 settings = os.path.join(fake, ".claude", "settings.json")
 json.dump({"model": "opus", "statusLine": {"type": "command", "command": "mine"}},
@@ -219,14 +219,14 @@ env = dict(os.environ, HOME=fake)
 script = os.path.join(ROOT, "scripts", "install-statusline.sh")
 r = subprocess.run(["bash", script], capture_output=True, text=True, env=env)
 d = json.load(open(settings))
-ck("install wires the statusline", "agent_tqdm" in json.dumps(d.get("statusLine")), str(d))
+ck("install wires the statusline", "agent_progress" in json.dumps(d.get("statusLine")), str(d))
 ck("install keeps other settings", d.get("model") == "opus", str(d))
 ck("install backs the old file up",
    any(n.startswith("settings.json.bak-") for n in os.listdir(os.path.dirname(settings))))
 ck("install warns before replacing an existing statusLine", "replacing" in r.stdout, r.stdout[-200:])
 r2 = subprocess.run(["bash", script], capture_output=True, text=True, env=env)
 ck("installing twice is harmless", r2.returncode == 0 and
-   "agent_tqdm" in json.dumps(json.load(open(settings)).get("statusLine")))
+   "agent_progress" in json.dumps(json.load(open(settings)).get("statusLine")))
 subprocess.run(["bash", script, "--uninstall"], capture_output=True, text=True, env=env)
 d = json.load(open(settings))
 ck("uninstall removes the statusline", "statusLine" not in d, str(d))

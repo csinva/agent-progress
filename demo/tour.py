@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A narrated tour of agent-tqdm.
+"""A narrated tour of agent-progress.
 
 Launches one short job per monitor kind - a log counter, output files, a
 growing file, named stages, a shell probe - plus one that crashes and one that
@@ -8,7 +8,7 @@ run, in the terminal *and* in the Claude Code statusline.
 
 Everything it creates is namespaced `demo-` and removed at the end.
 
-    python3 demo/tour.py            # or:  agent-tqdm demo --tour
+    python3 demo/tour.py            # or:  agent-progress demo --tour
     python3 demo/tour.py --speed 2  # twice as fast
 """
 
@@ -22,7 +22,7 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ENGINE = os.path.join(os.path.dirname(HERE), "scripts", "agent_tqdm.py")
+ENGINE = os.path.join(os.path.dirname(HERE), "scripts", "agent_progress.py")
 
 DIM, BOLD, CYAN, YELLOW, GREEN, RESET = (
     "\033[38;5;244m", "\033[1m", "\033[38;5;44m", "\033[38;5;179m",
@@ -133,7 +133,7 @@ NARRATION = [
         "there, live."),
     (7, "Every bar is driven by a different signal - a log counter, files on disk, "
         "a file's size, stage names, a shell command."),
-    (14, "demo-quickie appears here because `agent-tqdm ls` shows everything - but "
+    (14, "demo-quickie appears here because `agent-progress ls` shows everything - but "
          "check your statusline, it is absent there. Under the 2-minute floor."),
     (22, "demo-train was given a deliberately wrong 25s estimate. It is measuring "
          "its own throughput now - watch the ETA move."),
@@ -152,7 +152,7 @@ def render(elapsed, note, live):
                      if "demo-" in ln or not ln.strip())
     if live:
         sys.stdout.write("\033[H\033[J")
-    header = "%sagent-tqdm tour%s  %s+%02ds%s" % (BOLD, RESET, DIM, elapsed, RESET)
+    header = "%sagent-progress tour%s  %s+%02ds%s" % (BOLD, RESET, DIM, elapsed, RESET)
     print("\n" + header + "\n")
     print(bars if bars.strip() else "  (starting...)")
     if note:
@@ -161,7 +161,7 @@ def render(elapsed, note, live):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="A narrated tour of agent-tqdm.")
+    ap = argparse.ArgumentParser(description="A narrated tour of agent-progress.")
     ap.add_argument("--speed", type=float, default=1.0,
                     help="run the tour faster (2 = twice as fast)")
     ap.add_argument("--no-cleanup", action="store_true",
@@ -170,9 +170,9 @@ def main():
 
     tick = 1.0 / max(0.2, args.speed)
     live = sys.stdout.isatty()
-    scratch = tempfile.mkdtemp(prefix="agent-tqdm-tour-")
+    scratch = tempfile.mkdtemp(prefix="agent-progress-tour-")
 
-    print("\n%sagent-tqdm%s - a live tour\n" % (BOLD, RESET))
+    print("\n%sagent-progress%s - a live tour\n" % (BOLD, RESET))
     print("  Seven real jobs are about to run. Nothing here is faked: each one")
     print("  writes real output and is watched exactly as your own jobs would be.")
     print("\n  %sWatch your Claude Code statusline while this runs.%s\n" % (CYAN, RESET))
@@ -246,8 +246,8 @@ def main():
         "a short job deliberately kept off the statusline",
     ]:
         print("  %s-%s %s" % (CYAN, RESET, line))
-    print("\n  %sagent-tqdm config%s to change any of it, "
-          "%sagent-tqdm preview%s to see the result.\n" % (CYAN, RESET, CYAN, RESET))
+    print("\n  %sagent-progress config%s to change any of it, "
+          "%sagent-progress preview%s to see the result.\n" % (CYAN, RESET, CYAN, RESET))
 
     if not args.no_cleanup:
         for w in WORKLOADS:

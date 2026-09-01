@@ -13,8 +13,8 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ENGINE = os.path.join(ROOT, "scripts", "agent_tqdm.py")
-spec = importlib.util.spec_from_file_location("agent_tqdm", ENGINE)
+ENGINE = os.path.join(ROOT, "scripts", "agent_progress.py")
+spec = importlib.util.spec_from_file_location("agent_progress", ENGINE)
 cc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cc)
 STATE = cc.STATE
@@ -68,9 +68,9 @@ for label, doc in shapes.items():
 print()
 print("=== state directory that is actually a file ===")
 open(STATE, "w").write('{"jobs":{}}')
-tmpfile = "/tmp/agent-tqdm-not-a-dir"
+tmpfile = "/tmp/agent-progress-not-a-dir"
 open(tmpfile, "w").write("x")
-env = dict(os.environ, AGENT_TQDM_HOME=tmpfile)
+env = dict(os.environ, AGENT_PROGRESS_HOME=tmpfile)
 for cmd in (["ls"], ["run", "--name", "x", "--", "true"], ["statusline"]):
     r = subprocess.run([sys.executable, ENGINE] + cmd, input="{}",
                        capture_output=True, text=True, env=env)
@@ -119,7 +119,7 @@ ck("keep_done_seconds=0 drops it at once", "keep" not in sl().stdout, sl().stdou
 run("config", "--reset")
 run("rm", "--all")
 
-env = dict(os.environ, AGENT_TQDM_BAR_WIDTH="8", AGENT_TQDM_STYLE="ascii")
+env = dict(os.environ, AGENT_PROGRESS_BAR_WIDTH="8", AGENT_PROGRESS_STYLE="ascii")
 run("start", "envjob", "--eta", "2h", "--monitor", "time", "--no-watch")
 out = sl(env).stdout
 ck("environment overrides beat the config file", "[" in out and "#" not in out.split("[")[0],

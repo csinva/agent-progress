@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for agent-tqdm.
+"""Tests for agent-progress.
 
 Exercises the parts that are easy to get quietly wrong: whether a wrapped
 command still behaves exactly like the unwrapped one, whether the deferral
@@ -21,10 +21,10 @@ import threading
 import time
 
 ENGINE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                      "scripts", "agent_tqdm.py")
+                      "scripts", "agent_progress.py")
 HOOKS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks")
 HOOK = os.path.join(HOOKS, "auto_track.py")
-_spec = importlib.util.spec_from_file_location("agent_tqdm", ENGINE)
+_spec = importlib.util.spec_from_file_location("agent_progress", ENGINE)
 cc = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cc)
 
@@ -103,7 +103,7 @@ for name, sh, want in cases:
 
 print()
 print("=== nothing is left behind by a fast command ===")
-logs = os.path.expanduser("~/.claude/agent-tqdm/logs")
+logs = os.path.expanduser("~/.claude/agent-progress/logs")
 before = set(os.listdir(logs)) if os.path.isdir(logs) else set()
 ex("echo transient")
 after_files = set(os.listdir(logs)) if os.path.isdir(logs) else set()
@@ -117,7 +117,7 @@ t = time.time(); r = ex("sleep 1", after="10s"); dt = time.time() - t
 ck("under threshold: waits for the command", 0.8 < dt < 4 and r.returncode == 0, "%.1fs" % dt)
 t = time.time(); r = ex("sleep 30", after="2s"); dt = time.time() - t
 ck("over threshold: hands off promptly", 1.5 < dt < 5, "%.1fs" % dt)
-ck("handoff message present", "agent-tqdm" in r.stdout and "tracked" in r.stdout, repr(r.stdout[:80]))
+ck("handoff message present", "agent-progress" in r.stdout and "tracked" in r.stdout, repr(r.stdout[:80]))
 jobs = json.loads(cli("ls", "--json").stdout or "[]")
 ck("handoff created exactly one job", len(jobs) == 1, "%d jobs" % len(jobs))
 cli("rm", "--all")
@@ -160,7 +160,7 @@ cli("config", "--reset")
 ck("defer wraps every time", all(hook("python train.py", "d1") for _ in range(3)))
 ck("ordinary command untouched", hook("git status", "d1") is None)
 ck("already-wrapped command untouched",
-   hook("agent-tqdm exec --shell 'python train.py'", "d1") is None)
+   hook("agent-progress exec --shell 'python train.py'", "d1") is None)
 ck("non-Bash tool ignored",
    subprocess.run([sys.executable, HOOK],
                   input=json.dumps({"tool_name": "Edit", "tool_input": {}}),
@@ -246,7 +246,7 @@ for spec, lo, hi in (("1s", 0.5, 3.5), ("2s", 1.5, 4.5)):
 
 print()
 print("=== a corrupt state file does not break anything ===")
-sp = os.path.expanduser("~/.claude/agent-tqdm/state.json")
+sp = os.path.expanduser("~/.claude/agent-progress/state.json")
 open(sp, "w").write("{not json at all")
 ck("ls survives", cli("ls").returncode == 0)
 ck("statusline survives", subprocess.run([sys.executable, ENGINE, "statusline"],
@@ -265,10 +265,10 @@ import shutil
 # would be the obvious way to make the state directory unusable, but root
 # ignores it, and tests get run as root in containers often enough that the
 # check would quietly stop checking anything.
-blocker = os.path.join(tempfile.mkdtemp(prefix="agent-tqdm-block-"), "a-file")
+blocker = os.path.join(tempfile.mkdtemp(prefix="agent-progress-block-"), "a-file")
 open(blocker, "w").write("not a directory")
 ro = os.path.join(blocker, "state")
-env = dict(os.environ, AGENT_TQDM_HOME=ro)
+env = dict(os.environ, AGENT_PROGRESS_HOME=ro)
 try:
     for label, sh, want in [("fast", "echo hello", 0),
                             ("failing", "echo oops >&2; exit 5", 5),

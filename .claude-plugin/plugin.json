@@ -1,11 +1,11 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
-  "name": "agent-tqdm",
+  "name": "agent-progress",
   "version": "1.2.0",
   "description": "tqdm-style progress bars in the Claude Code statusline for any long-running job. Long commands are tracked automatically; Claude picks how to observe each one, and the ETA corrects itself from what is observed.",
   "author": {
     "name": "Chandan Singh",
     "email": "csinva23@gmail.com"
   },
-  "homepage": "https://github.com/csinva/agent-tqdm"
+  "homepage": "https://github.com/csinva/agent-progress"
 }

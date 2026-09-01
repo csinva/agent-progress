@@ -14,8 +14,8 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ENGINE = os.path.join(ROOT, "scripts", "agent_tqdm.py")
-spec = importlib.util.spec_from_file_location("agent_tqdm", ENGINE)
+ENGINE = os.path.join(ROOT, "scripts", "agent_progress.py")
+spec = importlib.util.spec_from_file_location("agent_progress", ENGINE)
 cc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cc)
 
@@ -113,7 +113,7 @@ for c in sorted(set(cmds)):
 print()
 print("=== plugin metadata ===")
 man = json.load(open(os.path.join(ROOT, ".claude-plugin", "plugin.json")))
-ck("manifest names the plugin", man.get("name") == "agent-tqdm")
+ck("manifest names the plugin", man.get("name") == "agent-progress")
 ck("manifest has a version", bool(man.get("version")))
 hooks = json.load(open(os.path.join(ROOT, "hooks", "hooks.json")))
 for ev, entries in hooks["hooks"].items():
@@ -122,7 +122,7 @@ for ev, entries in hooks["hooks"].items():
             path = h["command"].split('"')[1]
             real = path.replace("${CLAUDE_PLUGIN_ROOT}", ROOT)
             ck("%s hook script exists" % ev, os.path.exists(real), real)
-for f in ["skills/agent-tqdm/SKILL.md", "commands/track.md", "commands/progress.md"]:
+for f in ["skills/agent-progress/SKILL.md", "commands/track.md", "commands/progress.md"]:
     head = open(os.path.join(ROOT, f)).read()
     ck("%s has frontmatter" % f, head.startswith("---") and head.count("---") >= 2)
 

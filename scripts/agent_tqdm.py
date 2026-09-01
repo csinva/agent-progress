@@ -405,7 +405,12 @@ def parse_progress(text, pattern=None, known_total=None):
     or None if nothing matched. Scans patterns in priority order and, within a
     pattern, takes the *last* match in the chunk (the freshest line).
     """
-    pats = [("custom", re.compile(pattern))] if pattern else BUILTIN_PATTERNS
+    pats = BUILTIN_PATTERNS
+    if pattern:
+        try:
+            pats = [("custom", re.compile(pattern))]
+        except re.error:
+            pass          # unusable pattern: fall back rather than raise
 
     for name, rx in pats:
         last = None
@@ -686,10 +691,12 @@ def paint(text, key, on=True):
 def bar_chars(cfg):
     """Style preset, with any per-character override applied on top."""
     left, right, fill, partials, track = STYLES.get(cfg["style"], STYLES["blocks"])
+    # every override is one cell wide: a longer string would silently stretch
+    # the bar past bar_width and push the rest of the line off the screen
     if cfg["fill_char"]:
-        fill, partials = cfg["fill_char"], None   # custom fill cannot have 1/8ths
-    return (cfg["left_cap"] or left, cfg["right_cap"] or right,
-            fill, partials, cfg["track_char"] or track)
+        fill, partials = cfg["fill_char"][:1], None   # a custom fill has no 1/8ths
+    return (cfg["left_cap"][:1] or left, cfg["right_cap"][:1] or right,
+            fill, partials, cfg["track_char"][:1] or track)
 
 
 def draw_bar(frac, cfg, tone="run"):
@@ -1041,7 +1048,10 @@ def classify_command(command, tool_input=None, cfg=None):
         result["why"] = "backgrounded, and auto_track_background is off"
         return result
 
-    timeout_s = (tool_input.get("timeout") or 0) / 1000.0
+    try:
+        timeout_s = float(tool_input.get("timeout") or 0) / 1000.0
+    except (TypeError, ValueError):
+        timeout_s = 0.0     # whatever the caller sent, it is not a timeout
     limit = cfg["auto_track_timeout_seconds"]
 
     if background:
@@ -1310,6 +1320,22 @@ def tail_job_log(job, max_bytes=262144):
     return text
 
 
+def _milestone_hit(name, text):
+    """Has this stage appeared in the log?
+
+    Plain text first. A stage is something a person typed to describe a phase of
+    a job - "normalizing (v2)", "cost was $5" - and reading those as regexes
+    quietly breaks them: the parentheses become a group, the dollar an anchor.
+    A regex is still honoured if the literal is not found, so a deliberate
+    pattern keeps working."""
+    if name.lower() in text.lower():
+        return True
+    try:
+        return re.search(name, text, re.I) is not None
+    except re.error:
+        return False
+
+
 def monitor_reading(job, now=None):
     """Observe the job once, however this job is configured to be observed.
 
@@ -1338,11 +1364,7 @@ def monitor_reading(job, now=None):
             for n in names:
                 if n in hit:
                     continue
-                try:
-                    found = re.search(n, text, re.I) is not None
-                except re.error:
-                    found = n.lower() in text.lower()
-                if found:
+                if _milestone_hit(n, text):
                     hit.append(n)
         job["milestones_hit"] = [n for n in names if n in hit]   # keep declared order
         return {"step": len(job["milestones_hit"]), "total": len(names),
@@ -1604,6 +1626,17 @@ def cmd_watch_daemon(args):
 
 # ------------------------------------------------------------------- commands
 
+def check_pattern(pattern):
+    """Reject an unusable regex where the user can still see the message."""
+    if not pattern:
+        return pattern
+    try:
+        re.compile(pattern)
+    except re.error as ex:
+        raise SystemExit("--pattern is not a valid regex: %s\n  %s" % (ex, pattern))
+    return pattern
+
+
 def build_monitor(args, existing=None):
     """Turn the monitor flags into the job's monitor spec. Declared once, at
     start; the watcher needs no further instruction."""
@@ -1667,7 +1700,7 @@ def _new_job(args, cmd=None, log=None, pid=None):
         "eta_end": (now + eta) if eta else None,
         "eta_prior_s": eta,
         "note": getattr(args, "note", None),
-        "pattern": getattr(args, "pattern", None),
+        "pattern": check_pattern(getattr(args, "pattern", None)),
         "monitor": mon,
         "interval_override": parse_duration(getattr(args, "interval", None)),
         "est_total_s": eta,
@@ -1794,6 +1827,16 @@ def _pump(path, offset, stream):
     return offset + len(chunk)
 
 
+def _passthrough(command, cwd):
+    """Run the command as though this wrapper were never here."""
+    try:
+        if cwd:
+            os.chdir(cwd)
+    except OSError:
+        pass
+    os.execv("/bin/sh", ["/bin/sh", "-c", command])
+
+
 def cmd_exec(args):
     """Run a command normally, and start tracking it only if it turns out to be slow.
 
@@ -1816,16 +1859,24 @@ def cmd_exec(args):
         command = (" ".join(shlex.quote(p) for p in parts)
                    if len(parts) > 1 else parts[0])
 
-    ensure_dirs()
-    name = args.name or suggest_job_name(command)
-    stamp = "%s-%d" % (slug(name), os.getpid())
-    log = os.path.join(LOGS, "%s.log" % stamp)
-    exitf = log + ".exit"
-    for stale in (log, exitf):
-        try:
-            os.remove(stale)
-        except OSError:
-            pass
+    # Nothing about tracking may stop the command from running. If the state
+    # directory is unwritable - bad permissions, a full disk, a read-only home -
+    # hand the command straight to the shell and get out of the way. Anything
+    # else would mean a broken plugin breaks every command it wraps.
+    try:
+        ensure_dirs()
+        name = args.name or suggest_job_name(command)
+        stamp = "%s-%d" % (slug(name), os.getpid())
+        log = os.path.join(LOGS, "%s.log" % stamp)
+        exitf = log + ".exit"
+        for stale in (log, exitf):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+        open(log, "a").close()
+    except Exception:
+        return _passthrough(command, args.cwd)
 
     started = time.time()
     proc = subprocess.Popen(
@@ -1842,7 +1893,12 @@ def cmd_exec(args):
         if proc.poll() is not None:
             break
         if after is not None and (time.time() - started) >= after:
-            return _handoff(command, name, log, proc.pid, started, sent, cfg, args)
+            try:
+                return _handoff(command, name, log, proc.pid, started, sent, cfg, args)
+            except Exception:
+                # could not register the job; the command is still running, so
+                # keep forwarding it rather than abandoning it
+                after = None
         time.sleep(0.08)
 
     _pump(log, sent, sys.stdout)          # whatever it wrote on the way out
@@ -1927,7 +1983,7 @@ def cmd_update(args):
         if args.unit is not None:
             job["unit"] = args.unit
         if args.pattern is not None:
-            job["pattern"] = args.pattern or None
+            job["pattern"] = check_pattern(args.pattern) or None
         mon = build_monitor(args, job.get("monitor"))
         if mon and mon != job.get("monitor"):
             job["monitor"] = mon
@@ -2353,11 +2409,17 @@ def cmd_preview(args):
     """Render sample bars with the current settings, so they can be tuned
     without waiting on a real job."""
     cfg = load_config(force=True)
-    if args.set:
-        for pair in args.set:
-            k, v = pair.split("=", 1)
-            if k in CONFIG_SPEC:
-                cfg[k] = coerce(k, v)
+    for pair in (args.set or []):
+        if "=" not in pair:
+            raise SystemExit("--set expects KEY=VALUE, got %r" % pair)
+        k, v = pair.split("=", 1)
+        k = k.strip()
+        if k not in CONFIG_SPEC:
+            raise SystemExit(_unknown_key(k))
+        try:
+            cfg[k] = coerce(k, v)
+        except ValueError as ex:
+            raise SystemExit("bad value for %s: %s" % (k, ex))
     apply_theme(cfg)
     now = time.time()
     samples = [[now - 600 + i * 12, i] for i in range(51)]

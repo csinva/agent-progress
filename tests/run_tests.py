@@ -250,6 +250,49 @@ r = cli("exec", "--shell", "echo recovered")
 ck("exec still works", r.stdout.strip() == "recovered", repr(r.stdout))
 
 
+print()
+print("=== a broken install must not break the command ===")
+import shutil
+ro = os.path.expanduser("~/.claude/agent-tqdm-rotest")
+shutil.rmtree(ro, ignore_errors=True)
+os.makedirs(ro)
+os.chmod(ro, 0o555)                      # tracking is now impossible
+env = dict(os.environ, AGENT_TQDM_HOME=ro)
+try:
+    for label, sh, want in [("fast", "echo hello", 0),
+                            ("failing", "echo oops >&2; exit 5", 5),
+                            ("slow", "echo a; sleep 3; echo b", 0)]:
+        r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "1s", "--shell", sh],
+                           capture_output=True, text=True, env=env)
+        ck("unwritable state dir: %s command still runs" % label,
+           r.returncode == want and "Traceback" not in r.stderr
+           and (r.stdout + r.stderr).strip(),
+           "exit=%s out=%r" % (r.returncode, (r.stdout + r.stderr)[:60]))
+finally:
+    os.chmod(ro, 0o755)
+    shutil.rmtree(ro, ignore_errors=True)
+
+print()
+print("=== a crash reaches exactly one session ===")
+reset()
+subprocess.run([sys.executable, ENGINE, "exec", "--after", "1s", "--name", "boom",
+                "--shell", "sleep 2; exit 9"], capture_output=True)
+deadline = time.time() + 25
+while time.time() < deadline:
+    jj = json.loads(cli("ls", "--json").stdout or "[]")
+    if jj and jj[0]["state"] != "running":
+        break
+    time.sleep(1)
+got = []
+def grab(i):
+    r = subprocess.run([sys.executable, os.path.join(HOOKS, "inject_status.py"),
+                        "UserPromptSubmit"], input=json.dumps({"session_id": "c%d" % i}),
+                       capture_output=True, text=True).stdout
+    got.append("CRASHED" in r)
+th = [threading.Thread(target=grab, args=(i,)) for i in range(6)]
+[t.start() for t in th]; [t.join() for t in th]
+ck("crash delivered exactly once", sum(got) == 1, "delivered %d times" % sum(got))
+
 reset()
 print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))

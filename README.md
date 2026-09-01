@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="demo/agent-tqdm.gif" width="100%" alt="agent-tqdm tracking three jobs: a counter, named stages, and one that crashes">
+  <img src="demo/agent-tqdm.gif" width="100%" alt="a short build runs untracked; a training run crosses the threshold and gets a progress bar">
 </p>
 
 <p align="center">

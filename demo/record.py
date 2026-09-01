@@ -276,13 +276,16 @@ class Take(object):
         if self.speed > 1:
             head += c.paint("      ▶▶ %g× faster" % self.speed, "warn", True)
         body = [head, ""]
-        body += self.lines[-(ROWS - 6):]      # leave a gap above the bars
-        while len(body) < ROWS - 3:
+        body += self.lines[-(ROWS - 7):]
+        while len(body) < ROWS - 4:
             body.append("")
         st = c.state_ro()
         jobs = sorted((j for j in st["jobs"].values()
                        if (j.get("id") or "").startswith("rec-")),
                       key=lambda j: j.get("started") or 0)
+        # everything above is the terminal; everything below is what Claude
+        # Code actually shows you, which is the part worth pointing at
+        body.append(c.paint("  \u2500\u2500 statusline " + "\u2500" * (COLS - 18), "dim", True))
         for j in jobs:
             body.append("  " + c.render_line(j, cfg, width=COLS - 4))
         while len(body) < ROWS - 1:

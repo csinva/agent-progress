@@ -25,6 +25,13 @@ HOME = tempfile.mkdtemp(prefix="agent-progress-tests-")
 os.environ["AGENT_PROGRESS_HOME"] = HOME
 atexit.register(shutil.rmtree, HOME, ignore_errors=True)
 
+# The suites start and finish dozens of jobs, and a finished job posts a desktop
+# notification. Running the tests should not fill somebody's screen with notices
+# about jobs that never existed. This is set in the environment rather than the
+# sandbox's config file because the suites call `config --reset` fifteen times
+# between them, and a reset would put the notifications back.
+os.environ["AGENT_PROGRESS_NOTIFY"] = "false"
+
 STATE = os.path.join(HOME, "state.json")
 CONFIG = os.path.join(HOME, "config.json")
 LOGS = os.path.join(HOME, "logs")

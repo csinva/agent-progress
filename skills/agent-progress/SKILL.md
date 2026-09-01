@@ -135,33 +135,31 @@ bar runs on your estimate alone. That is still better than no bar.
 
 ## Jobs that are submitted rather than run
 
-`sbatch`, `qsub`, `bsub` and friends are a blind spot for the automatic path,
-and you have to cover it yourself. The command returns in under a second - it
-only puts work in a queue - so it finishes long before the threshold and is
-never tracked, while the thing worth watching runs somewhere else for hours.
+`sbatch`, `qsub` and `bsub` are handled for you. The submission is recognised,
+the job id is read out of what it prints, and the queued job is tracked: its
+progress comes from the file the scheduler writes, and its state comes from the
+scheduler itself, so the bar finishes on its own and a job the cluster kills
+arrives as a crash with the scheduler's own word for it - `OUT_OF_MEMORY`,
+`TIMEOUT`, `NODE_FAIL`.
 
-When you submit a batch job, track it deliberately. Slurm writes the job's
-output to a file, which is all a bar needs:
+So `sbatch train.sbatch` needs nothing from you except, as ever, an estimate:
 
 ```bash
-JOB=$(sbatch --parsable train.sbatch)
-agent-progress start train-$JOB --eta 6h --log slurm-$JOB.out
+agent-progress update slurm-4242 --eta 6h
 ```
 
-Progress then comes from the log exactly as it would for a local run. If the
-script prints nothing countable, watch the queue instead:
+To follow a job already in the queue, or one somebody else submitted:
 
 ```bash
-agent-progress start train-$JOB --eta 6h \
-  --probe "squeue -j $JOB -h -o %T | grep -c RUNNING" --total 1
+agent-progress slurm 4242 --eta 6h
 ```
 
-One thing to know: there is no local process, so nothing can notice the job
-ending on its own. Check on it when you are next in the conversation - `squeue
--j $JOB` or the tail of the log - and close it out yourself:
+For any other queue, give it a command that prints the job's state - one of
+COMPLETED / FAILED / RUNNING, or a bare exit code:
 
 ```bash
-agent-progress done train-$JOB          # or: agent-progress fail train-$JOB --note "OOM"
+agent-progress start render --eta 2h --log render.log \
+  --state-probe "kubectl get job/render -o jsonpath='{.status.conditions[0].type}'"
 ```
 
 ## Step 2: estimate the duration

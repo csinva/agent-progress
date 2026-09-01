@@ -19,9 +19,9 @@
 </p>
 
 <p align="center">
-  <i>Three things asked for in plain words, the commands Claude chose, and what happened.<br>
-  The build finishes in four seconds and is never tracked; the training run and the<br>
-  benchmark both cross twenty seconds and get bars; the benchmark then dies.<br>
+  <i>Three things asked for in plain words, the commands Claude chose, what it said back,<br>
+  and the bars. One line when a job starts, one when it ends, nothing in between —<br>
+  except the benchmark, which died, and got explained.<br>
   Full recording: <a href="demo/agent-progress.mov">demo/agent-progress.mov</a></i>
 </p>
 
@@ -229,22 +229,41 @@ agent-progress autotrack 'pytest tests/'
 #                only tracked if still running after 20s
 ```
 
-### What it cannot catch
+### Jobs handed to a scheduler
 
-Work that is *submitted* rather than run — `sbatch`, `qsub`, `bsub` — is
-invisible to this. The command returns in well under a second, so it never
-reaches the threshold, and the job itself runs on another machine entirely.
-Track those deliberately, pointing the bar at the queue or at the output file
-the scheduler writes:
+`sbatch`, `qsub` and `bsub` return in under a second — they queue work rather
+than doing it — so there is no local process to watch and nothing that would
+normally notice the job ending. These are caught anyway. The submission is
+recognised, the job id is read out of what the command prints, and the queued
+job is tracked:
 
-```bash
-JOB=$(sbatch --parsable train.sbatch)
-agent-progress start train-$JOB --eta 6h --log slurm-$JOB.out
+```
+$ sbatch train.sbatch
+Submitted batch job 4242
+
+[agent-progress] slurm job 4242 is queued, and is being tracked as 'slurm-4242'.
+Progress comes from slurm-4242.out once the scheduler writes it, and the job's
+state comes from the scheduler itself, so its bar finishes on its own.
 ```
 
-Claude is told to do this when it submits a batch job. Because there is no local
-process, nothing notices such a job ending by itself — close it out with
-`agent-progress done <id>` when it is finished.
+Progress is read from the file the scheduler writes; the job's fate is read from
+the scheduler. A run the cluster kills comes back as a crash carrying the word
+the scheduler used — `OUT_OF_MEMORY`, `TIMEOUT`, `NODE_FAIL` — rather than an
+invented exit code.
+
+To follow a job already in the queue:
+
+```bash
+agent-progress slurm 4242 --eta 6h
+```
+
+Any other queue works the same way if you can name a command that prints the
+job's state — `COMPLETED` / `FAILED` / `RUNNING`, or a bare exit code:
+
+```bash
+agent-progress start render --eta 2h --log render.log \
+  --state-probe "kubectl get job/render -o jsonpath='{.status.conditions[0].type}'"
+```
 
 ### Modes
 

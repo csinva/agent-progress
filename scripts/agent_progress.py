@@ -294,7 +294,8 @@ def _sanitize(st):
                     job[key] = None
                 if isinstance(job.get(key), bool):
                     job[key] = None
-            for key in ("id", "state", "unit", "note", "desc", "cmd", "log", "pattern"):
+            for key in ("id", "state", "unit", "note", "desc", "cmd", "log", "pattern",
+                        "state_probe"):
                 if key in job and job[key] is not None and not isinstance(job[key], str):
                     job[key] = None
             job["id"] = job.get("id") or str(jid)
@@ -892,7 +893,8 @@ def render_line(job, cfg, width=None, now=None):
         tail = "in " + fmt_dur(e["elapsed"])
         parts.append(paint(tail, "dim", color))
         if job.get("state") == "failed":
-            parts.append(paint(crash_reason(job.get("exit_code"))[0], "fail", color))
+            parts.append(paint(job.get("scheduler_state")
+                               or crash_reason(job.get("exit_code"))[0], "fail", color))
 
     if cfg["show_note"] and job.get("note"):
         parts.append(paint("\u00b7 " + one_line(job["note"], cfg["note_width"]),
@@ -1060,6 +1062,7 @@ AUTO_TRACK_PATTERNS = [
      r"(?:train|finetune|pretrain|sweep|eval|benchmark|experiment)[\w.-]{0,40}",
      "a training script"),
     (r"--(?:mode|stage|task)[= ](?:train|fit|finetune|pretrain)\b", "a training run"),
+    (r"\b(?:sbatch|qsub|bsub)\b", "a batch submission"),
     (r"\btorchrun\b", "torchrun"),
     (r"\baccelerate\s+launch\b", "accelerate launch"),
     (r"\bdeepspeed\b", "deepspeed"),
@@ -1260,6 +1263,95 @@ def auto_seen(command, session_id, remember=True, ttl=6 * 3600):
         return hit
 
 
+# ------------------------------------------------------------- batch schedulers
+#
+# A job submitted to a queue has no process here to watch. `sbatch` returns in
+# under a second having handed the work to a scheduler, and the run itself
+# happens on some other machine for the next several hours. Two things are
+# therefore needed that a local job gets for free: somewhere to read progress
+# from, which is the file the scheduler writes, and some way to learn that it
+# ended, which is the scheduler's own record of it.
+
+# What a submission command prints back, and how to read the id out of it.
+SUBMIT_PATTERNS = [
+    (re.compile(r"Submitted batch job (\d+)"), "slurm"),          # sbatch
+    (re.compile(r"Job <(\d+)> is submitted"), "lsf"),             # bsub
+    (re.compile(r"^\s*(\d+)[.\w-]*\s*$", re.M), "pbs"),          # qsub
+]
+
+# Scheduler states, as words. Anything not named here leaves the job alone,
+# because an unrecognised word is far more likely to mean "still going" than to
+# mean the run is over.
+DONE_STATES = {"COMPLETED", "COMPLETE", "DONE", "SUCCESS", "SUCCEEDED", "FINISHED", "OK"}
+FAILED_STATES = {"FAILED", "FAIL", "TIMEOUT", "CANCELLED", "CANCELED", "OUT_OF_MEMORY",
+                 "OOM", "NODE_FAIL", "BOOT_FAIL", "DEADLINE", "PREEMPTED", "ERROR",
+                 "SPECIAL_EXIT", "REVOKED"}
+
+SLURM_STATE_CMD = (
+    's=$(sacct -j %(id)s -n -o State -X 2>/dev/null | head -1); '
+    '[ -z "$s" ] && s=$(squeue -j %(id)s -h -o %%T 2>/dev/null | head -1); '
+    'echo "$s"')
+LSF_STATE_CMD = "bjobs -noheader -o stat %(id)s 2>/dev/null | head -1"
+PBS_STATE_CMD = "qstat -x -f %(id)s 2>/dev/null | grep -o 'job_state = .' | head -1"
+
+STATE_CMDS = {"slurm": SLURM_STATE_CMD, "lsf": LSF_STATE_CMD, "pbs": PBS_STATE_CMD}
+
+
+def detect_submission(text):
+    """(scheduler, job id) if this output is a queue accepting work."""
+    for rx, kind in SUBMIT_PATTERNS:
+        m = rx.search(text or "")
+        if m:
+            return kind, m.group(1)
+    return None, None
+
+
+def slurm_log_path(job_id, cwd=None):
+    """Where the scheduler will write the job's output."""
+    try:
+        out = subprocess.check_output(
+            ["/bin/sh", "-c", "scontrol show job %s 2>/dev/null" % shlex.quote(job_id)],
+            stderr=subprocess.DEVNULL, timeout=10).decode("utf-8", "replace")
+        m = re.search(r"StdOut=(\S+)", out)
+        if m:
+            return m.group(1).replace("%j", job_id)
+    except Exception:
+        pass
+    # slurm's default, which is what most scripts leave it as
+    return os.path.join(cwd or os.getcwd(), "slurm-%s.out" % job_id)
+
+
+def read_state_probe(job):
+    """Ask the scheduler how the job is doing.
+
+    Returns "running", "done", "failed", or None when the answer is unusable -
+    the command is missing, the cluster is unreachable, the word is unfamiliar.
+    None always means "leave it alone": a job is never finished on a guess."""
+    cmd = job.get("state_probe")
+    if not cmd:
+        return None
+    try:
+        out = subprocess.check_output(
+            ["/bin/sh", "-c", cmd], stderr=subprocess.DEVNULL, timeout=30,
+            cwd=job.get("cwd") if os.path.isdir(job.get("cwd") or "") else None,
+        ).decode("utf-8", "replace")
+    except Exception:
+        return None
+    word = (out or "").strip().split("\n")[-1].strip().upper()
+    word = re.sub(r"[^A-Z_0-9]", "", word.replace(" ", "_"))
+    if not word:
+        return None
+    job["scheduler_state"] = word
+    if word.isdigit():                      # a bare exit code, for anything else
+        return "done" if word == "0" else "failed"
+    base = word.split("_BY_")[0]            # CANCELLED_BY_12345
+    if base in DONE_STATES:
+        return "done"
+    if base in FAILED_STATES:
+        return "failed"
+    return "running"
+
+
 # ------------------------------------------------------------------- crashes
 #
 # When a job dies, three things have to happen: the bar gets a skull, the
@@ -1304,6 +1396,10 @@ def enqueue_crash(st, job, now):
         lines = [ln for ln in text.splitlines() if ln.strip()]
         tail = "\n".join(lines[-15:])
     short, why = crash_reason(job.get("exit_code"))
+    if job.get("scheduler_state"):
+        # the scheduler's own word beats an invented exit code
+        short = job["scheduler_state"]
+        why = "%s, as reported by the scheduler" % job["scheduler_state"]
     st.setdefault("inbox", []).append({
         "job": job.get("id"),
         "ts": now,
@@ -1679,6 +1775,7 @@ def cmd_watch_daemon(args):
     jid = args.job
     idle_since = time.time()
     last_probe = 0.0
+    last_state = 0.0
     interval = float(load_config().get("min_interval_seconds", 120))
 
     while True:
@@ -1716,8 +1813,25 @@ def cmd_watch_daemon(args):
             job["next_probe"] = last_probe + interval
             job["interval_s"] = interval
 
+            # Asking the scheduler is cheap but not free, and a job can sit in a
+            # queue for days. At most once a minute, and no less often than the
+            # progress probe, so completion is noticed promptly either way.
+            state_gap = min(interval, 60.0)
+            if (not job.get("pid") and job.get("state_probe")
+                    and (now - last_state) >= state_gap):
+                last_state = now
+                verdict = read_state_probe(job)
+                if verdict in ("done", "failed"):
+                    try:
+                        apply_reading(job, monitor_reading(job, now), now)
+                    except Exception:
+                        pass
+                    job["note"] = "reported by the scheduler"
+                    finalize(job, 0 if verdict == "done" else 1, now, st)
+                    finished = dict(job)
+
             pid = job.get("pid")
-            if pid and not alive(pid):
+            if not finished and pid and not alive(pid):
                 try:
                     apply_reading(job, monitor_reading(job, now), now)   # last look
                 except Exception:
@@ -1844,6 +1958,7 @@ def _new_job(args, cmd=None, log=None, pid=None):
         "note": one_line(getattr(args, "note", None)),
         "pattern": check_pattern(getattr(args, "pattern", None)),
         "monitor": mon,
+        "state_probe": getattr(args, "state_probe", None),
         "interval_override": parse_duration(getattr(args, "interval", None)),
         "est_total_s": eta,
         "initial_est_total_s": eta,
@@ -1985,6 +2100,32 @@ def check_cwd(path):
     return path
 
 
+def attach_batch_job(kind, job_id, cwd, eta=None, name=None, desc=None):
+    """Start tracking a job that now belongs to a scheduler."""
+    now = time.time()
+    log = slurm_log_path(job_id, cwd) if kind == "slurm" else None
+    probe = STATE_CMDS.get(kind, SLURM_STATE_CMD) % {"id": job_id}
+    with state_rw() as st:
+        jid = new_id(st, name or "%s-%s" % (kind, job_id))
+        st["jobs"][jid] = {
+            "id": jid, "desc": desc or "%s job %s" % (kind, job_id), "cmd": None,
+            "log": log, "pid": None, "unit": "it", "total": None,
+            "total_locked": False, "step": None, "units": None, "pct": None,
+            "state": "running", "exit_code": None, "started": now, "updated": now,
+            "ended": None, "eta_end": (now + eta) if eta else None,
+            "eta_prior_s": eta, "note": None, "pattern": None,
+            "monitor": {"kind": "auto"}, "interval_override": None,
+            "state_probe": probe, "batch": {"scheduler": kind, "job_id": job_id},
+            "est_total_s": eta, "initial_est_total_s": eta, "log_offset": 0,
+            "force_show": True, "auto_launched": True, "samples": [],
+            "session_id": current_session(), "cwd": cwd or os.getcwd(),
+        }
+    wpid = spawn_watcher(jid)
+    with state_rw() as st:
+        st["jobs"][jid]["watcher_pid"] = wpid
+    return jid
+
+
 def _passthrough(command, cwd):
     """Run the command as though this wrapper were never here."""
     try:
@@ -2067,6 +2208,22 @@ def cmd_exec(args):
     _pump(log, sent, sys.stdout)          # whatever it wrote on the way out
     code = proc.returncode
     try:
+        with open(log) as f:
+            kind, sub_id = detect_submission(f.read())
+    except Exception:
+        kind, sub_id = None, None
+    if kind and (proc.returncode in (0, None)):
+        # the command did not do the work, it queued it. Follow the queue.
+        jid = attach_batch_job(kind, sub_id, args.cwd or os.getcwd(),
+                               eta=parse_duration(args.after) if False else None,
+                               desc=args.desc)
+        job = state_ro()["jobs"].get(jid, {})
+        print("\n[agent-progress] %s job %s is queued, and is being tracked as '%s'.\n"
+              "Progress comes from %s once the scheduler writes it, and the job's\n"
+              "state comes from the scheduler itself, so its bar finishes on its own.\n"
+              "  agent-progress update %s --eta <duration>   how long you expect it to take"
+              % (kind, sub_id, jid, job.get("log") or "the job's output file", jid))
+    try:
         with open(exitf) as f:
             code = int(f.read().strip())
     except Exception:
@@ -2118,6 +2275,17 @@ def _handoff(command, name, log, pid, started, sent, cfg, args):
     return 0
 
 
+def cmd_slurm(args):
+    """Follow a job that is already sitting in a queue."""
+    jid = attach_batch_job(args.scheduler, args.job_id, args.cwd or os.getcwd(),
+                           eta=parse_duration(args.eta), name=args.name, desc=args.desc)
+    with state_rw() as st:
+        job = dict(st["jobs"][jid])
+    _announce(job)
+    print("  state comes from the scheduler, so this bar finishes on its own")
+    return 0
+
+
 def cmd_update(args):
     with state_rw() as st:
         jid = resolve(st, args.job)
@@ -2157,6 +2325,8 @@ def cmd_update(args):
             job["interval_override"] = parse_duration(args.interval)
         if args.force_show:
             job["force_show"] = True
+        if getattr(args, "state_probe", None) is not None:
+            job["state_probe"] = args.state_probe or None
         job["updated"] = now
         out = dict(job)
     if not args.quiet:
@@ -2693,6 +2863,9 @@ def build_parser():
         sp.add_argument("--log", help="log file to tail for progress")
         sp.add_argument("--force-show", action="store_true",
                         help="show on the statusline even if it is a short job")
+        sp.add_argument("--state-probe", metavar="CMD",
+                        help="command printing the job's state, for work running "
+                             "elsewhere: COMPLETED/FAILED/RUNNING, or an exit code")
 
     sp = sub.add_parser("run", help="launch a command detached and track it")
     sp.add_argument("--name", help="short job name (default: derived from the command)")
@@ -2714,6 +2887,15 @@ def build_parser():
                     help="keep the capture file even if no job was created")
     sp.add_argument("command", nargs=argparse.REMAINDER)
     sp.set_defaults(fn=cmd_exec)
+
+    sp = sub.add_parser("slurm", help="track a job that is already in a scheduler queue")
+    sp.add_argument("job_id", help="the scheduler's job id")
+    sp.add_argument("--scheduler", default="slurm", choices=sorted(STATE_CMDS))
+    sp.add_argument("--eta", help="how long you expect it to take")
+    sp.add_argument("--name")
+    sp.add_argument("--desc")
+    sp.add_argument("--cwd")
+    sp.set_defaults(fn=cmd_slurm)
 
     sp = sub.add_parser("start", help="track an already-running job (by pid and/or log)")
     sp.add_argument("name")

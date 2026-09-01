@@ -132,6 +132,81 @@ r = cc.monitor_reading(job, time.time())
 ck("progress is re-read after truncation", r and r["step"] == 9, repr(r))
 
 print()
+print("=== a job handed to a scheduler ===")
+sched = tempfile.mkdtemp(prefix="agent-progress-sched-")
+os.makedirs(os.path.join(sched, "bin"))
+
+
+def stub(name, body):
+    f = os.path.join(sched, "bin", name)
+    open(f, "w").write("#!/bin/sh\n" + body)
+    os.chmod(f, 0o755)
+
+
+stub("sbatch", 'JOB=4242\n'
+     '( sleep 1; i=1; while [ $i -le 8 ]; do echo "Epoch $i/8" >> "$PWD/slurm-$JOB.out";'
+     ' sleep 1; i=$((i+1)); done; echo "$FINAL" > "$PWD/.state-$JOB" ) >/dev/null 2>&1 &\n'
+     'echo RUNNING > "$PWD/.state-$JOB"\necho "Submitted batch job $JOB"\n')
+stub("sacct", 'for a in "$@"; do case "$a" in [0-9]*) J="$a";; esac; done\n'
+     'cat "$PWD/.state-$J" 2>/dev/null || true\n')
+stub("squeue", "exit 0")
+stub("scontrol", "exit 1")
+env = dict(os.environ, PATH=os.path.join(sched, "bin") + ":" + os.environ["PATH"])
+
+ck("a submission command is recognised",
+   cc.classify_command("sbatch train.sbatch", {}, cfg)["track"])
+ck("the id is read out of what it prints",
+   cc.detect_submission("Submitted batch job 4242") == ("slurm", "4242"),
+   str(cc.detect_submission("Submitted batch job 4242")))
+ck("other schedulers too",
+   cc.detect_submission("Job <991> is submitted to default queue.") == ("lsf", "991"))
+
+for label, final, want in [("that succeeds", "COMPLETED", "done"),
+                           ("that is killed", "OUT_OF_MEMORY", "failed")]:
+    cli("rm", "--all")
+    for f in os.listdir(sched):
+        if f.startswith((".state-", "slurm-")):
+            os.remove(os.path.join(sched, f))
+    out = subprocess.run([sys.executable, os.path.join(HOOKS, "auto_track.py")],
+                         input=json.dumps({"tool_name": "Bash", "session_id": "sch",
+                                           "tool_input": {"command": "sbatch train.sbatch"}}),
+                         capture_output=True, text=True).stdout
+    wrapped = json.loads(out)["hookSpecificOutput"]["updatedInput"]["command"]
+    t = time.time()
+    subprocess.run(["/bin/sh", "-c", wrapped], capture_output=True, text=True,
+                   cwd=sched, env=dict(env, FINAL=final))
+    ck("submitting returns at once (%s)" % label, time.time() - t < 8,
+       "%.1fs" % (time.time() - t))
+    jobs = json.loads(cli("ls", "--json").stdout or "[]")
+    ck("the queued job is tracked (%s)" % label,
+       len(jobs) == 1 and jobs[0]["id"] == "slurm-4242", str([j["id"] for j in jobs]))
+    cli("update", "slurm-4242", "--interval", "2s", "--quiet")
+    subprocess.run(["pkill", "-f", "_watch slurm-4242"], capture_output=True)
+    time.sleep(0.5)
+    subprocess.Popen([sys.executable, ENGINE, "_watch", "slurm-4242"], cwd=sched, env=env,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline, seen = time.time() + 40, None
+    while time.time() < deadline:
+        time.sleep(2)
+        jobs = json.loads(cli("ls", "--json").stdout or "[]")
+        if jobs and jobs[0]["state"] != "running":
+            seen = jobs[0]
+            break
+    ck("it ends by itself, %s" % label, seen and seen["state"] == want,
+       str(seen and seen["state"]))
+    ck("progress came from the scheduler's log (%s)" % label,
+       seen and (seen["step"] or 0) > 0, str(seen and seen.get("step")))
+    subprocess.run(["pkill", "-f", "_watch slurm-4242"], capture_output=True)
+
+raw = json.loads(open(cc.STATE).read())["jobs"].get("slurm-4242", {})
+ck("the scheduler's own word is kept", raw.get("scheduler_state") == "OUT_OF_MEMORY",
+   str(raw.get("scheduler_state")))
+with cc.state_rw() as st:
+    st["inbox"] = []
+cli("rm", "--all")
+shutil.rmtree(sched, ignore_errors=True)
+
+print()
 print("=== update flags ===")
 cli("start", "upd", "--eta", "1h", "--monitor", "time", "--no-watch")
 cli("update", "upd", "--step", "5", "--total", "20", "--unit", "ep", "--quiet")

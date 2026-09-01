@@ -221,15 +221,23 @@ raise MemoryError("unable to allocate 8.00 GiB on cuda:0")
 PANELS = [
     {"key": "make", "ask": "build the project", "command": "make -j8",
      "file": "Makefile", "body": MAKEFILE,
-     "idle": "under 20s - never tracked"},
+     "idle": "under 20s - never tracked",
+     "reply": "Built. Four seconds, nothing to track.",
+     "done_reply": None},
     {"key": "train", "ask": "train the model on the new data",
      "command": "python3 train.py --epochs 34",
      "file": "train.py", "body": TRAIN,
-     "idle": "not tracked yet"},
+     "idle": "not tracked yet",
+     "reply": "Training is running.",
+     "done_reply": "Training finished. Final loss 0.41."},
     {"key": "benchmark", "ask": "benchmark llama-7b",
      "command": "python3 benchmark.py --model llama-7b",
      "file": "benchmark.py", "body": BENCH,
-     "idle": "not tracked yet"},
+     "idle": "not tracked yet",
+     "reply": "Benchmark is running.",
+     "done_reply": "It died: out of memory on cuda:0, in the\n"
+                   "second warmup pass. The 7b weights in fp32\n"
+                   "need ~28GB. Try --dtype bfloat16."},
 ]
 
 
@@ -323,6 +331,10 @@ class Panel(object):
                 continue        # the full banner is written for a wide terminal
             self.say(self.cc.paint("  " + line, tone, True))
 
+    def reply(self, text, tone="done"):
+        for line in (text or "").split("\n"):
+            self.say(self.cc.paint("  " + line, tone, True))
+
     def job(self):
         for j in self.cc.state_ro()["jobs"].values():
             if (j.get("id") or "") == "rec-" + self.spec["key"]:
@@ -357,9 +369,9 @@ SCRIPT = [
     (27.0, 1,  "both crossed it: tracked, moved to the background, bars"),
     (33.0, 1,  "Claude gives the training run an estimate - a hook cannot guess one"),
     (39.0, 5,  "waiting on the benchmark"),
-    (46.0, 1,  "the benchmark dies: skull, and the exit decoded"),
+    (46.0, 1,  "the benchmark dies - and that is when Claude speaks up"),
     (66.0, 14, "the training run carries on, costing nothing while it does"),
-    (72.0, 1,  "done"),
+    (72.0, 1,  "one line when it starts, one when it ends. nothing in between"),
 ]
 
 
@@ -425,6 +437,22 @@ def main():
             fired.add("launch")
             for pan in panels:
                 pan.launch()
+        # Claude answers once when the job is under way, and once when it ends -
+        # which is the whole of what it says about any of this
+        for idx, pan in enumerate(panels):
+            key = "reply%d" % idx
+            j = pan.job()
+            started = j is not None or (idx == 0 and now > 6.5)
+            if started and key not in fired:
+                fired.add(key)
+                pan.reply(pan.spec["reply"], "run")
+            done_key = "done%d" % idx
+            if (j and j.get("state") not in (None, "running")
+                    and done_key not in fired and pan.spec.get("done_reply")):
+                fired.add(done_key)
+                pan.reply(pan.spec["done_reply"],
+                          "fail" if j.get("state") == "failed" else "done")
+
         if now > 24.0 and "quick" not in fired:
             fired.add("quick")
             # A real job is re-observed every 2 minutes, or once per 5% of its

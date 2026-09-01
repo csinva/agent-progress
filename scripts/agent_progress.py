@@ -135,6 +135,10 @@ CONFIG_SPEC = {
 
     # behavior
     "notify": _spec("behavior", True, "desktop notification on completion (macOS)", "bool"),
+    "crash_handover_seconds": _spec(
+        "behavior", 3600,
+        "how long a crash waits for its own session before any session may take it",
+        lo=0),
     "crash_alert": _spec("behavior", True,
                          "interrupt Claude when a job crashes, so it tells you right away", "bool"),
     "context_min_interval_seconds": _spec(
@@ -1933,7 +1937,16 @@ def trim_inbox(st):
     st["inbox"] = kept[-CRASH_CEILING:]
 
 
-ORPHAN_GRACE = 600      # after this, a crash nobody claimed is offered to anyone
+def orphan_grace(cfg=None):
+    """How long a crash waits for the session that owns it.
+
+    Hooks only run when a session is prompted or finishes a turn, so an agent
+    that is merely idle looks exactly like one that has exited. Ten minutes
+    could not tell them apart and handed live agents' reports to their
+    neighbours; an hour is long enough that anything still unclaimed is very
+    likely gone, and the report is visible in `agent-progress inbox` the whole
+    time either way."""
+    return (cfg or load_config())["crash_handover_seconds"]
 
 
 def take_crash(session_id=None):
@@ -1942,18 +1955,26 @@ def take_crash(session_id=None):
     A crash is news for the session that started the job, not for whichever
     session asks first - telling agent B that agent A's training died is both
     wrong and, because it is then marked delivered, the reason agent A never
-    hears about it. A report nobody has claimed after ORPHAN_GRACE is offered to
+    hears about it. A report nobody has claimed after crash_handover_seconds is offered to
     anyone, so a crash whose session has since exited is not lost."""
     now = time.time()
     claimed = None
     with state_rw() as st:
         pending = [e for e in st.get("inbox", []) if not e.get("delivered")]
-        mine = [e for e in pending if job_belongs_here(e, session_id)]
+        # scope=all means one shared view of everything, crashes included
+        if load_config()["scope"] == "all":
+            mine = list(pending)
+        else:
+            mine = [e for e in pending if job_belongs_here(e, session_id)]
+        grace = orphan_grace()
         orphaned = [e for e in pending
-                    if e.get("session_id") and (now - (e.get("ts") or 0)) > ORPHAN_GRACE]
+                    if e.get("session_id") and (now - (e.get("ts") or 0)) > grace]
         for ev in (mine or orphaned):
             ev["delivered"] = {"session_id": session_id, "ts": now}
             claimed = dict(ev)
+            # a report taken on behalf of a session that never came back has to
+            # say so, or it is read as this session's own job having died
+            claimed["handover"] = ev not in mine
             break
     return claimed
 
@@ -1965,7 +1986,13 @@ def pending_crashes():
 def format_crash(ev, cfg=None):
     """The message a Claude session is handed when a job dies."""
     cfg = cfg or load_config()
-    lines = [
+    lines = []
+    if ev.get("handover"):
+        lines.append(
+            "%s A job from ANOTHER session crashed, and that session never "
+            "collected the report - it has probably exited. This was not your "
+            "job: say so if you mention it, and do not re-run it." % cfg["glyph_failed"])
+    lines += [
         "%s A tracked job CRASHED while you were working: '%s'" % (
             cfg["glyph_failed"], ev.get("job")),
         "  %s after %s" % (ev.get("reason"), fmt_dur(ev.get("duration"))),

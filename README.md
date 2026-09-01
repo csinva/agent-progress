@@ -189,9 +189,22 @@ is handed over, so a crash routed to the wrong agent is also a crash the right
 agent never hears about.
 
 A job started outside any session — from an ordinary shell, or cron — has no
-owner and is shown to everyone, since otherwise it would be shown to no one. A
-crash nobody has claimed after ten minutes is offered to any session, so the
-death of a job whose agent has since exited is not lost.
+owner and is shown to everyone, since otherwise it would be shown to no one.
+
+A crash waits an hour for the session that owns it before any session may take
+it (`crash_handover_seconds`), so the death of a job whose agent has exited is
+not lost. An hour rather than minutes because hooks only run when a session is
+prompted or ends a turn — an agent that is merely idle looks exactly like one
+that has gone. A report handed over this way says plainly that it belongs to
+another session, so the agent receiving it does not report someone else's
+training run as its own.
+
+Job names are not chosen — they come from the command — so two agents each
+training something both have a job called `train`. Lookup prefers your own, and
+anything that *changes* a job (`cancel`, `done`, `fail`, `update`, `rm`) refuses
+to reach into another session without `--any-session`. `cancel` signals the
+process group, so this is the difference between tidying up and killing someone
+else's run.
 
 `agent-progress ls` and `agent-progress watch` are asked directly and so show
 every session's work. `rm --all` is scoped the other way: inside a session it

@@ -146,14 +146,25 @@ for trial in range(6):
 print()
 print("=== nothing is lost when the owner has gone ===")
 reset()
-queue_crash("abandoned", "an-agent-that-exited", ts=time.time() - cc.ORPHAN_GRACE - 60)
-ck("a stale crash is eventually offered to whoever is here",
-   "abandoned" in context("someone-else"), context("someone-else")[:90])
+grace = cc.orphan_grace()
+queue_crash("abandoned", "an-agent-that-exited", ts=time.time() - grace - 60)
+handed = context("someone-else")
+ck("a stale crash is eventually offered to whoever is here", "abandoned" in handed, handed[:90])
+ck("and it is labelled as another session's", "ANOTHER session" in handed, handed[:120])
 reset()
 queue_crash("fresh", "an-agent-still-running")
 ck("but a fresh one is not taken from its owner",
    "fresh" not in context("someone-else"), context("someone-else")[:90])
 ck("and its owner still gets it", "fresh" in context("an-agent-still-running"))
+
+ck("an hour, not ten minutes, is the wait", grace >= 3600, str(grace))
+reset()
+queue_crash("still-owned", "a-live-but-idle-agent", ts=time.time() - 900)
+ck("a report 15 minutes old is still its owner's",
+   "still-owned" not in context("a-passing-agent"), context("a-passing-agent")[:80])
+ck("and the owner still receives it, unlabelled",
+   "still-owned" in context("a-live-but-idle-agent")
+   and "ANOTHER session" not in context("a-live-but-idle-agent"))
 
 print()
 print("=== many agents at once ===")
@@ -293,7 +304,15 @@ ck("watch shows every session's work",
 as_session(None, "config", "--set", "scope=all")
 ck("scope=all puts them back on one statusline", bars("agent-A") == ["job-agent-A", "job-agent-B"],
    str(bars("agent-A")))
+reset()
+queue_crash("someones-job", "agent-Z")
+as_session(None, "config", "--set", "scope=all")
+ck("and scope=all shares the crashes too", "someones-job" in context("agent-Q"),
+   context("agent-Q")[:80])
 as_session(None, "config", "--reset")
+reset()
+for a in ("agent-A", "agent-B"):
+    as_session(a, "start", "job-" + a, "--eta", "3h", "--monitor", "time", "--no-watch")
 ck("and scope=session separates them again", bars("agent-A") == ["job-agent-A"], str(bars("agent-A")))
 reset()
 

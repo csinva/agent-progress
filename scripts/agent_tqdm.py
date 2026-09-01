@@ -928,8 +928,12 @@ def pick_jobs(st, cfg, session_id=None, apply_visibility=True):
 
 AUTO_TRACK_PATTERNS = [
     # training and other GPU work
-    (r"\b(?:python3?|uv\s+run|poetry\s+run|pipenv\s+run)\s+[^|;&]*\b"
-     r"(?:train|finetune|fine_tune|pretrain|sweep|eval|evaluate|benchmark|experiment)"
+    # No \b before the keyword: a word boundary cannot follow an underscore, so
+    # \btrain misses run_training.py and my_train.py, which is most of them. A
+    # stray match on something like constraints.py costs nothing now that a
+    # command finishing inside the threshold is never tracked at all.
+    (r"\b(?:python3?|uv\s+run|poetry\s+run|pipenv\s+run)\s+[^|;&]*"
+     r"(?:train|finetune|fine_tune|pretrain|sweep|eval|benchmark|experiment)"
      r"[\w.-]*\.py\b", "a training or evaluation script"),
     (r"\btorchrun\b", "torchrun"),
     (r"\baccelerate\s+launch\b", "accelerate launch"),
@@ -1749,7 +1753,10 @@ def cmd_run(args):
         except OSError:
             pass
 
-    wrapper = "%s > %s 2>&1; echo $? > %s" % (cmd, shlex.quote(log), shlex.quote(exitf))
+    # the command must be grouped: without the parentheses, `a && b` redirects
+    # only b, and everything a printed is lost instead of captured
+    wrapper = "( %s ) > %s 2>&1; echo $? > %s" % (
+        cmd, shlex.quote(log), shlex.quote(exitf))
     proc = subprocess.Popen(
         ["/bin/sh", "-c", wrapper],
         cwd=args.cwd or os.getcwd(),
@@ -1797,7 +1804,8 @@ def cmd_exec(args):
     machinery - the bar, the estimate, the reminders - come into existence.
     """
     cfg = load_config()
-    after = parse_duration(args.after) if args.after else cfg["auto_track_after_seconds"]
+    after = (parse_duration(args.after) if args.after is not None
+             else cfg["auto_track_after_seconds"])
     command = args.shell
     if not command:
         parts = list(args.command)
@@ -1833,7 +1841,7 @@ def cmd_exec(args):
         sent = _pump(log, sent, sys.stdout)
         if proc.poll() is not None:
             break
-        if after and (time.time() - started) >= after:
+        if after is not None and (time.time() - started) >= after:
             return _handoff(command, name, log, proc.pid, started, sent, cfg, args)
         time.sleep(0.08)
 
@@ -1843,7 +1851,13 @@ def cmd_exec(args):
         with open(exitf) as f:
             code = int(f.read().strip())
     except Exception:
-        pass
+        # no exit file: the wrapper itself was killed. Popen reports that as a
+        # negative number, which sys.exit would turn into nonsense (-15 -> 241),
+        # so report it the way a shell does.
+        if code is not None and code < 0:
+            code = 128 - code
+    if code is not None and code < 0:
+        code = 128 - code
     if not args.keep_log:
         for f in (log, exitf):
             try:

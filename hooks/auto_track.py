@@ -105,11 +105,15 @@ def main():
     if not verdict["track"]:
         return 0
 
-    try:
-        if cc.auto_seen(command, data.get("session_id")):
-            return 0        # already offered once; let it through
-    except Exception:
-        pass
+    # The once-per-session rule exists so a refusal is not repeated at someone
+    # who has decided otherwise. It belongs to `instruct` alone: deferring costs
+    # nothing, so there is no reason to stop deferring the second time.
+    if cfg["auto_track"] == "instruct":
+        try:
+            if cc.auto_seen(command, data.get("session_id")):
+                return 0        # already asked once; let it through
+        except Exception:
+            pass
 
     if cfg["auto_track"] == "defer":
         background = bool(tool_input.get("run_in_background"))

@@ -69,7 +69,7 @@ def collect_crashes(cc, cfg, session_id, limit=3):
     return out
 
 
-def job_lines(cc, cfg):
+def job_lines(cc, cfg, session_id=None):
     """One compact line per visible running job."""
     import time
     try:
@@ -80,7 +80,11 @@ def job_lines(cc, cfg):
         return [], 0, ""
     if not running:
         return [], 0, ""
-    shown = [j for j in running if cc.job_visible(j, cfg)]
+    # only this session's work: several agents share one state file, and an
+    # agent has no use for another agent's job in its context
+    shown = [j for j in running
+             if cc.job_visible(j, cfg)
+             and (cfg["scope"] == "all" or cc.job_belongs_here(j, session_id))]
     hidden = len(running) - len(shown)
     lines = []
     for j in shown[:5]:
@@ -243,7 +247,7 @@ def main():
         revive_watchers(cc)
 
     blocks = collect_crashes(cc, cfg, session_id)
-    lines, hidden, signature = job_lines(cc, cfg)
+    lines, hidden, signature = job_lines(cc, cfg, session_id)
 
     # a crash is always worth sending; a routine status update is not
     if not blocks and (lines or hidden) and not should_send(

@@ -176,6 +176,33 @@ records the real exit code.
 
 ---
 
+## Several agents at once
+
+`claude agents` runs many sessions on one machine and they share one state file,
+so a bar has an owner. **A session sees its own jobs and nobody else's.** A job
+started by agent A appears on agent A's statusline, is described in agent A's
+context, and if it crashes, agent A is the session told about it — not whichever
+happens to ask first.
+
+That last part is the one that bites: a crash report is marked delivered once it
+is handed over, so a crash routed to the wrong agent is also a crash the right
+agent never hears about.
+
+A job started outside any session — from an ordinary shell, or cron — has no
+owner and is shown to everyone, since otherwise it would be shown to no one. A
+crash nobody has claimed after ten minutes is offered to any session, so the
+death of a job whose agent has since exited is not lost.
+
+`agent-progress ls` and `agent-progress watch` are asked directly and so show
+every session's work. `rm --all` is scoped the other way: inside a session it
+clears that session's jobs, because one agent tidying up should not throw away
+another's — `--everywhere` if you mean the machine.
+
+```bash
+agent-progress config --set scope=all       # one statusline for every session
+agent-progress config --set scope=session   # the default
+```
+
 ## Asking for a job in words
 
 The ordinary way to use this is not to type a command at all:

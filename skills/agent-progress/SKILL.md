@@ -231,6 +231,18 @@ agent-progress start reindex --pid 45123 --log /var/log/reindex.log --eta 3h
 Then stop. The job is detached, and the statusline and the completion
 notification are how they follow it - you do not need to narrate any of it.
 
+## Other sessions
+
+You may be one of several agents running at once, sharing one state file. What
+you are shown is already filtered to your own session: the bars on your
+statusline, the jobs described in your context, and the crashes you are handed
+are yours. Do not reason about, report on, or clean up jobs you were not told
+about - `agent-progress ls` does show every session's work, and another agent's
+training run is not yours to cancel.
+
+`rm --all` clears only your own jobs, which is what you want; it takes
+`--everywhere` to touch another session's, and you should not.
+
 ## After launch: leave it alone
 
 Updates happen on their own, at most once every 2 minutes and at most once per

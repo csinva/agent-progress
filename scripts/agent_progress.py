@@ -66,6 +66,9 @@ CONFIG_SPEC = {
         "hide jobs expected to take less than this many seconds (0 = show all)", lo=0),
     "max_jobs": _spec("visibility", 3, "bars shown in the statusline at once", lo=1),
     "keep_done_seconds": _spec("visibility", 300, "how long a finished job lingers", lo=0),
+    "scope": _spec("visibility", "session",
+                   "whose jobs a statusline shows: this session's, or every session's",
+                   "str", choices=["session", "all"]),
     "keep_failed_seconds": _spec("visibility", 1800,
                                  "how long a crashed job stays on the statusline", lo=0),
     "prune_after_hours": _spec("visibility", 48, "forget finished jobs after this", lo=0),
@@ -306,7 +309,7 @@ def _sanitize(st):
                     job[key] = None
             for key in ("id", "state", "unit", "note", "desc", "cmd", "log", "pattern",
                         "state_probe", "queue_reason", "nodes", "partition",
-                        "scheduler_state"):
+                        "scheduler_state", "session_id", "bridge_id"):
                 if key in job and job[key] is not None and not isinstance(job[key], str):
                     job[key] = None
             job["id"] = job.get("id") or str(jid)
@@ -440,6 +443,31 @@ def current_session():
     return (os.environ.get("CLAUDE_CODE_SESSION_ID")
             or os.environ.get("CLAUDE_SESSION_ID")
             or None)
+
+
+def current_bridge():
+    """The conversation this session belongs to.
+
+    Recorded on every job for diagnosis - `ls --json` reports it - but never
+    used to decide ownership: several agents can share one conversation, and
+    matching on it made every agent claim every job."""
+    return os.environ.get("CLAUDE_CODE_BRIDGE_SESSION_ID")
+
+
+def job_belongs_here(job, session_id=None):
+    """Is this job one that the session being drawn for should see?
+
+    Several agents share one state file, so without this every agent's
+    statusline shows every other agent's work and a crash is reported to
+    whichever session happens to ask first. A job with no owner - started from
+    an ordinary shell, or by cron - belongs to nobody and so is shown to
+    everyone, since otherwise it would be shown to no one."""
+    owner = job.get("session_id")
+    if not owner:
+        return True
+    if session_id and owner == session_id:
+        return True
+    return owner == current_session()
 
 
 def session_is_new(session_id, st=None):
@@ -1096,7 +1124,7 @@ def job_visible(job, cfg, now=None):
     return total is not None and total >= threshold
 
 
-def pick_jobs(st, cfg, session_id=None, apply_visibility=True):
+def pick_jobs(st, cfg, session_id=None, apply_visibility=True, scoped=True):
     """Jobs worth showing: everything running, plus recently finished ones."""
     now = time.time()
     out = []
@@ -1109,6 +1137,8 @@ def pick_jobs(st, cfg, session_id=None, apply_visibility=True):
             if now - (j.get("ended") or 0) >= linger:
                 continue
         if apply_visibility and not job_visible(j, cfg, now):
+            continue
+        if scoped and cfg["scope"] == "session" and not job_belongs_here(j, session_id):
             continue
         out.append(j)
     # current session first, then oldest-started first (stable ordering)
@@ -1847,20 +1877,34 @@ def enqueue_crash(st, job, now):
         "log_tail": tail,
         "duration": (job.get("ended") or now) - (job.get("started") or now),
         "session_id": job.get("session_id"),
+        "bridge_id": job.get("bridge_id"),
         "delivered": None,
     })
     del st["inbox"][:-50]
 
 
+ORPHAN_GRACE = 600      # after this, a crash nobody claimed is offered to anyone
+
+
 def take_crash(session_id=None):
-    """Claim the oldest undelivered crash. Returns it, or None."""
+    """Claim the oldest undelivered crash that belongs here.
+
+    A crash is news for the session that started the job, not for whichever
+    session asks first - telling agent B that agent A's training died is both
+    wrong and, because it is then marked delivered, the reason agent A never
+    hears about it. A report nobody has claimed after ORPHAN_GRACE is offered to
+    anyone, so a crash whose session has since exited is not lost."""
+    now = time.time()
     claimed = None
     with state_rw() as st:
-        for ev in st.get("inbox", []):
-            if not ev.get("delivered"):
-                ev["delivered"] = {"session_id": session_id, "ts": time.time()}
-                claimed = dict(ev)
-                break
+        pending = [e for e in st.get("inbox", []) if not e.get("delivered")]
+        mine = [e for e in pending if job_belongs_here(e, session_id)]
+        orphaned = [e for e in pending
+                    if e.get("session_id") and (now - (e.get("ts") or 0)) > ORPHAN_GRACE]
+        for ev in (mine or orphaned):
+            ev["delivered"] = {"session_id": session_id, "ts": now}
+            claimed = dict(ev)
+            break
     return claimed
 
 
@@ -2500,6 +2544,7 @@ def _new_job(args, cmd=None, log=None, pid=None):
         "auto_launched": bool(getattr(args, "auto_launched", False)),
         "samples": [],
         "session_id": current_session(),
+            "bridge_id": current_bridge(),
         "cwd": os.getcwd(),
     }
     return job
@@ -2734,7 +2779,8 @@ def attach_batch_job(kind, job_id, cwd, eta=None, name=None, desc=None,
             "state_probe": probe, "batch": {"scheduler": kind, "job_id": job_id},
             "est_total_s": eta, "initial_est_total_s": eta, "log_offset": 0,
             "force_show": True, "auto_launched": True, "samples": [],
-            "session_id": current_session(), "cwd": cwd or os.getcwd(),
+            "session_id": current_session(),
+            "bridge_id": current_bridge(), "cwd": cwd or os.getcwd(),
         }
         if info:
             apply_batch_info(st["jobs"][jid], info, now)
@@ -2894,6 +2940,7 @@ def _handoff(command, name, log, pid, started, sent, cfg, args):
             "est_total_s": None, "initial_est_total_s": None,
             "log_offset": 0, "force_show": False, "auto_launched": True,
             "samples": [], "session_id": current_session(),
+            "bridge_id": current_bridge(),
             "cwd": args.cwd or os.getcwd(),
         }
     wpid = spawn_watcher(jid)
@@ -3076,15 +3123,26 @@ def cmd_log(args):
 
 
 def cmd_rm(args):
+    # `rm --all` inside a session clears that session's work, not the machine's.
+    # Several agents share this file, and one of them tidying up should not throw
+    # away another's jobs along with the records their watchers are writing to.
+    here = current_session()
+    scoped = bool(here) and not args.everywhere
+
+    def ours(job):
+        return not scoped or job_belongs_here(job, here)
+
     with state_rw() as st:
         if args.all:
-            n = len(st["jobs"])
-            st["jobs"] = {}
-            print("removed %d job(s)" % n)
+            gone = [k for k, v in st["jobs"].items() if ours(v)]
+            for k in gone:
+                del st["jobs"][k]
+            print("removed %d job(s)%s" % (len(gone),
+                                           " from this session" if scoped else ""))
             return 0
         if args.finished:
             gone = [k for k, v in st["jobs"].items()
-                    if v.get("state") not in ACTIVE_STATES]
+                    if v.get("state") not in ACTIVE_STATES and ours(v)]
             for k in gone:
                 del st["jobs"][k]
             print("removed %d finished job(s)" % len(gone))
@@ -3159,7 +3217,8 @@ def cmd_watch(args):
     try:
         while True:
             st = state_ro()
-            jobs = pick_jobs(st, cfg, apply_visibility=False)
+            # a dashboard someone opened deliberately shows everything
+            jobs = pick_jobs(st, cfg, apply_visibility=False, scoped=False)
             w = term_width()
             out = ["\033[H\033[J", paint("agent-progress  ·  %s" % time.strftime("%H:%M:%S"), "dim", cfg["color"]), ""]
             if not jobs:
@@ -3606,6 +3665,8 @@ def build_parser():
     sp.add_argument("job", nargs="*")
     sp.add_argument("--all", action="store_true")
     sp.add_argument("--finished", action="store_true")
+    sp.add_argument("--everywhere", action="store_true",
+                    help="also remove jobs belonging to other sessions")
     sp.set_defaults(fn=cmd_rm)
 
     sp = sub.add_parser("statusline", help="render for the Claude Code statusline")

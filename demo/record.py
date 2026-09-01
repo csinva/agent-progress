@@ -196,7 +196,7 @@ MAKEFILE = """all:
 """
 
 TRAIN = """import time, sys
-N = 40
+N = 28
 for i in range(1, N + 1):
     time.sleep(2.2)
     print("Epoch %d/%d  loss %.3f  acc %.3f" % (i, N, 2.4 / (i ** 0.5), 1 - 0.9 / i),
@@ -293,16 +293,16 @@ class Take(object):
 # (until real-seconds, speed, caption). Speed is how much real time each
 # captured frame covers, so waiting can be skipped past without faking it.
 SCRIPT = [
-    (2.0,   1,  "a command Claude runs, like any other"),
-    (9.0,   1,  "it runs exactly as it would have - nothing is watching yet"),
-    (12.5,  1,  "done in 4s. never tracked: no job, no message, no tokens"),
-    (19.0,  1,  "now something slower. the threshold is 20 seconds"),
-    (33.0,  10, "waiting out the 20 seconds"),
-    (41.0,  1,  "past the threshold: tracked, and handed to the background"),
-    (47.0,  1,  "Claude sets the estimate - the one thing a hook cannot guess"),
-    (52.0,  1,  "now the bar can say when it will finish"),
-    (108.0, 16, "running. Claude spends nothing while it does"),
-    (115.0, 1,  "done"),
+    (2.0,  1,  "a command Claude runs, like any other"),
+    (9.0,  1,  "it runs exactly as it would have - nothing is watching yet"),
+    (12.0, 1,  "done in 4s. never tracked: no job, no message, no tokens"),
+    (18.0, 1,  "now something slower. the threshold is 20 seconds"),
+    (32.0, 10, "waiting out the 20 seconds"),
+    (39.0, 1,  "past the threshold: tracked, and left running in the background"),
+    (45.0, 1,  "Claude sets the estimate - the one thing a hook cannot guess"),
+    (49.0, 1,  "now the bar knows when it will finish"),
+    (76.0, 14, "running, and costing nothing while it does"),
+    (83.0, 1,  "done"),
 ]
 
 
@@ -365,19 +365,19 @@ def main():
             fired.add("make")
             take.prompt("make -j8")
             take.run("make -j8", "make")
-        if 12.8 < now and "train" not in fired:
+        if 12.2 < now and "train" not in fired:
             fired.add("train")
             take.say()
-            take.prompt("python3 train.py --epochs 40")
-            take.run("python3 train.py --epochs 40", "train")
-        if 44.0 < now and "eta" not in fired:
+            take.prompt("python3 train.py --epochs 28")
+            take.run("python3 train.py --epochs 28", "train")
+        if 42.0 < now and "eta" not in fired:
             fired.add("eta")
             jid = take.job_id()
             if jid:
-                subprocess.run([sys.executable, ENGINE, "update", jid, "--eta", "70s",
-                                "--note", "40 epochs", "--quiet"], capture_output=True)
+                subprocess.run([sys.executable, ENGINE, "update", jid, "--eta", "50s",
+                                "--note", "28 epochs", "--quiet"], capture_output=True)
                 take.say()
-                take.say(cc.paint("  $ agent-tqdm update %s --eta 70s" % jid, "run", True))
+                take.say(cc.paint("  $ agent-tqdm update %s --eta 50s" % jid, "run", True))
 
         take.drain()
         if now - last >= (take.speed / float(args.fps)):

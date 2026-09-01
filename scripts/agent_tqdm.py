@@ -939,7 +939,7 @@ AUTO_TRACK_PATTERNS = [
     # \btrain misses run_training.py and my_train.py, which is most of them. A
     # stray match on something like constraints.py costs nothing now that a
     # command finishing inside the threshold is never tracked at all.
-    (r"\b(?:python3?|uv\s+run|poetry\s+run|pipenv\s+run)\s+[^|;&]*"
+    (r"\b(?:python3?|uv\s+run|poetry\s+run|pipenv\s+run)\s+[^|;&]{0,120}"
      r"(?:train|finetune|fine_tune|pretrain|sweep|eval|benchmark|experiment)"
      r"[\w.-]*\.py\b", "a training or evaluation script"),
     (r"\btorchrun\b", "torchrun"),
@@ -976,7 +976,7 @@ AUTO_TRACK_PATTERNS = [
     (r"\baws\s+s3\s+(?:sync|cp)\b", "an S3 transfer"),
     (r"\b(?:gsutil|gcloud\s+storage)\b", "a GCS transfer"),
     (r"\bhuggingface-cli\s+download\b", "a model download"),
-    (r"\b(?:wget|curl)\b[^|;&]*\s-[a-zA-Z]*[oO]\b", "a download"),
+    (r"\b(?:wget|curl)\b[^|;&]{0,120}\s-[a-zA-Z]*[oO]\b", "a download"),
     (r"\bgit\s+clone\b", "a git clone"),
     (r"\bsleep\s+(?:[2-9]\d\d|\d{4,})\b", "a long sleep"),
 ]
@@ -1000,9 +1000,9 @@ AUTO_TRACK_IGNORE = [
 # A name for the bar, taken from whatever in the command looks most like the
 # thing being run.
 _NAME_HINTS = [
-    r"([\w.-]+)\.py\b",
-    r"\b(?:npm|pnpm|yarn|cargo|go|docker|terraform|dbt|dvc|bazel)\s+(?:run\s+)?(\w+)",
-    r"^\s*(?:sudo\s+)?([\w.-]+)",
+    r"([\w.-]{1,80})\.py\b",
+    r"\b(?:npm|pnpm|yarn|cargo|go|docker|terraform|dbt|dvc|bazel)\s+(?:run\s+)?(\w{1,40})",
+    r"^\s*(?:sudo\s+)?([\w.-]{1,80})",
 ]
 
 
@@ -1011,6 +1011,7 @@ def _split_patterns(text):
 
 
 def suggest_job_name(command):
+    command = (command or "")[:2000]      # the head is all a name can come from
     for rx in _NAME_HINTS:
         m = re.search(rx, command)
         if m:
@@ -1029,7 +1030,12 @@ def classify_command(command, tool_input=None, cfg=None):
     cfg = cfg or load_config()
     tool_input = tool_input or {}
     command = (command or "").strip()
-    result = {"track": False, "why": "", "signal": "", "name": suggest_job_name(command)}
+    # Only the head of a command is worth scanning. Anything longer is a
+    # heredoc or an inline payload, and scanning all of it is what makes a
+    # pathological command expensive.
+    head = command[:2000]
+    result = {"track": False, "why": "", "signal": "",
+              "name": suggest_job_name(command[:2000])}
 
     if not command or cfg["auto_track"] == "off":
         result["why"] = "auto-tracking is off" if command else "empty command"
@@ -1037,7 +1043,7 @@ def classify_command(command, tool_input=None, cfg=None):
 
     for rx in AUTO_TRACK_IGNORE + _split_patterns(cfg["auto_track_ignore"]):
         try:
-            if re.search(rx, command):
+            if re.search(rx, head):
                 result["why"] = "matches an ignore rule"
                 return result
         except re.error:
@@ -1064,14 +1070,14 @@ def classify_command(command, tool_input=None, cfg=None):
         return result
     for rx, label in AUTO_TRACK_PATTERNS:
         try:
-            if re.search(rx, command):
+            if re.search(rx, head):
                 result.update(track=True, signal="pattern", why="it looks like %s" % label)
                 return result
         except re.error:
             continue
     for rx in _split_patterns(cfg["auto_track_patterns"]):
         try:
-            if re.search(rx, command):
+            if re.search(rx, head):
                 result.update(track=True, signal="pattern",
                               why="it matches one of your auto_track_patterns")
                 return result
@@ -1599,7 +1605,11 @@ def cmd_watch_daemon(args):
                 finalize(job, code, now, st)
                 finished = dict(job)
 
-            if not finished and (now - idle_since) > args.max_idle:
+            # Silence only means something when there is no process to ask.
+            # A living pid is the better answer, and plenty of long jobs print
+            # nothing for hours.
+            if (not finished and not job.get("pid")
+                    and (now - idle_since) > args.max_idle):
                 job["note"] = ((job.get("note") or "") + " [no progress seen]").strip()
                 job["state"] = "stalled"
                 job["ended"] = now
@@ -2366,8 +2376,12 @@ def cmd_config(args):
         changed = True
 
     if changed:
-        with open(CONFIG, "w") as f:
+        # written the way the state file is: a reader must never catch this
+        # half-done and silently fall back to the defaults
+        tmp = CONFIG + ".tmp.%d" % os.getpid()
+        with open(tmp, "w") as f:
             json.dump(user, f, indent=2, sort_keys=True)
+        os.replace(tmp, CONFIG)
     cfg = load_config(force=True)
 
     if args.json:

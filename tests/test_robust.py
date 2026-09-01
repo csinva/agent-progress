@@ -5,6 +5,7 @@ The state file is a plain file that several processes write and anyone can
 edit, and the statusline reads it many times a second. A value of the wrong
 shape must cost the bar some information, never raise.
 """
+import fcntl
 import importlib.util
 import json
 import os
@@ -14,6 +15,11 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENGINE = os.path.join(ROOT, "scripts", "agent_progress.py")
+# a state directory of this test run's own; must precede loading the engine,
+# which reads AGENT_PROGRESS_HOME once at import time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sandbox  # noqa: E402
+
 spec = importlib.util.spec_from_file_location("agent_progress", ENGINE)
 cc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cc)
@@ -235,6 +241,101 @@ run("rm", "--all")
 after = subprocess.run(["git", "-C", ROOT, "status", "--porcelain"],
                        capture_output=True, text=True).stdout
 ck("running jobs never write inside the repo", before == after, repr(after[:80]))
+
+print()
+print("=== an interrupted command is interrupted, not orphaned ===")
+# The wrapped command runs in a session of its own so that it can be detached
+# once it outlives the threshold. Until then a signal to the wrapper has to
+# reach it, or killing the wrapper - a harness timeout, ctrl-c - leaves the
+# real work running with nothing watching it, and the session relaunches it.
+import signal as _signal
+marker = os.path.join(sandbox.HOME, "orphan-marker")
+for name, sig in (("SIGTERM", _signal.SIGTERM), ("SIGINT", _signal.SIGINT)):
+    try:
+        os.remove(marker)
+    except OSError:
+        pass
+    p = subprocess.Popen(
+        [sys.executable, ENGINE, "exec", "--after", "300s",
+         "--shell", "sleep 6; touch %s" % marker],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    time.sleep(1.5)
+    p.send_signal(sig)
+    try:
+        rc = p.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        p.kill(); rc = None
+    ck("%s: the wrapper exits" % name, rc is not None, "still running")
+    time.sleep(6)
+    ck("%s: the command dies with it" % name, not os.path.exists(marker),
+       "the command outlived the wrapper")
+run("rm", "--all")
+
+print()
+print("=== a job id is only read out of a command that submits one ===")
+ck("a bare number is not a queued pbs job",
+   cc.detect_submission("10\n", "X=5; echo $((X*2))") == (None, None),
+   str(cc.detect_submission("10\n", "X=5; echo $((X*2))")))
+ck("nor is a count",
+   cc.detect_submission("4172\n", "wc -l < data.txt") == (None, None))
+# the fully-qualified id, suffix and all, because that is the form qstat wants
+ck("qsub's reply still is",
+   cc.detect_submission("77431.head\n", "qsub run.pbs") == ("pbs", "77431.head"),
+   str(cc.detect_submission("77431.head\n", "qsub run.pbs")))
+ck("so does sbatch's",
+   cc.detect_submission("Submitted batch job 4242", "sbatch run.sh") == ("slurm", "4242"))
+# no command but sbatch produces that sentence, so it is taken at its word
+# wherever it appears - which is what keeps a wrapper around sbatch working
+ck("and sbatch's sentence is trusted whatever produced it",
+   cc.detect_submission("Submitted batch job 4242", "./submit.sh") == ("slurm", "4242"))
+r = run("exec", "--shell", "X=5; echo $((X*2))")
+ck("a command printing a number creates no job",
+   r.stdout.strip() == "10" and json.loads(run("ls", "--json").stdout or "[]") == [],
+   repr(r.stdout))
+run("rm", "--all")
+
+print()
+print("=== the session id never recurses ===")
+env = dict(os.environ)
+env.pop("CLAUDE_CODE_SESSION_ID", None)
+env.pop("CLAUDE_SESSION_ID", None)
+r = subprocess.run([sys.executable, ENGINE, "start", "sessionless", "--eta", "1h",
+                    "--monitor", "time", "--no-watch"],
+                   capture_output=True, text=True, env=env)
+ck("a job starts with no session in the environment",
+   r.returncode == 0 and "RecursionError" not in r.stderr, repr(r.stderr[-200:]))
+subprocess.run([sys.executable, ENGINE, "rm", "--all"],
+               capture_output=True, env=env)
+
+print()
+print("=== the state lock is not waited on forever ===")
+lf = open(os.path.join(sandbox.HOME, ".lock"), "a+")
+fcntl.flock(lf, fcntl.LOCK_EX)
+t = time.time()
+r = subprocess.run([sys.executable, ENGINE, "start", "blocked", "--eta", "1h",
+                    "--monitor", "time", "--no-watch"], capture_output=True, text=True,
+                   env=dict(os.environ, AGENT_PROGRESS_LOCK_TIMEOUT="2"))
+dt = time.time() - t
+fcntl.flock(lf, fcntl.LOCK_UN); lf.close()
+ck("a held lock gives up instead of hanging", dt < 12 and r.returncode != 0,
+   "%.1fs rc=%s" % (dt, r.returncode))
+ck("and says so in a sentence, not a traceback",
+   "Traceback" not in r.stderr and "locked" in r.stderr, repr(r.stderr[-160:]))
+
+lf = open(os.path.join(sandbox.HOME, ".lock"), "a+")
+fcntl.flock(lf, fcntl.LOCK_EX)
+t = time.time()
+h = subprocess.run([sys.executable, os.path.join(ROOT, "hooks", "auto_track.py")],
+                   input=json.dumps({"tool_name": "Bash", "session_id": "s",
+                                     "tool_input": {"command": "python train.py"}}),
+                   capture_output=True, text=True,
+                   env=dict(os.environ, AGENT_PROGRESS_AUTO_TRACK="instruct"))
+dt = time.time() - t
+fcntl.flock(lf, fcntl.LOCK_UN); lf.close()
+ck("the pre-command hook returns well inside its own timeout", dt < 8,
+   "%.1fs" % dt)
+ck("and never fails the command it sits in front of",
+   h.returncode == 0 and "Traceback" not in h.stderr, repr(h.stderr[-160:]))
 
 print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))

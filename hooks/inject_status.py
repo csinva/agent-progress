@@ -74,7 +74,8 @@ def job_lines(cc, cfg):
     import time
     try:
         st = cc.state_ro()
-        running = [j for j in st["jobs"].values() if j.get("state") == "running"]
+        running = [j for j in st["jobs"].values()
+                   if j.get("state") in cc.ACTIVE_STATES]
     except Exception:
         return [], 0, ""
     if not running:
@@ -85,6 +86,23 @@ def job_lines(cc, cfg):
     for j in shown[:5]:
         e = cc.estimate(j)
         bits = [j.get("id", "?")]
+        if j.get("state") == "queued":
+            # the distinction matters to Claude more than to anyone: a queued
+            # job has not started, so there is nothing to read and no progress
+            # to report, and "it is 0% done after an hour" is actively wrong
+            kind = (j.get("batch") or {}).get("scheduler") or "the scheduler"
+            bits.append("QUEUED in %s (job %s), not started yet, waited %s"
+                        % (kind, (j.get("batch") or {}).get("job_id") or "?",
+                           cc.fmt_dur(e["elapsed"])))
+            why = cc.describe_queue(j)
+            if why:
+                bits.append(why)
+            if j.get("total") and j.get("step") is not None:
+                bits.append("%s/%s tasks finished" % (j["step"], j["total"]))
+            lines.append("- " + ", ".join(bits))
+            continue
+        if j.get("nodes"):
+            bits.append("on " + j["nodes"])
         if e["frac"] is not None:
             bits.append("%d%%" % int(e["frac"] * 100))
         if j.get("total") and j.get("step") is not None:
@@ -175,12 +193,13 @@ def revive_watchers(cc):
     probe command once each."""
     try:
         st = cc.state_ro()
-        if not any(j.get("state") == "running" and not cc.alive(j.get("watcher_pid"))
+        if not any(j.get("state") in cc.ACTIVE_STATES
+                   and not cc.alive(j.get("watcher_pid"))
                    for j in st["jobs"].values()):
             return                      # nothing to do, and no need to take the lock
         with cc.state_rw() as w:
             for jid, job in w["jobs"].items():
-                if job.get("state") != "running":
+                if job.get("state") not in cc.ACTIVE_STATES:
                     continue
                 if cc.alive(job.get("watcher_pid")):
                     continue            # re-checked under the lock, so only one wins
@@ -190,6 +209,10 @@ def revive_watchers(cc):
 
 
 def main():
+    # Same ten-second budget as every other hook, and nothing here is worth
+    # spending it on: a status summary that cannot be written is a summary
+    # that goes out next turn instead.
+    os.environ.setdefault("AGENT_PROGRESS_LOCK_TIMEOUT", "3")
     event = sys.argv[1] if len(sys.argv) > 1 else "SessionStart"
     payload = read_payload()
     session_id = payload.get("session_id")
@@ -230,7 +253,7 @@ def main():
     parts = list(blocks)
     if lines:
         parts.append(
-            "%d tracked job(s) running (agent-progress plugin). These observe themselves "
+            "%d tracked job(s) active (agent-progress plugin). These observe themselves "
             "on a timer - do not poll them, re-launch them, or wait on them.\n%s\n"
             "Intervene only if something looks wrong or the user asks: "
             "`agent-progress log <id> -n 40` to read output, then "

@@ -148,10 +148,33 @@ So `sbatch train.sbatch` needs nothing from you except, as ever, an estimate:
 agent-progress update slurm-4242 --eta 6h
 ```
 
+**A queued job has not started.** `agent-progress ls --json` reports it with
+`"state": "queued"` and a `queue_reason_human` saying why it is waiting. Three
+things follow, and getting them wrong is the usual way to be unhelpful about
+cluster work:
+
+- Do not report progress on it. There is none. It is waiting, not working, and
+  saying "0% after an hour" describes a stall rather than a queue.
+- Do not re-submit it, and do not run `squeue` or `sacct` to check on it. The
+  watcher already asks every fifteen seconds while a job is queued, and the
+  answer is in `ls --json` for free. Polling the scheduler yourself costs tokens
+  and tells you less.
+- Its estimate, until it starts, is the job's slurm `TimeLimit` - an upper
+  bound, not a measurement. Replace it with a real one once the job is running
+  and you can see what it is doing.
+
+The wait is not counted as run time: when slurm reports the job started, the
+clock is re-anchored to slurm's own `RunTime`. So `elapsed_s` on a running
+scheduler job is time spent working, and you can quote it as such.
+
+An array job is tracked as tasks finished out of tasks submitted, so it has a
+real bar with no help from you.
+
 To follow a job already in the queue, or one somebody else submitted:
 
 ```bash
 agent-progress slurm 4242 --eta 6h
+agent-progress slurm 4242 --interval 30s     # ask the scheduler more often
 ```
 
 For any other queue, give it a command that prints the job's state - one of

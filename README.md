@@ -88,9 +88,19 @@ recorded frame by frame from live job state through the same renderer the
 statusline uses. The commands go through the actual hook. Waiting is compressed
 by capturing fewer frames per second of real time, with the multiplier shown on
 screen — so the twenty-second threshold in the clip really is twenty seconds.
-The only thing bent for the recording is the probe cadence, forced to two
-seconds so the bars visibly move over a job that lasts a minute; the header says
-so on screen.
+
+Left to right: a training run that waits out the threshold and is then tracked;
+a benchmark submitted to a scheduler with `sbatch`, which is tracked from the
+moment it is queued and dies out of memory once it starts; and a build that
+finishes in four seconds and is never tracked at all.
+
+Two things are staged. The probe cadence is forced to two seconds so the bars
+visibly move over a job lasting a minute — the header says so on screen. And the
+machine this is recorded on has no cluster attached, so `sbatch`, `scontrol` and
+`sacct` are stubs in `demo/record.py` that answer the way slurm would. Everything
+on this side of them is real: the real hook rewrites the command, the real
+submission detector reads the job id out of what `sbatch` printed, and the real
+watcher asks the real questions and draws the bar from the answers.
 
 Regenerate it with `python3 demo/record.py`; encoding uses AVFoundation, so no
 ffmpeg is needed.
@@ -242,19 +252,57 @@ $ sbatch train.sbatch
 Submitted batch job 4242
 
 [agent-progress] slurm job 4242 is queued, and is being tracked as 'slurm-4242'.
+Waiting for nodes.
 Progress comes from slurm-4242.out once the scheduler writes it, and the job's
 state comes from the scheduler itself, so its bar finishes on its own.
+Do not poll it with squeue - the bar already does, and says why it waits.
 ```
 
-Progress is read from the file the scheduler writes; the job's fate is read from
-the scheduler. A run the cluster kills comes back as a crash carrying the word
-the scheduler used — `OUT_OF_MEMORY`, `TIMEOUT`, `NODE_FAIL` — rather than an
-invented exit code.
+#### Queued is a state of its own
+
+A job in a queue is not a job making slow progress, and it is not shown as one:
+
+```
+⏳ slurm-4242 ▕······················▏ queued 41m · waiting for nodes, on gpu
+⠹ slurm-4242 ▕████████▌·············▏  38%  13/34ep  00:12<00:19  57s/ep  →16:41
+```
+
+The bar is empty rather than sliding, there is no invented percentage, and the
+line says how long it has waited and slurm's own reason for the wait — `Resources`,
+`Priority`, `Dependency`, a QOS limit — in words.
+
+The distinction is not cosmetic. Everything the estimate is built on is anchored
+to when the job **started**, and for a scheduler job that is not when you
+submitted it. A job that sat in the queue for four hours and has been running
+for ten minutes is ten minutes in, not four hours and ten. When slurm reports it
+started, the clock is re-anchored to slurm's own `RunTime` and the queue-time
+samples — which measured nothing — are dropped. The wait is kept separately, and
+`agent-progress watch` shows it.
+
+Slurm specifically is asked with one `scontrol show job`, which answers more than
+the state word: where the job landed (`NodeList`, `Partition`), how long it has
+really been running, and its `TimeLimit` — used as the standing estimate until
+the job has printed enough to measure, because an upper bound beats no bound. It
+falls back to `sacct` once `scontrol` has forgotten the job, which is the only
+thing that can still say how it went.
+
+An **array** gets a progress bar for nothing: tasks finished out of tasks
+submitted, straight from the scheduler, which is better than anything the log of
+any one task could tell you.
+
+```
+⠹ slurm-90    ▕█████████████▌········▏  62%  5/8task  00:41<00:24  8.2m/task
+```
+
+A run the cluster kills comes back as a crash carrying the word the scheduler
+used — `OUT_OF_MEMORY`, `TIMEOUT`, `NODE_FAIL` — rather than an invented exit
+code.
 
 To follow a job already in the queue:
 
 ```bash
 agent-progress slurm 4242 --eta 6h
+agent-progress slurm 4242 --interval 30s     # ask the scheduler more often
 ```
 
 Any other queue works the same way if you can name a command that prints the

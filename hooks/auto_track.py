@@ -83,6 +83,12 @@ def read_payload(timeout=3.0):
 
 
 def main():
+    # This hook runs in front of every Bash command and Claude Code gives it
+    # ten seconds. Waiting the engine's default on a busy state file would
+    # spend all of them on bookkeeping nobody is waiting for, so give up on
+    # the lock early and let the command through untracked instead.
+    os.environ.setdefault("AGENT_PROGRESS_LOCK_TIMEOUT", "3")
+
     data = read_payload()
     if data.get("tool_name") != "Bash":
         return 0

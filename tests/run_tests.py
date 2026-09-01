@@ -24,6 +24,11 @@ ENGINE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))
                       "scripts", "agent_progress.py")
 HOOKS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks")
 HOOK = os.path.join(HOOKS, "auto_track.py")
+# a state directory of this test run's own; must precede loading the engine,
+# which reads AGENT_PROGRESS_HOME once at import time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sandbox  # noqa: E402
+
 _spec = importlib.util.spec_from_file_location("agent_progress", ENGINE)
 cc = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cc)
@@ -103,7 +108,7 @@ for name, sh, want in cases:
 
 print()
 print("=== nothing is left behind by a fast command ===")
-logs = os.path.expanduser("~/.claude/agent-progress/logs")
+logs = sandbox.LOGS
 before = set(os.listdir(logs)) if os.path.isdir(logs) else set()
 ex("echo transient")
 after_files = set(os.listdir(logs)) if os.path.isdir(logs) else set()
@@ -246,7 +251,7 @@ for spec, lo, hi in (("1s", 0.5, 3.5), ("2s", 1.5, 4.5)):
 
 print()
 print("=== a corrupt state file does not break anything ===")
-sp = os.path.expanduser("~/.claude/agent-progress/state.json")
+sp = sandbox.STATE
 open(sp, "w").write("{not json at all")
 ck("ls survives", cli("ls").returncode == 0)
 ck("statusline survives", subprocess.run([sys.executable, ENGINE, "statusline"],

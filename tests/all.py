@@ -13,7 +13,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SUITES = ["test_units.py", "test_lifecycle.py", "test_hooks.py",
-          "test_robust.py", "test_consistency.py", "run_tests.py"]
+          "test_robust.py", "test_slurm.py", "test_demo.py", "test_consistency.py",
+          "run_tests.py"]
 
 total = failed = 0
 broken = []

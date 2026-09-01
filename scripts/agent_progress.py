@@ -39,6 +39,14 @@ CONFIG = os.path.join(ROOT, "config.json")
 
 STATE_VERSION = 1
 
+# A job that is alive: either doing the work, or waiting in a queue for its turn
+# to. "queued" exists because a scheduler job spends real time - sometimes most
+# of its life - having been submitted and not yet started, and calling that
+# "running" makes every number wrong: the elapsed clock counts queue time as run
+# time, the throughput is measured against work that has not begun, and the bar
+# claims progress on a job that has produced nothing.
+ACTIVE_STATES = ("running", "queued")
+
 # --------------------------------------------------------------------- config
 #
 # Every tunable lives in one table: default, type, valid range, and a one-line
@@ -87,6 +95,7 @@ CONFIG_SPEC = {
     "glyph_failed": _spec("bar", "\U0001f480", "marker for a job that crashed", "str"),
     "glyph_cancelled": _spec("bar", "\u25a0", "marker for a job you stopped", "str"),
     "glyph_stalled": _spec("bar", "\u23f8", "marker for a job that stopped making progress", "str"),
+    "glyph_queued": _spec("bar", "\u23f3", "marker for a job waiting in a scheduler queue", "str"),
 
     # which fields appear on the line
     "show_spinner": _spec("fields", True, "leading spinner / status glyph", "bool"),
@@ -271,7 +280,8 @@ def load_config(force=False):
 _NUMERIC_FIELDS = ("started", "updated", "ended", "eta_end", "eta_prior_s",
                    "est_total_s", "initial_est_total_s", "next_probe", "interval_s",
                    "interval_override", "units", "total", "pct", "step", "exit_code",
-                   "pid", "watcher_pid", "log_offset", "size_bytes")
+                   "pid", "watcher_pid", "log_offset", "size_bytes",
+                   "submitted", "queued_seconds")
 
 
 def _sanitize(st):
@@ -295,7 +305,8 @@ def _sanitize(st):
                 if isinstance(job.get(key), bool):
                     job[key] = None
             for key in ("id", "state", "unit", "note", "desc", "cmd", "log", "pattern",
-                        "state_probe"):
+                        "state_probe", "queue_reason", "nodes", "partition",
+                        "scheduler_state"):
                 if key in job and job[key] is not None and not isinstance(job[key], str):
                     job[key] = None
             job["id"] = job.get("id") or str(jid)
@@ -343,20 +354,56 @@ def _write_state(st):
     os.replace(tmp, STATE)
 
 
+class StateBusy(RuntimeError):
+    """The state lock could not be taken in time."""
+
+
+# One process holding this lock blocks every other one: the statusline reads
+# without it, but every watcher, every finishing job and the hook in front of
+# every Bash command take it. A blocking flock with no timeout turns any single
+# wedged process - stopped, on a hung network filesystem, waiting on a probe -
+# into a permanent stall of the whole plugin. Waiting a bounded time and then
+# giving up is always better: every caller here can carry on knowing less.
+LOCK_TIMEOUT = 20.0
+
+
 @contextlib.contextmanager
-def state_rw():
-    """Read-modify-write the state file under an exclusive flock."""
+def state_rw(timeout=None):
+    """Read-modify-write the state file under an exclusive flock.
+
+    Raises StateBusy rather than waiting forever. Callers on a path that must
+    not fail - the hooks, the deferral wrapper - already treat any exception
+    here as "skip the bookkeeping and get on with it", which is the right
+    answer: the bar is worth less than the command."""
     ensure_dirs()
+    if timeout is None:
+        try:
+            timeout = float(os.environ.get("AGENT_PROGRESS_LOCK_TIMEOUT")
+                            or LOCK_TIMEOUT)
+        except (TypeError, ValueError):
+            timeout = LOCK_TIMEOUT
     lf = open(LOCK, "a+")
+    held = False
     try:
-        fcntl.flock(lf, fcntl.LOCK_EX)
+        deadline = time.time() + max(0.0, timeout)
+        while True:
+            try:
+                fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held = True
+                break
+            except (IOError, OSError):
+                if time.time() >= deadline:
+                    raise StateBusy(
+                        "the agent-progress state file stayed locked for %gs" % timeout)
+                time.sleep(0.05)
         st = _read_state()
         yield st
         _prune(st)
         _write_state(st)
     finally:
         try:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+            if held:
+                fcntl.flock(lf, fcntl.LOCK_UN)
         finally:
             lf.close()
 
@@ -372,7 +419,10 @@ def _prune(st):
     cutoff = time.time() - cfg["prune_after_hours"] * 3600
     for jid in list(st["jobs"]):
         j = st["jobs"][jid]
-        if j.get("state") != "running" and (j.get("ended") or 0) < cutoff:
+        # ACTIVE_STATES, not just "running": a queued job has no `ended`, so
+        # testing on that alone would delete every scheduler job the moment it
+        # was created - and take its watcher with it
+        if j.get("state") not in ACTIVE_STATES and (j.get("ended") or 0) < cutoff:
             del st["jobs"][jid]
 
 
@@ -381,9 +431,15 @@ def current_session():
 
     Claude Code exports CLAUDE_CODE_SESSION_ID; the shorter name was a guess,
     and reading it meant every job recorded a session of None, which quietly
-    disabled putting the current session's jobs first on the statusline."""
+    disabled putting the current session's jobs first on the statusline. Both
+    are read now - the fallback used to be a call to this function, which
+    recursed until it raised whenever neither variable was set, i.e. every time
+    the tool was run from an ordinary shell rather than from inside a session.
+
+    None is a fine answer. A job started outside any session belongs to none."""
     return (os.environ.get("CLAUDE_CODE_SESSION_ID")
-            or current_session())
+            or os.environ.get("CLAUDE_SESSION_ID")
+            or None)
 
 
 def session_is_new(session_id, st=None):
@@ -417,7 +473,7 @@ def new_id(st, name):
     if base not in st["jobs"]:
         return base
     # reuse the slot if the previous job of this name is finished
-    if st["jobs"][base].get("state") != "running":
+    if st["jobs"][base].get("state") not in ACTIVE_STATES:
         return base
     n = 2
     while "%s-%d" % (base, n) in st["jobs"]:
@@ -434,7 +490,7 @@ def resolve(st, ref):
         [k for k in jobs if k.startswith(ref)],
         [k for k in jobs if ref.lower() in k.lower()],
     ):
-        running = [k for k in match if jobs[k].get("state") == "running"]
+        running = [k for k in match if jobs[k].get("state") in ACTIVE_STATES]
         pool = running or match
         if len(pool) == 1:
             return pool[0]
@@ -651,7 +707,14 @@ def estimate(job, now=None, cfg=None):
     else:
         remaining, source = None, None
 
-    if job.get("state") != "running":
+    if job.get("state") == "queued":
+        # elapsed is time spent waiting, and there is no remaining to speak of:
+        # the run has not begun, so nothing about its length has been observed
+        elapsed = now - (job.get("submitted") or started)
+        remaining, source, overdue = None, None, False
+        if not job.get("total"):
+            frac = None
+    elif job.get("state") != "running":
         remaining, source, overdue = 0.0, None, False
         if job.get("state") == "done":
             frac = 1.0
@@ -822,7 +885,7 @@ def tone_for(job):
         return "done"
     if st in ("failed", "cancelled"):
         return "fail"
-    if st == "stalled":
+    if st in ("stalled", "queued"):
         return "warn"
     return "run"
 
@@ -838,6 +901,9 @@ def status_glyph(job, cfg):
         return paint(cfg["glyph_cancelled"], "dim", color)
     if st == "stalled":
         return paint(cfg["glyph_stalled"], "warn", color)
+    if st == "queued":
+        # deliberately not the spinner: nothing is turning yet
+        return paint(cfg["glyph_queued"], "warn", color)
     fps = cfg["spinner_fps"] or 0
     idx = int(time.time() * fps) % len(SPINNER) if fps else 0
     return paint(SPINNER[idx], "run", color)
@@ -855,12 +921,16 @@ def render_line(job, cfg, width=None, now=None):
     tone = tone_for(job)
     unit = job.get("unit") or ""
 
+    queued = job.get("state") == "queued"
+
     parts = []
     if cfg["show_spinner"]:
         parts.append(status_glyph(job, cfg))
     if cfg["show_name"]:
         parts.append(paint(job.get("id", "job")[:cfg["name_width"]], "text", color))
-    parts.append(draw_bar(e["frac"], cfg, tone))
+    # An empty bar, not the indeterminate one that slides back and forth: a job
+    # in a queue is not making unmeasured progress, it is making none.
+    parts.append(draw_bar(0.0 if queued and e["frac"] is None else e["frac"], cfg, tone))
 
     if cfg["show_percent"] and e["frac"] is not None:
         parts.append(paint("%3d%%" % int(e["frac"] * 100), "text", color))
@@ -869,7 +939,15 @@ def render_line(job, cfg, width=None, now=None):
     if cfg["show_counts"] and total and units is not None:
         parts.append(paint("%g/%g%s" % (round(units, 1), total, unit), "dim", color))
 
-    if job.get("state") == "running":
+    if queued:
+        # There is no elapsed<remaining to show: nothing has started, so the
+        # only honest numbers are how long it has been waiting and why.
+        waited = now - (job.get("submitted") or job.get("started") or now)
+        parts.append(paint("queued " + fmt_short(waited), "warn", color))
+        why = describe_queue(job)
+        if why:
+            parts.append(paint("· " + why, "dim", color))
+    elif job.get("state") == "running":
         if cfg["show_clock"]:
             # tqdm's signature elapsed<remaining pair
             rem = fmt_dur(e["remaining"]) if e["remaining"] is not None else "?"
@@ -896,7 +974,8 @@ def render_line(job, cfg, width=None, now=None):
             parts.append(paint(job.get("scheduler_state")
                                or crash_reason(job.get("exit_code"))[0], "fail", color))
 
-    if cfg["show_note"] and job.get("note"):
+    # a queued job has already said the one thing worth the space: why it waits
+    if cfg["show_note"] and job.get("note") and not queued:
         parts.append(paint("\u00b7 " + one_line(job["note"], cfg["note_width"]),
                            "dim", color))
 
@@ -968,6 +1047,12 @@ def render_block(job, cfg, width):
     if job.get("cmd"):
         bits.append("$ " + one_line(job["cmd"], 160))
     bits.append(one_line("watching " + describe_monitor(job), 160))
+    for label, key in (("reason", "queue_reason"), ("nodes", "nodes"),
+                       ("partition", "partition"), ("slurm says", "scheduler_state")):
+        if job.get(key):
+            bits.append("%s %s" % (label, job[key]))
+    if job.get("queued_seconds"):
+        bits.append("queued for " + fmt_short(job["queued_seconds"]))
     if e.get("total_est"):
         init = job.get("initial_est_total_s")
         bits.append("est total %s%s" % (
@@ -997,6 +1082,10 @@ def job_visible(job, cfg, now=None):
         return True
     if job.get("state") in ("failed", "stalled"):
         return True          # a crash is always worth showing, however short the job
+    if job.get("state") == "queued":
+        # the whole reason nothing is happening; hiding it is the one thing
+        # guaranteed to be unhelpful
+        return True
     threshold = cfg["min_duration_seconds"]
     if threshold <= 0:
         return True
@@ -1012,7 +1101,7 @@ def pick_jobs(st, cfg, session_id=None, apply_visibility=True):
     now = time.time()
     out = []
     for j in st["jobs"].values():
-        if j.get("state") == "running":
+        if j.get("state") in ACTIVE_STATES:
             pass
         else:
             linger = (cfg["keep_failed_seconds"] if j.get("state") in ("failed", "stalled")
@@ -1272,7 +1361,16 @@ def auto_seen(command, session_id, remember=True, ttl=6 * 3600):
 # from, which is the file the scheduler writes, and some way to learn that it
 # ended, which is the scheduler's own record of it.
 
-# What a submission command prints back, and how to read the id out of it.
+# What a submission command prints back, how to read the id out of it, and -
+# where the output alone is not enough - what the command has to have been.
+#
+# "Submitted batch job 4242" is a sentence no other command produces, so it is
+# believed wherever it appears; that keeps a wrapper script which calls sbatch
+# internally working. `qsub` answers with nothing but the job id, so its pattern
+# is "a line that is just a number" - which is also what `echo $((X*2))`,
+# `wc -l`, `nproc` and any script that prints a count produce. Matching that on
+# output alone turned all of them into phantom queued jobs, each with a watcher
+# polling `qstat` for an id that was never a job, so it needs the command too.
 SUBMIT_PATTERNS = [
     # (pattern, scheduler, whether the command itself must vouch for it)
     (re.compile(r"Submitted batch job (\d+)"), "slurm", None),      # sbatch
@@ -1316,17 +1414,345 @@ def detect_submission(text, command=None):
     return None, None
 
 
-def slurm_log_path(job_id, cwd=None):
-    """Where the scheduler will write the job's output."""
+# ------------------------------------------------------------------ slurm
+#
+# Slurm gets its own path rather than the generic "run a command, read a word".
+# The word is the least of what it knows. One `scontrol show job` answers, in a
+# single call and for the same cost, every question the bar actually has:
+#
+#   is it waiting or working      JobState
+#   why is it still waiting       Reason=Resources / Priority / QOSMaxJobs...
+#   where did it land             NodeList, Partition, NumNodes
+#   how long has it really run    RunTime - which is not "time since I submitted"
+#   how long may it run           TimeLimit, the one honest prior available
+#                                 before the job has printed anything
+#   where is its output           StdOut, so the log is read from where slurm
+#                                 will actually write it
+#
+# and for an array, all of that per task, which is a progress bar for free:
+# tasks finished out of tasks submitted.
+#
+# `scontrol` forgets a job MinJobAge (5 minutes by default) after it ends, so
+# `sacct` is the fallback, and the only one that can still say how it went.
+
+PENDING_STATES = {"PENDING", "CONFIGURING", "REQUEUED", "REQUEUE_HOLD",
+                  "REQUEUE_FED", "RESV_DEL_HOLD", "SUSPENDED", "SIGNALING",
+                  "STAGE_OUT", "STOPPED", "PREEMPTED_HOLD"}
+RUNNING_STATES = {"RUNNING", "COMPLETING", "RESIZING"}
+
+SCONTROL_CMD = "scontrol show job %(id)s -o 2>/dev/null"
+SACCT_CMD = ("sacct -j %(id)s -n -P -X -o State,Elapsed,Start,ExitCode,NodeList "
+             "2>/dev/null")
+
+# `Key=Value Key=Value`, where a value may itself contain spaces (Command=, and
+# a Reason slurm chose to phrase as a sentence). A value therefore runs until
+# the next `Key=` or the end of the line.
+_KV = re.compile(r"(\w+)=(.*?)(?=\s+\w+=|$)")
+
+
+def slurm_seconds(text):
+    """Slurm's durations: [DD-]HH:MM:SS, or MM:SS, or UNLIMITED."""
+    text = (text or "").strip()
+    if not text or text.upper() in ("UNLIMITED", "INVALID", "NOT_SET", "N/A"):
+        return None
+    days = 0
+    if "-" in text:
+        head, _, text = text.partition("-")
+        try:
+            days = int(head)
+        except ValueError:
+            return None
+    parts = text.split(":")
     try:
-        out = subprocess.check_output(
-            ["/bin/sh", "-c", "scontrol show job %s 2>/dev/null" % shlex.quote(job_id)],
-            stderr=subprocess.DEVNULL, timeout=10).decode("utf-8", "replace")
-        m = re.search(r"StdOut=(\S+)", out)
-        if m:
-            return m.group(1).replace("%j", job_id)
+        nums = [float(p) for p in parts]
+    except ValueError:
+        return None
+    if len(nums) == 3:
+        h, m, s = nums
+    elif len(nums) == 2:
+        h, m, s = 0, nums[0], nums[1]
+    elif len(nums) == 1:
+        h, m, s = 0, 0, nums[0]
+    else:
+        return None
+    return days * 86400 + h * 3600 + m * 60 + s
+
+
+def count_tasks(spec):
+    """How many array tasks `ArrayTaskId=1-9:2,15` stands for."""
+    spec = (spec or "").strip()
+    if not spec:
+        return 0
+    spec = spec.split("%")[0]                 # 1-100%4 caps concurrency, not count
+    n = 0
+    for chunk in spec.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        step = 1
+        if ":" in chunk:
+            chunk, _, st = chunk.partition(":")
+            try:
+                step = max(1, int(st))
+            except ValueError:
+                step = 1
+        if "-" in chunk:
+            lo, _, hi = chunk.partition("-")
+            try:
+                n += len(range(int(lo), int(hi) + 1, step))
+            except ValueError:
+                continue
+        else:
+            n += 1
+    return n
+
+
+def parse_scontrol(text):
+    """One dict per line `scontrol show job -o` printed - one line per task."""
+    out = []
+    for line in (text or "").splitlines():
+        if "JobState=" not in line:
+            continue
+        rec = dict((m.group(1), m.group(2).strip()) for m in _KV.finditer(line))
+        rec["_tasks"] = count_tasks(rec.get("ArrayTaskId")) or 1
+        out.append(rec)
+    return out
+
+
+def parse_sacct(text):
+    """State|Elapsed|Start|ExitCode|NodeList, one line per job step.
+
+    A line with no separators at all is read as the state on its own - what
+    `sacct -o State` prints, and what a site's wrapper around sacct is most
+    likely to print. Accepting it costs nothing, and the alternative is to see
+    a perfectly good answer and conclude the cluster is unreachable."""
+    out = []
+    for line in (text or "").splitlines():
+        bits = line.split("|")
+        if not bits[0].strip():
+            continue
+        out.append({"State": bits[0].strip(),
+                    "Elapsed": bits[1].strip() if len(bits) > 1 else "",
+                    "Start": bits[2].strip() if len(bits) > 2 else "",
+                    "ExitCode": bits[3].strip() if len(bits) > 3 else "",
+                    "NodeList": bits[4].strip() if len(bits) > 4 else "",
+                    "_tasks": 1})
+    return out
+
+
+def _run(cmd, cwd=None, timeout=20):
+    try:
+        return subprocess.check_output(
+            ["/bin/sh", "-c", cmd], stderr=subprocess.DEVNULL, timeout=timeout,
+            cwd=cwd if os.path.isdir(cwd or "") else None,
+        ).decode("utf-8", "replace")
     except Exception:
-        pass
+        return ""
+
+
+def classify_slurm(word):
+    """queued / running / done / failed / None, from one slurm state word."""
+    word = re.sub(r"[^A-Z_0-9]", "", (word or "").strip().upper().replace(" ", "_"))
+    base = word.split("_BY_")[0]              # CANCELLED_BY_12345
+    if not base:
+        return None
+    if base in PENDING_STATES:
+        return "queued"
+    if base in RUNNING_STATES:
+        return "running"
+    if base in DONE_STATES:
+        return "done"
+    if base in FAILED_STATES:
+        return "failed"
+    return None
+
+
+def slurm_probe(job_id, cwd=None):
+    """Everything slurm will say about one job, in at most two calls.
+
+    Returns None when slurm cannot be reached or has never heard of the job -
+    which always means "change nothing". A job is never declared finished
+    because a command was missing."""
+    recs = parse_scontrol(_run(SCONTROL_CMD % {"id": shlex.quote(str(job_id))}, cwd))
+    source = "scontrol"
+    if not recs:
+        recs = parse_sacct(_run(SACCT_CMD % {"id": shlex.quote(str(job_id))}, cwd))
+        source = "sacct"
+    if not recs:
+        return None
+
+    tally = {"queued": 0, "running": 0, "done": 0, "failed": 0}
+    total = 0
+    run_seconds = limit_seconds = None
+    reason = nodes = partition = stdout = word = None
+    for rec in recs:
+        n = rec.get("_tasks") or 1
+        total += n
+        verdict = classify_slurm(rec.get("JobState") or rec.get("State"))
+        if verdict:
+            tally[verdict] += n
+        if word is None:
+            word = (rec.get("JobState") or rec.get("State") or "").strip()
+        # take the timings from whichever task is furthest along
+        secs = slurm_seconds(rec.get("RunTime") or rec.get("Elapsed"))
+        if secs is not None and (run_seconds is None or secs > run_seconds):
+            run_seconds = secs
+        lim = slurm_seconds(rec.get("TimeLimit"))
+        if lim is not None and (limit_seconds is None or lim > limit_seconds):
+            limit_seconds = lim
+        if verdict == "running" or reason is None:
+            r = (rec.get("Reason") or "").strip()
+            if r and r not in ("None", "(null)"):
+                reason = r
+        for key, name in (("NodeList", "nodes"), ("Partition", "partition"),
+                          ("StdOut", "stdout")):
+            val = (rec.get(key) or "").strip()
+            if val and val not in ("(null)", "None", "n/a"):
+                if name == "nodes":
+                    nodes = nodes or val
+                elif name == "partition":
+                    partition = partition or val
+                else:
+                    stdout = stdout or val
+
+    # The job as a whole. Anything still running or queued outranks the tasks
+    # that have finished: a job is over only when none of it is left.
+    if tally["running"]:
+        state = "running"
+    elif tally["queued"]:
+        state = "queued"
+    elif tally["failed"]:
+        state = "failed"
+    elif tally["done"]:
+        state = "done"
+    else:
+        state = None                          # a word slurm knows and we do not
+    return {"state": state, "word": word, "reason": reason, "nodes": nodes,
+            "partition": partition, "stdout": stdout, "source": source,
+            "run_seconds": run_seconds, "limit_seconds": limit_seconds,
+            "tasks_total": total, "tasks_done": tally["done"] + tally["failed"],
+            "tasks_running": tally["running"], "tasks_queued": tally["queued"],
+            "tasks_failed": tally["failed"]}
+
+
+def apply_batch_info(job, info, now):
+    """Fold one scheduler reading into a job. Returns "done"/"failed" if over.
+
+    The interesting moment is the queued -> running transition. Everything the
+    bar measures is anchored on `started`, and until now that was the moment of
+    submission - so a job that sat in the queue for four hours and then ran for
+    ten minutes reported four hours and ten minutes of "elapsed", an ETA drawn
+    from it, and a throughput averaged over four hours of doing nothing. Slurm
+    knows how long the job has actually been running, so on the transition the
+    clock is re-anchored to when it started and the queue-time samples, which
+    measured nothing, are dropped."""
+    if not info:
+        return None
+    if info.get("word"):
+        job["scheduler_state"] = info["word"]
+    for key, field in (("reason", "queue_reason"), ("nodes", "nodes"),
+                       ("partition", "partition")):
+        if info.get(key):
+            job[field] = info[key]
+
+    # the output file is only known for certain once slurm has opened it
+    path = info.get("stdout")
+    if path and path != job.get("log"):
+        job["log"] = path
+        job["log_offset"] = 0
+
+    state = info.get("state")
+    if state in ("running", "queued") and job.get("state") in ACTIVE_STATES:
+        if job.get("state") == "queued" and state == "running":
+            job["queued_seconds"] = max(0.0, now - (job.get("submitted") or now))
+            job["queue_reason"] = None
+            job["samples"] = []          # measured the queue, not the work
+            job["units"] = job["step"] = job["pct"] = None
+        if state == "running" and info.get("run_seconds") is not None:
+            job["started"] = now - info["run_seconds"]
+        job["state"] = state
+
+    # An array is its own progress bar: tasks finished out of tasks submitted.
+    # Better than anything the log of one task could say, so it wins outright.
+    seen = info.get("tasks_total") or 0
+    known = job.get("total") or 0
+    if seen > 1 or (known > 1 and job.get("unit") == "task"):
+        # The total is the largest count ever seen, never the latest. `scontrol`
+        # reports what is left, so once seven of eight tasks have finished it
+        # prints one line - and taking that as the total would rewrite an
+        # eight-task sweep as a one-task one and send the bar back to zero.
+        total = max(known, seen)
+        job["total"] = total
+        job["total_locked"] = True
+        job["unit"] = "task"
+        left = (info.get("tasks_running") or 0) + (info.get("tasks_queued") or 0)
+        done = max(0, total - left)
+        if done != job.get("units"):
+            job["units"] = float(done)
+            job["step"] = done
+            record_sample(job, float(done), now)
+            job["updated"] = now
+            job["progress_source"] = "scheduler"
+
+    # A time limit is not an estimate of how long the job takes, but before the
+    # job has printed anything it is the only number in existence, and an upper
+    # bound beats no bound: the bar says `~` for as long as it is being used.
+    if (info.get("limit_seconds") and not job.get("eta_end")
+            and not job.get("eta_prior_s")):
+        job["eta_prior_s"] = info["limit_seconds"]
+        job["eta_end"] = (job.get("started") or now) + info["limit_seconds"]
+        job["note"] = (job.get("note")
+                       or "estimate is the slurm time limit, not a measurement")
+
+    return state if state in ("done", "failed") else None
+
+
+def describe_queue(job):
+    """The one phrase a queued job has to say: why it is still waiting."""
+    bits = []
+    reason = job.get("queue_reason")
+    if reason:
+        bits.append(QUEUE_REASONS.get(reason, reason))
+    if job.get("partition"):
+        bits.append("on " + job["partition"])
+    return ", ".join(bits)
+
+
+# Slurm's Reason codes are terse to the point of being cryptic the first time.
+# Only the ones worth rewording are here; anything else is shown as slurm said it.
+QUEUE_REASONS = {
+    "Resources": "waiting for nodes",
+    "Priority": "behind higher-priority jobs",
+    "Dependency": "waiting on another job",
+    "JobHeldUser": "held by you",
+    "JobHeldAdmin": "held by an admin",
+    "BeginTime": "not due to start yet",
+    "ReqNodeNotAvail": "requested nodes unavailable",
+    "QOSMaxJobsPerUserLimit": "at your QOS job limit",
+    "AssocMaxJobsLimit": "at your account's job limit",
+    "QOSGrpCpuLimit": "at the QOS CPU limit",
+    "PartitionDown": "partition is down",
+    "PartitionNodeLimit": "asks for more nodes than the partition has",
+    "AssocGrpGRES": "at your account's GPU limit",
+    "Licenses": "waiting for a license",
+}
+
+
+def slurm_log_path(job_id, cwd=None, info=None):
+    """Where the scheduler will write the job's output.
+
+    Asked of slurm rather than guessed, because a script that set --output to
+    anywhere but the default would otherwise have its bar watching a file that
+    never appears. `info` lets a caller that has already probed reuse it."""
+    if info is None:
+        recs = parse_scontrol(_run(SCONTROL_CMD % {"id": shlex.quote(str(job_id))}, cwd))
+        info = {"stdout": (recs[0].get("StdOut") if recs else None)}
+    path = (info or {}).get("stdout")
+    if path:
+        # %j and friends are already expanded by the time scontrol reports it,
+        # but an unstarted array task can still carry them
+        path = path.replace("%j", str(job_id)).replace("%A", str(job_id))
+        return path
     # slurm's default, which is what most scripts leave it as
     return os.path.join(cwd or os.getcwd(), "slurm-%s.out" % job_id)
 
@@ -1648,6 +2074,12 @@ def monitor_reading(job, now=None):
 def describe_monitor(job):
     mon = job.get("monitor") or {"kind": "auto"}
     kind = mon.get("kind", "auto")
+    sched, job_id = batch_of(job)
+    if sched:
+        where = "the %s queue (job %s)" % (sched, job_id)
+        if job.get("state") == "queued":
+            return where
+        return "%s, and %s" % (where, job.get("log") or "its output file")
     if kind == "milestones":
         hit = len(job.get("milestones_hit") or [])
         return "milestones %d/%d" % (hit, len(mon.get("milestones") or []))
@@ -1772,7 +2204,68 @@ def finalize(job, exit_code, now, st=None):
         enqueue_crash(st, job, now)
 
 
+OBSERVED_FIELDS = ("milestones_hit", "size_bytes", "scheduler_state")
+
+
+def batch_of(job):
+    """The scheduler and id of a job that belongs to a queue, or (None, None)."""
+    batch = job.get("batch")
+    if not isinstance(batch, dict):
+        return None, None
+    return batch.get("scheduler"), batch.get("job_id")
+
+
+def observe(snapshot, now, progress=False, scheduler=False):
+    """Look at a job. Never call this while holding the state lock.
+
+    Both kinds of observation can run a command - a `--probe` monitor, and the
+    scheduler query for a queued job - and a command that hangs takes its full
+    timeout to come back. Run under the exclusive lock, as they used to be,
+    that was up to thirty seconds in which nothing else could touch the state
+    file: not another watcher, not a job trying to record that it had finished,
+    not the hook that sits in front of every Bash command. On a busy or flaky
+    cluster `squeue` hanging is ordinary, so this was a routine way for the
+    plugin to stall the session it is meant to stay out of.
+
+    The observation therefore runs against a copy of the job, and only its
+    result is carried back under the lock."""
+    reading = verdict = info = None
+    if progress:
+        try:
+            reading = monitor_reading(snapshot, now)
+        except Exception:
+            reading = None                # a broken probe must not kill the bar
+    if scheduler:
+        kind, job_id = batch_of(snapshot)
+        try:
+            if kind == "slurm" and job_id:
+                info = slurm_probe(job_id, snapshot.get("cwd"))
+                verdict = (info or {}).get("state")
+                if verdict not in ("done", "failed"):
+                    verdict = None        # queued and running are not endings
+            else:
+                verdict = read_state_probe(snapshot)
+        except Exception:
+            verdict, info = None, None
+    updates = dict((k, snapshot[k]) for k in OBSERVED_FIELDS if k in snapshot)
+    return reading, verdict, updates, info
+
+
 def cmd_watch_daemon(args):
+    """Keep one job's state fresh, and keep doing it if the state file is busy.
+
+    A watcher that gave up the first time it could not take the lock would
+    leave a live job with a frozen bar until some session happened to start and
+    revive it. Waiting and trying again costs nothing - the loop is asleep
+    almost all of the time - and the only thing lost is one probe's timing."""
+    while True:
+        try:
+            return _watch_loop(args)
+        except StateBusy:
+            time.sleep(5.0)
+
+
+def _watch_loop(args):
     """Background loop that keeps one job's state fresh.
 
     Two clocks run here. A cheap liveness check (a signal-0 kill) ticks every
@@ -1781,6 +2274,9 @@ def cmd_watch_daemon(args):
     poll_interval(): at most once every 2 minutes, and for a long job at most
     once per 5% of its estimated length. The estimate is recomputed after each
     probe, so the cadence stretches or tightens as the estimate does.
+
+    Each pass is three steps: decide what to look at (locked), look at it
+    (unlocked, because looking can block), write down what was seen (locked).
     """
     jid = args.job
     idle_since = time.time()
@@ -1791,27 +2287,68 @@ def cmd_watch_daemon(args):
     while True:
         now = time.time()
         finished = None
-        has_pid = False
 
+        # ---- decide, under the lock, what this pass should look at
         with state_rw() as st:
             job = st["jobs"].get(jid)
-            if job is None or job.get("state") != "running":
+            if job is None or job.get("state") not in ACTIVE_STATES:
                 return 0
             job["watcher_pid"] = os.getpid()
             has_pid = bool(job.get("pid"))
             cfg = load_config()
             interval = args.interval or poll_interval(
                 job, cfg, estimate(job, now).get("total_est"))
-
-            if last_probe == 0.0 or (now - last_probe) >= interval:
+            due_progress = last_probe == 0.0 or (now - last_probe) >= interval
+            # Asking the scheduler is cheap but not free, and a job can sit in a
+            # queue for days. At most once a minute, and no less often than the
+            # progress probe, so completion is noticed promptly either way.
+            kind, _job_id = batch_of(job)
+            queued = job.get("state") == "queued"
+            # A queued job has exactly one signal - the queue - and the moment
+            # worth catching is the one where it stops being queued. Asking
+            # every minute means a job can read as waiting for a minute after
+            # it started, which is the single most visible thing this can get
+            # wrong, so a job that has not started is asked about four times as
+            # often. It is one `scontrol` call, and nothing else is being done
+            # for it: a running job goes back to the slower cadence, because it
+            # has a log to read instead.
+            gap = 15.0 if queued else 60.0
+            due_state = (not has_pid and (bool(job.get("state_probe")) or kind)
+                         and (now - last_state) >= min(interval, gap))
+            if due_progress:
                 last_probe = now
                 job["last_probe"] = now
-                try:
-                    reading = monitor_reading(job, now)
-                except Exception:
-                    reading = None            # a broken probe must not kill the bar
-                if apply_reading(job, reading, now):
-                    idle_since = now
+            if due_state:
+                last_state = now
+            job["next_probe"] = last_probe + interval
+            job["interval_s"] = interval
+            snapshot = dict(job)
+
+        # ---- look, holding nothing
+        gone = has_pid and not alive(snapshot.get("pid"))
+        # a queued job has produced no output to read; the queue is the only
+        # thing worth asking, and it is asked below
+        reading, verdict, updates, info = observe(
+            snapshot, now, progress=(due_progress or gone) and not queued,
+            scheduler=due_state)
+        if verdict in ("done", "failed") and not (due_progress or gone):
+            # it is over, so take one last look before the bar stops moving
+            reading, _v, extra, _i = observe(snapshot, now, progress=True)
+            updates.update(extra)
+
+        # ---- write down what was seen
+        with state_rw() as st:
+            job = st["jobs"].get(jid)
+            if job is None or job.get("state") not in ACTIVE_STATES:
+                return 0
+            job.update(updates)
+            if info:
+                apply_batch_info(job, info, now)
+                if job.get("state") == "running" and queued:
+                    idle_since = now      # it has only just begun; give it time
+            if reading is not None and apply_reading(job, reading, now):
+                idle_since = now
+            if due_progress:
                 # a fresh observation means a fresh total estimate
                 e = estimate(job, now)
                 if e.get("total_est"):
@@ -1819,33 +2356,15 @@ def cmd_watch_daemon(args):
                     if not job.get("initial_est_total_s"):
                         job["initial_est_total_s"] = e["total_est"]
                 interval = args.interval or poll_interval(job, cfg, job.get("est_total_s"))
+                job["next_probe"] = last_probe + interval
+                job["interval_s"] = interval
 
-            job["next_probe"] = last_probe + interval
-            job["interval_s"] = interval
+            if verdict in ("done", "failed"):
+                job["note"] = "reported by the scheduler"
+                finalize(job, 0 if verdict == "done" else 1, now, st)
+                finished = dict(job)
 
-            # Asking the scheduler is cheap but not free, and a job can sit in a
-            # queue for days. At most once a minute, and no less often than the
-            # progress probe, so completion is noticed promptly either way.
-            state_gap = min(interval, 60.0)
-            if (not job.get("pid") and job.get("state_probe")
-                    and (now - last_state) >= state_gap):
-                last_state = now
-                verdict = read_state_probe(job)
-                if verdict in ("done", "failed"):
-                    try:
-                        apply_reading(job, monitor_reading(job, now), now)
-                    except Exception:
-                        pass
-                    job["note"] = "reported by the scheduler"
-                    finalize(job, 0 if verdict == "done" else 1, now, st)
-                    finished = dict(job)
-
-            pid = job.get("pid")
-            if not finished and pid and not alive(pid):
-                try:
-                    apply_reading(job, monitor_reading(job, now), now)   # last look
-                except Exception:
-                    pass
+            if not finished and gone:
                 code = job.get("exit_code")
                 try:
                     with open((job.get("log") or "") + ".exit") as f:
@@ -1857,8 +2376,12 @@ def cmd_watch_daemon(args):
 
             # Silence only means something when there is no process to ask.
             # A living pid is the better answer, and plenty of long jobs print
-            # nothing for hours.
+            # nothing for hours. A queued job is silent because it has not
+            # started; that is the normal case, not a stall, and a job can sit
+            # in a busy queue for longer than max_idle without anything at all
+            # being wrong.
             if (not finished and not job.get("pid")
+                    and job.get("state") != "queued"
                     and (now - idle_since) > args.max_idle):
                 job["note"] = ((job.get("note") or "") + " [no progress seen]").strip()
                 job["state"] = "stalled"
@@ -2103,6 +2626,77 @@ def _pump(path, offset, stream):
     return offset + len(chunk)
 
 
+# ---------------------------------------------------------- interrupt handling
+#
+# The wrapped command is deliberately started in its own session, so that once
+# it outlives the threshold it can be let go of and tracked. Until that moment
+# it is still the caller's foreground command - and being in another session
+# means nothing sent to the wrapper reaches it. Killing the wrapper (a harness
+# timeout, ctrl-c, the user pressing escape) therefore used to leave the real
+# work running, unwatched and with no job record, while the session went on
+# believing the command had been stopped - and, often, relaunched it. Two
+# training runs on the same GPUs is a worse failure than no progress bar.
+#
+# So signals are forwarded explicitly for exactly as long as the command is
+# ours: from the moment it is spawned until it is either finished or handed to
+# a watcher. A flag is set in the handler and acted on by the loop rather than
+# killing from inside the handler, so no signal arrives in the middle of the
+# state file being written.
+
+_INTERRUPT = []
+_PREV_HANDLERS = {}
+_FORWARDED = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+def _forward_signals(proc):
+    def handler(sig, _frame):
+        if not _INTERRUPT:
+            _INTERRUPT.append(sig)
+    for sig in _FORWARDED:
+        try:
+            _PREV_HANDLERS[sig] = signal.signal(sig, handler)
+        except (ValueError, OSError, RuntimeError):
+            pass          # not the main thread, or the platform has no such signal
+
+
+def _release_signals():
+    """Stop forwarding: the command is finished, or is a tracked job now."""
+    for sig, prev in list(_PREV_HANDLERS.items()):
+        try:
+            signal.signal(sig, prev)
+        except (ValueError, OSError, RuntimeError):
+            pass
+        _PREV_HANDLERS.pop(sig, None)
+
+
+def _signal_child(proc, sig):
+    """Signal the command, process group and all - it has a group of its own."""
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+    except OSError:
+        try:
+            proc.send_signal(sig)
+        except Exception:
+            pass
+
+
+def _interrupted(proc, log, sent):
+    """Pass the interrupt on to the command and report it the way a shell does."""
+    sig = _INTERRUPT[0]
+    _release_signals()                 # a second ctrl-c must not be swallowed
+    _signal_child(proc, sig)
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        _signal_child(proc, signal.SIGKILL)
+        try:
+            proc.wait(timeout=2)
+        except Exception:
+            pass
+    _pump(log, sent, sys.stdout)       # whatever it managed to print
+    return 128 + sig
+
+
 def check_cwd(path):
     """A missing working directory is a typo, not a crash."""
     if path and not os.path.isdir(os.path.expanduser(path)):
@@ -2110,26 +2704,40 @@ def check_cwd(path):
     return path
 
 
-def attach_batch_job(kind, job_id, cwd, eta=None, name=None, desc=None):
-    """Start tracking a job that now belongs to a scheduler."""
+def attach_batch_job(kind, job_id, cwd, eta=None, name=None, desc=None,
+                     interval=None):
+    """Start tracking a job that now belongs to a scheduler.
+
+    Slurm is asked about the job once, here, rather than left until the
+    watcher's first pass: it is what decides whether the job starts its life on
+    the bar as queued or as running, and where its output will be. Nothing here
+    is fatal - a cluster that will not answer just means the job starts queued
+    and the watcher finds out later."""
     now = time.time()
-    log = slurm_log_path(job_id, cwd) if kind == "slurm" else None
-    probe = STATE_CMDS.get(kind, SLURM_STATE_CMD) % {"id": job_id}
+    info = slurm_probe(job_id, cwd) if kind == "slurm" else None
+    log = slurm_log_path(job_id, cwd, info) if kind == "slurm" else None
+    probe = None if kind == "slurm" else (
+        STATE_CMDS.get(kind, SLURM_STATE_CMD) % {"id": job_id})
     with state_rw() as st:
         jid = new_id(st, name or "%s-%s" % (kind, job_id))
         st["jobs"][jid] = {
             "id": jid, "desc": desc or "%s job %s" % (kind, job_id), "cmd": None,
             "log": log, "pid": None, "unit": "it", "total": None,
             "total_locked": False, "step": None, "units": None, "pct": None,
-            "state": "running", "exit_code": None, "started": now, "updated": now,
+            # a job that has just been accepted by a queue is, by definition,
+            # in the queue; the probe below corrects it if it started at once
+            "state": "queued" if kind == "slurm" else "running",
+            "exit_code": None, "started": now, "submitted": now, "updated": now,
             "ended": None, "eta_end": (now + eta) if eta else None,
             "eta_prior_s": eta, "note": None, "pattern": None,
-            "monitor": {"kind": "auto"}, "interval_override": None,
+            "monitor": {"kind": "auto"}, "interval_override": interval,
             "state_probe": probe, "batch": {"scheduler": kind, "job_id": job_id},
             "est_total_s": eta, "initial_est_total_s": eta, "log_offset": 0,
             "force_show": True, "auto_launched": True, "samples": [],
             "session_id": current_session(), "cwd": cwd or os.getcwd(),
         }
+        if info:
+            apply_batch_info(st["jobs"][jid], info, now)
     wpid = spawn_watcher(jid)
     with state_rw() as st:
         st["jobs"][jid]["watcher_pid"] = wpid
@@ -2200,39 +2808,58 @@ def cmd_exec(args):
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    _forward_signals(proc)
 
     sent = 0
     while True:
         sent = _pump(log, sent, sys.stdout)
         if proc.poll() is not None:
             break
+        if _INTERRUPT:
+            code = _interrupted(proc, log, sent)
+            if not args.keep_log:
+                for f in (log, exitf):
+                    try:
+                        os.remove(f)
+                    except OSError:
+                        pass
+            return code
         if after is not None and (time.time() - started) >= after:
             try:
-                return _handoff(command, name, log, proc.pid, started, sent, cfg, args)
+                rc = _handoff(command, name, log, proc.pid, started, sent, cfg, args)
             except Exception:
                 # could not register the job; the command is still running, so
                 # keep forwarding it rather than abandoning it
                 after = None
+            else:
+                _release_signals()   # it is a tracked job now, not our child
+                return rc
         time.sleep(0.08)
 
+    _release_signals()
     _pump(log, sent, sys.stdout)          # whatever it wrote on the way out
     code = proc.returncode
     try:
+        # bounded: a verbose build can leave hundreds of megabytes here, and
+        # the id a scheduler prints is in the first line either way
         with open(log) as f:
-            kind, sub_id = detect_submission(f.read(), command)
+            kind, sub_id = detect_submission(f.read(65536), command)
     except Exception:
         kind, sub_id = None, None
     if kind and (proc.returncode in (0, None)):
         # the command did not do the work, it queued it. Follow the queue.
         jid = attach_batch_job(kind, sub_id, args.cwd or os.getcwd(),
-                               eta=parse_duration(args.after) if False else None,
                                desc=args.desc)
         job = state_ro()["jobs"].get(jid, {})
-        print("\n[agent-progress] %s job %s is queued, and is being tracked as '%s'.\n"
+        state = job.get("state") or "queued"
+        why = describe_queue(job)
+        print("\n[agent-progress] %s job %s is %s, and is being tracked as '%s'.%s\n"
               "Progress comes from %s once the scheduler writes it, and the job's\n"
               "state comes from the scheduler itself, so its bar finishes on its own.\n"
+              "Do not poll it with squeue - the bar already does, and says why it waits.\n"
               "  agent-progress update %s --eta <duration>   how long you expect it to take"
-              % (kind, sub_id, jid, job.get("log") or "the job's output file", jid))
+              % (kind, sub_id, state, jid, ("\n" + why.capitalize() + ".") if why else "",
+                 job.get("log") or "the job's output file", jid))
     try:
         with open(exitf) as f:
             code = int(f.read().strip())
@@ -2288,11 +2915,16 @@ def _handoff(command, name, log, pid, started, sent, cfg, args):
 def cmd_slurm(args):
     """Follow a job that is already sitting in a queue."""
     jid = attach_batch_job(args.scheduler, args.job_id, args.cwd or os.getcwd(),
-                           eta=parse_duration(args.eta), name=args.name, desc=args.desc)
+                           eta=parse_duration(args.eta), name=args.name, desc=args.desc,
+                           interval=parse_duration(getattr(args, "interval", None)))
     with state_rw() as st:
         job = dict(st["jobs"][jid])
     _announce(job)
     print("  state comes from the scheduler, so this bar finishes on its own")
+    if job.get("state") == "queued":
+        why = describe_queue(job)
+        print("  it has not started yet%s - the bar says so, and says why"
+              % (": " + why if why else ""))
     return 0
 
 
@@ -2371,7 +3003,7 @@ def cmd_ls(args):
     cfg = load_config()
     jobs = sorted(st["jobs"].values(), key=lambda j: j.get("started") or 0)
     if args.running:
-        jobs = [j for j in jobs if j.get("state") == "running"]
+        jobs = [j for j in jobs if j.get("state") in ACTIVE_STATES]
     if args.json:
         enriched = []
         for j in jobs:
@@ -2398,6 +3030,14 @@ def cmd_ls(args):
                 "rate_per_s": e["rate"], "observations": e["nobs"],
                 "exit_code": j.get("exit_code"),
                 "progress_source": j.get("progress_source"),
+                "scheduler": (j.get("batch") or {}).get("scheduler"),
+                "scheduler_job_id": (j.get("batch") or {}).get("job_id"),
+                "scheduler_state": j.get("scheduler_state"),
+                "queue_reason": j.get("queue_reason"),
+                "queue_reason_human": describe_queue(j) or None,
+                "queued_s": (round(j["queued_seconds"])
+                             if j.get("queued_seconds") else None),
+                "nodes": j.get("nodes"), "partition": j.get("partition"),
             })
         print(json.dumps(enriched, indent=2))
         return 0
@@ -2443,7 +3083,8 @@ def cmd_rm(args):
             print("removed %d job(s)" % n)
             return 0
         if args.finished:
-            gone = [k for k, v in st["jobs"].items() if v.get("state") != "running"]
+            gone = [k for k, v in st["jobs"].items()
+                    if v.get("state") not in ACTIVE_STATES]
             for k in gone:
                 del st["jobs"][k]
             print("removed %d finished job(s)" % len(gone))
@@ -2808,8 +3449,10 @@ def cmd_doctor(args):
     print("logs dir   : %s" % LOGS)
     print("python     : %s" % sys.version.split()[0])
     st = state_ro()
-    running = [j for j in st["jobs"].values() if j.get("state") == "running"]
-    print("jobs       : %d total, %d running" % (len(st["jobs"]), len(running)))
+    running = [j for j in st["jobs"].values() if j.get("state") in ACTIVE_STATES]
+    queued = [j for j in running if j.get("state") == "queued"]
+    print("jobs       : %d total, %d active (%d queued)"
+          % (len(st["jobs"]), len(running), len(queued)))
     for j in running:
         w = j.get("watcher_pid")
         print("  %-16s watcher=%s%s  pid=%s%s" % (
@@ -2905,6 +3548,8 @@ def build_parser():
     sp.add_argument("--name")
     sp.add_argument("--desc")
     sp.add_argument("--cwd")
+    sp.add_argument("--interval", metavar="DUR",
+                    help="how often to ask the scheduler (default: the cadence policy)")
     sp.set_defaults(fn=cmd_slurm)
 
     sp = sub.add_parser("start", help="track an already-running job (by pid and/or log)")
@@ -3046,3 +3691,7 @@ if __name__ == "__main__":
         pass
     except KeyboardInterrupt:
         sys.exit(130)
+    except StateBusy as ex:
+        # a plain sentence, not a traceback: this is a busy file, not a bug
+        sys.stderr.write("agent-progress: %s. Nothing was changed.\n" % ex)
+        sys.exit(1)

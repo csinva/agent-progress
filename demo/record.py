@@ -206,38 +206,107 @@ for i in range(1, N + 1):
 print("saved checkpoints/final.pt", flush=True)
 """
 
-BENCH = """import time
-print("loading llama-7b", flush=True)
-time.sleep(9)
-print("warmup 1/3", flush=True)
-time.sleep(11)
-print("warmup 2/3", flush=True)
-time.sleep(10)
-raise MemoryError("unable to allocate 8.00 GiB on cuda:0")
+# The benchmark is submitted to a scheduler rather than run here, because a
+# queue is where most benchmarking actually happens and it is the case the bar
+# has the most to say about: submitted, waiting, why it is waiting, started,
+# dead. `sbatch` returns in a tenth of a second having done none of the work,
+# so nothing about the 20-second threshold applies to it - it is tracked from
+# the moment slurm accepts it.
+#
+# There is no cluster attached to the machine this is recorded on, so `sbatch`,
+# `scontrol` and `sacct` below stand in for one. Everything on the agent-progress
+# side of them is the real thing: the real hook rewrites the command, the real
+# submission detector reads the job id out of what sbatch printed, and the real
+# watcher asks the real questions and draws the bar from the answers.
+BENCH_SBATCH = """#!/bin/bash
+#SBATCH --job-name=bench
+#SBATCH --gres=gpu:2
+#SBATCH --time=01:00:00
+python3 benchmark.py --model llama-7b --dtype float32
 """
+
+QUEUED_FOR = 38        # seconds in the queue before slurm starts it
+RAN_FOR = 12           # seconds of running before it dies
+
+# Tokens, not %-formatting: these are shell scripts, and shell uses % for
+# arithmetic. Escaping one against the other is how the running branch below
+# silently became a syntax error the first time round.
+SLURM_STUBS = {
+    "sbatch": """#!/bin/sh
+date +%s > "$AP_FAKE_SLURM/t0"
+(
+  sleep @QUEUED@
+  for i in 1 2 3; do
+    echo "warmup $i/3" >> "$PWD/slurm-81734.out"
+    sleep 3
+  done
+  echo "torch.cuda.OutOfMemoryError: unable to allocate 8.00 GiB on cuda:0" \
+      >> "$PWD/slurm-81734.out"
+) >/dev/null 2>&1 &
+echo "Submitted batch job 81734"
+""",
+    "scontrol": """#!/bin/sh
+T0=$(cat "$AP_FAKE_SLURM/t0" 2>/dev/null) || exit 1
+E=$(( $(date +%s) - T0 ))
+if [ "$E" -lt @QUEUED@ ]; then
+  echo "JobId=81734 JobName=bench UserId=me(1000) JobState=PENDING Reason=Resources \
+Partition=gpu NumNodes=2 TimeLimit=01:00:00 RunTime=00:00:00 NodeList=(null) \
+StdOut=$PWD/slurm-81734.out"
+elif [ "$E" -lt @OVER@ ]; then
+  R=$(( E - @QUEUED@ ))
+  M=$(( R / 60 ))
+  S=$(( R - M * 60 ))
+  printf 'JobId=81734 JobName=bench UserId=me(1000) JobState=RUNNING Reason=None '
+  printf 'Partition=gpu NumNodes=2 TimeLimit=01:00:00 RunTime=00:%02d:%02d ' "$M" "$S"
+  printf 'NodeList=gpu-[3-4] StdOut=%s/slurm-81734.out\n' "$PWD"
+else
+  exit 1
+fi
+""",
+    "sacct": """#!/bin/sh
+T0=$(cat "$AP_FAKE_SLURM/t0" 2>/dev/null) || exit 1
+E=$(( $(date +%s) - T0 ))
+[ "$E" -lt @OVER@ ] && exit 0
+echo "OUT_OF_MEMORY|00:00:@RAN@|2026-09-01T10:00:00|0:125|gpu-[3-4]"
+""",
+}
+
+
+def stub_text(body, queued, ran):
+    for token, value in (("@QUEUED@", queued), ("@RAN@", ran), ("@OVER@", queued + ran)):
+        body = body.replace(token, str(value))
+    return body
 
 # One column each. They run at the same time, as three commands in a session
 # would, so the clip shows the three outcomes together rather than in turn.
+#
+# Left to right is longest-lived to shortest. The build is last because it is
+# over before the clip has finished introducing itself: it is the control, the
+# answer to "what does this cost when there is nothing to track", and putting
+# the two jobs that actually have bars next to each other lets them be read
+# together rather than across a dead column.
 PANELS = [
-    {"key": "make", "ask": "build the project", "command": "make -j8",
-     "file": "Makefile", "body": MAKEFILE,
-     "idle": "under 20s - never tracked",
-     "reply": "Built. Four seconds, nothing to track.",
-     "done_reply": None},
-    {"key": "train", "ask": "train the model on the new data",
+    {"key": "train", "jid": "rec-train",
+     "ask": "train the model on the new data",
      "command": "python3 train.py --epochs 34",
      "file": "train.py", "body": TRAIN,
      "idle": "not tracked yet",
      "reply": "Training is running.",
      "done_reply": "Training finished. Final loss 0.41."},
-    {"key": "benchmark", "ask": "benchmark llama-7b",
-     "command": "python3 benchmark.py --model llama-7b",
-     "file": "benchmark.py", "body": BENCH,
-     "idle": "not tracked yet",
-     "reply": "Benchmark is running.",
-     "done_reply": "It died: out of memory on cuda:0, in the\n"
-                   "second warmup pass. The 7b weights in fp32\n"
-                   "need ~28GB. Try --dtype bfloat16."},
+    {"key": "benchmark", "jid": "slurm-81734",
+     "ask": "benchmark llama-7b on the cluster",
+     "command": "sbatch bench.sbatch",
+     "file": "bench.sbatch", "body": BENCH_SBATCH,
+     "idle": "not submitted yet",
+     "reply": "Submitted. It is in the queue.",
+     "done_reply": "Slurm killed it: out of memory on cuda:0,\n"
+                   "in the third warmup pass. 7b in fp32 needs\n"
+                   "~28GB on 2 GPUs. Resubmit with bfloat16."},
+    {"key": "make", "jid": None, "ask": "build the project", "command": "make -j8",
+     "file": "Makefile", "body": MAKEFILE,
+     "idle": "under 20s - never tracked",
+     "reply": "Built. Four seconds, nothing to track.",
+     "done_reply": None},
 ]
 
 
@@ -322,9 +391,12 @@ class Panel(object):
             # only its first sentence earns the space
             bare = line.strip()
             if bare.startswith("[agent-progress]"):
-                if any("tracked, now" in l for l in self.lines):
+                if "job" in bare and "queued" in bare:
+                    line = "[agent-progress] slurm job 81734, queued"
+                elif any("tracked, now" in l for l in self.lines):
                     continue
-                line = "[agent-progress] tracked, now in the background"
+                else:
+                    line = "[agent-progress] tracked, now in the background"
             elif bare.startswith(("agent-progress ", "If you expect", "bar can say",
                                   "running in the background", "Note:", "statusline was",
                                   "Restart Claude Code", "and `agent-progress")):
@@ -336,8 +408,11 @@ class Panel(object):
             self.say(self.cc.paint("  " + line, tone, True))
 
     def job(self):
+        jid = self.spec.get("jid")
+        if not jid:
+            return None
         for j in self.cc.state_ro()["jobs"].values():
-            if (j.get("id") or "") == "rec-" + self.spec["key"]:
+            if (j.get("id") or "") == jid:
                 return j
         return None
 
@@ -363,15 +438,16 @@ class Panel(object):
 # captured frame covers, so the waiting can be skipped past without faking it.
 SCRIPT = [
     (3.0,  1,  "three things asked for in plain words. Claude picks the commands"),
-    (7.0,  1,  "the build is done already - four seconds, so it is never tracked"),
-    (14.0, 1,  "the other two are still going. the threshold is 20 seconds"),
-    (22.0, 8,  "waiting out the 20 seconds"),
-    (27.0, 1,  "both crossed it: tracked, moved to the background, bars"),
-    (33.0, 1,  "Claude gives the training run an estimate - a hook cannot guess one"),
-    (39.0, 5,  "waiting on the benchmark"),
-    (46.0, 1,  "the benchmark dies - and that is when Claude speaks up"),
-    (66.0, 14, "the training run carries on, costing nothing while it does"),
-    (72.0, 1,  "one line when it starts, one when it ends. nothing in between"),
+    (8.0,  1,  "sbatch returned in a tenth of a second. the job is queued, and tracked"),
+    (16.0, 1,  "queued is not running: no invented progress, and slurm's own reason"),
+    (24.0, 8,  "meanwhile the training run waits out the 20-second threshold"),
+    (30.0, 1,  "it crossed it: tracked, moved to the background, a bar of its own"),
+    (35.0, 1,  "Claude gives the training run an estimate - a hook cannot guess one"),
+    (44.0, 4,  "the queue lets the benchmark start"),
+    (54.0, 1,  "its clock starts now: the 38s of waiting was never counted as work"),
+    (60.0, 1,  "slurm kills it: out of memory. that is when Claude speaks up"),
+    (78.0, 14, "the training run carries on, costing nothing while it does"),
+    (84.0, 1,  "and the build? four seconds, never tracked, never mentioned again"),
 ]
 
 
@@ -385,6 +461,13 @@ def main():
     ap.add_argument("--gif-every", type=int, default=2)
     ap.add_argument("--gif-colors", type=int, default=48)
     args = ap.parse_args()
+
+    # A state directory of the recording's own. It clears every job twice in
+    # the course of a take, and doing that to whatever the person recording
+    # happens to have running would be an unpleasant surprise. Set before the
+    # engine is imported: it reads the variable once, at import.
+    scratch = tempfile.mkdtemp(prefix="agent-progress-rec-")
+    os.environ["AGENT_PROGRESS_HOME"] = os.path.join(scratch, "state")
 
     import importlib.util
     spec = importlib.util.spec_from_file_location("agent_progress", ENGINE)
@@ -409,14 +492,25 @@ def main():
     fallbacks = build_fallbacks(cfg["spinner"] + "\u2713\u2192\u00b7\u25b6\u2502\u2500",
                                 args.font_size)
 
-    scratch = tempfile.mkdtemp(prefix="agent-progress-rec-")
     frames = os.path.join(scratch, "frames")
     os.makedirs(frames)
     for spec_ in PANELS:
         open(os.path.join(scratch, spec_["file"]), "w").write(spec_["body"])
+
+    # The stub scheduler goes on PATH, and everything the recording starts -
+    # the CLI, the hook, the watcher - inherits it.
+    stub_bin = os.path.join(scratch, "bin")
+    os.makedirs(stub_bin)
+    for name, body in SLURM_STUBS.items():
+        path = os.path.join(stub_bin, name)
+        open(path, "w").write(stub_text(body, QUEUED_FOR, RAN_FOR))
+        os.chmod(path, 0o755)
+    os.environ["PATH"] = stub_bin + os.pathsep + os.environ["PATH"]
+    os.environ["AP_FAKE_SLURM"] = scratch
     subprocess.run([sys.executable, ENGINE, "rm", "--all"], capture_output=True)
 
     panels = [Panel(cc, spec_, scratch) for spec_ in PANELS]
+    by_key = dict((p.spec["key"], p) for p in panels)
     total = SCRIPT[-1][0]
     print("recording %.0fs of real time..." % total)
 
@@ -442,7 +536,7 @@ def main():
         for idx, pan in enumerate(panels):
             key = "reply%d" % idx
             j = pan.job()
-            started = j is not None or (idx == 0 and now > 6.5)
+            started = j is not None or (pan.spec["key"] == "make" and now > 6.5)
             if started and key not in fired:
                 fired.add(key)
                 pan.reply(pan.spec["reply"], "run")
@@ -459,15 +553,16 @@ def main():
             # estimate. Over a job this short that is a single reading, and the
             # bars would sit still for the whole clip. Forced to 2s here so
             # there is something to watch; the header says so.
-            for jid in ("rec-train", "rec-benchmark"):
-                subprocess.run([sys.executable, ENGINE, "update", jid,
-                                "--interval", "2s", "--quiet"], capture_output=True)
+            for pan in panels:
+                if pan.spec.get("jid"):
+                    subprocess.run([sys.executable, ENGINE, "update", pan.spec["jid"],
+                                    "--interval", "2s", "--quiet"], capture_output=True)
         if now > 31.0 and "eta" not in fired:
             fired.add("eta")
             subprocess.run([sys.executable, ENGINE, "update", "rec-train",
                             "--eta", "45s", "--quiet"], capture_output=True)
-            panels[1].say(cc.paint("  $ agent-progress update rec-train --eta 45s",
-                                   "run", True))
+            by_key["train"].say(cc.paint("  $ agent-progress update rec-train --eta 45s",
+                                         "run", True))
         for pan in panels:
             pan.drain()
 

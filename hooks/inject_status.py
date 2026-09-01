@@ -84,7 +84,9 @@ def job_lines(cc, cfg, session_id=None):
     # agent has no use for another agent's job in its context
     shown = [j for j in running
              if cc.job_visible(j, cfg)
-             and (cfg["scope"] == "all" or cc.job_belongs_here(j, session_id))]
+             and (cfg["scope"] == "all"
+                  or not cc.know_who_we_are(session_id)
+                  or cc.job_belongs_here(j, session_id))]
     hidden = len(running) - len(shown)
     lines = []
     for j in shown[:5]:

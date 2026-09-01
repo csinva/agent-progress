@@ -313,7 +313,7 @@ def _sanitize(st):
                     job[key] = None
             for key in ("id", "state", "unit", "note", "desc", "cmd", "log", "pattern",
                         "state_probe", "queue_reason", "nodes", "partition",
-                        "scheduler_state", "session_id", "bridge_id"):
+                        "scheduler_state", "session_id", "bridge_id", "exit_file"):
                 if key in job and job[key] is not None and not isinstance(job[key], str):
                     job[key] = None
             job["id"] = job.get("id") or str(jid)
@@ -338,9 +338,14 @@ def _sanitize(st):
     for key in ("auto_track_seen", "context_sent"):
         if not isinstance(st.get(key), dict):
             st[key] = {}
-    for key in ("sessions",):
-        if not isinstance(st.get(key), dict):
-            st[key] = {}
+    if not isinstance(st.get("sessions"), dict):
+        st["sessions"] = {}
+    else:
+        # values are timestamps; one that is not a number used to abort the
+        # prune loop, and since the caller swallows the error, cleaning up then
+        # stopped for good and the map grew without limit
+        st["sessions"] = {k: v for k, v in st["sessions"].items()
+                          if isinstance(v, (int, float)) and not isinstance(v, bool)}
     st.setdefault("version", STATE_VERSION)
     return st
 
@@ -486,8 +491,34 @@ def state_ro():
     return _read_state()
 
 
+SESSION_TTL = 30 * 86400
+SESSION_CAP = 500       # more than anyone has open; the rest are history
+
+
+def _prune_sessions(st):
+    """Keep the session map small and its cleanup unstoppable.
+
+    It is only ever asked "have I seen this session before", so old entries are
+    dead weight - and the whole state file is rewritten on every job update,
+    every watcher tick and every hook, so a map that grows without limit makes
+    every one of those writes bigger. Age alone is not enough: somebody running
+    many agents can open thousands well inside the time limit."""
+    seen = st.get("sessions")
+    if not isinstance(seen, dict) or not seen:
+        return
+    now = time.time()
+    fresh = {k: v for k, v in seen.items()
+             if isinstance(v, (int, float)) and now - v <= SESSION_TTL}
+    if len(fresh) > SESSION_CAP:
+        newest = sorted(fresh.items(), key=lambda kv: kv[1], reverse=True)[:SESSION_CAP]
+        fresh = dict(newest)
+    if len(fresh) != len(seen):
+        st["sessions"] = fresh
+
+
 def _prune(st):
     _sweep_temp_files()
+    _prune_sessions(st)
     cfg = load_config()
     cutoff = time.time() - cfg["prune_after_hours"] * 3600
     for jid in list(st["jobs"]):
@@ -522,6 +553,19 @@ def current_bridge():
     used to decide ownership: several agents can share one conversation, and
     matching on it made every agent claim every job."""
     return os.environ.get("CLAUDE_CODE_BRIDGE_SESSION_ID")
+
+
+def know_who_we_are(session_id=None):
+    """Can this process tell which session it is drawing for?
+
+    Filtering by session is only meaningful if the answer is yes. Neither the
+    statusline payload nor the environment is guaranteed to carry the id - which
+    session a statusline is drawn for is not something this can insist on - and
+    filtering on an unknown identity matches nothing, so every bar disappears
+    while the jobs are still running. A bar shown to somebody who did not start
+    the job is a small untidiness. A running job with no bar is the failure the
+    whole plugin exists to prevent."""
+    return bool(session_id or current_session())
 
 
 def job_belongs_here(job, session_id=None):
@@ -1218,8 +1262,16 @@ def job_visible(job, cfg, now=None):
     e = estimate(job, now, cfg)
     if e["elapsed"] >= threshold:
         return True
-    total = e.get("total_est")
-    return total is not None and total >= threshold
+    # The largest estimate the job has ever carried, not just the current one.
+    # Estimates move as the job is measured, and one that starts at half an hour
+    # and is revised down to ninety seconds used to take its own bar away while
+    # the job carried on running - reappearing later, once elapsed crossed the
+    # threshold by itself. The threshold decides whether a bar appears; it
+    # should not take one back.
+    candidates = [x for x in (e.get("total_est"), job.get("est_total_s"),
+                              job.get("initial_est_total_s"), job.get("eta_prior_s"))
+                  if isinstance(x, (int, float))]
+    return bool(candidates) and max(candidates) >= threshold
 
 
 def pick_jobs(st, cfg, session_id=None, apply_visibility=True, scoped=True):
@@ -1236,7 +1288,8 @@ def pick_jobs(st, cfg, session_id=None, apply_visibility=True, scoped=True):
                 continue
         if apply_visibility and not job_visible(j, cfg, now):
             continue
-        if scoped and cfg["scope"] == "session" and not job_belongs_here(j, session_id):
+        if (scoped and cfg["scope"] == "session" and know_who_we_are(session_id)
+                and not job_belongs_here(j, session_id)):
             continue
         out.append(j)
     # current session first, then oldest-started first (stable ordering)
@@ -2519,8 +2572,12 @@ def _watch_loop(args):
         # belongs to something else. Our own jobs write an exit file the moment
         # they finish, which cannot be mistaken for anything, so it is believed
         # first; the pid check is what is left for jobs we merely attached to.
-        finished_file = snapshot.get("log") and os.path.exists(
-            (snapshot.get("log") or "") + ".exit")
+        # Only an exit file this plugin wrote itself. A job attached to a log
+        # that already existed - `start --log` - has no exit file of ours, and a
+        # stray one beside somebody else's log is not news about the job: reading
+        # it as news ended live jobs and took their bars with them.
+        own_exit = snapshot.get("exit_file")
+        finished_file = bool(own_exit) and os.path.exists(own_exit)
         gone = bool(finished_file) or (has_pid and not alive(snapshot.get("pid")))
         # a queued job has produced no output to read; the queue is the only
         # thing worth asking, and it is asked below
@@ -2921,7 +2978,7 @@ def attach_batch_job(kind, job_id, cwd, eta=None, name=None, desc=None,
         jid = new_id(st, name or "%s-%s" % (kind, job_id))
         st["jobs"][jid] = {
             "id": jid, "desc": desc or "%s job %s" % (kind, job_id), "cmd": None,
-            "log": log, "pid": None, "unit": "it", "total": None,
+            "log": log, "exit_file": exitf, "pid": None, "unit": "it", "total": None,
             "total_locked": False, "step": None, "units": None, "pct": None,
             # a job that has just been accepted by a queue is, by definition,
             # in the queue; the probe below corrects it if it started at once
@@ -3035,7 +3092,7 @@ def cmd_exec(args):
             return code
         if after is not None and (time.time() - started) >= after:
             try:
-                rc = _handoff(command, name, log, proc.pid, started, sent, cfg, args)
+                rc = _handoff(command, name, log, exitf, proc.pid, started, sent, cfg, args)
             except Exception:
                 # could not register the job; the command is still running, so
                 # keep forwarding it rather than abandoning it
@@ -3089,12 +3146,13 @@ def cmd_exec(args):
     return code
 
 
-def _handoff(command, name, log, pid, started, sent, cfg, args):
+def _handoff(command, name, log, exitf, pid, started, sent, cfg, args):
     """The command outlived the threshold: register it and let go of it."""
     with state_rw() as st:
         jid = new_id(st, name)
         st["jobs"][jid] = {
-            "id": jid, "desc": args.desc, "cmd": command, "log": log, "pid": pid,
+            "id": jid, "desc": args.desc, "cmd": command, "log": log,
+            "exit_file": exitf, "pid": pid,
             "unit": "it", "total": None, "total_locked": False, "step": None,
             "units": None, "pct": None, "state": "running", "exit_code": None,
             "started": started, "updated": time.time(), "ended": None,

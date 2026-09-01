@@ -129,6 +129,39 @@ ck("a watcher notices its job was removed within ~15s", gone, "still running")
 sandbox.kill_watchers(cc)
 
 print()
+print("=== an exit file that is not ours ===")
+# Trusting any file called <log>.exit ended live jobs: a job attached to a log
+# that already existed is not finished just because something once left a file
+# beside it. Only an exit file this plugin wrote itself is news.
+cli("rm", "--all", "--force")
+watched = os.path.join(sandbox.HOME, "someone-elses.log")
+open(watched, "w").write("step 1/10\n")
+open(watched + ".exit", "w").write("0\n")
+cli("start", "attached", "--eta", "1h", "--log", watched)
+time.sleep(3)
+j = json.loads(open(cc.STATE).read())["jobs"]["attached"]
+ck("a stray .exit does not end an attached job", j["state"] == "running", j["state"])
+ck("and the attached job records no exit file of its own", not j.get("exit_file"))
+sandbox.kill_watchers(cc, jobs={"attached"})
+cli("rm", "--all", "--force")
+
+r = cli("exec", "--name", "deferred", "--after", "1",
+        "--shell", "echo start; sleep 5; echo end")
+ck("the deferred handoff still works", r.returncode == 0 and "Traceback" not in r.stderr,
+   r.stderr.strip()[-70:])
+handed = json.loads(open(cc.STATE).read())["jobs"].get("deferred", {})
+ck("and the job it makes knows its own exit file", bool(handed.get("exit_file")))
+state = None
+for _ in range(25):
+    time.sleep(1)
+    state = json.loads(open(cc.STATE).read())["jobs"].get("deferred", {}).get("state")
+    if state != "running":
+        break
+ck("and finishes by it", state == "done", str(state))
+sandbox.kill_watchers(cc)
+cli("rm", "--all", "--force")
+
+print()
 print("=== forgetting a job that is still running ===")
 # Removing the record of a live job does not stop the work; it strips it of its
 # watcher and its bar and leaves it running with nothing following it. That is

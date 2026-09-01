@@ -292,6 +292,29 @@ ck("finishing an already finished job is harmless", r.returncode == 0, r.stderr[
 run("rm", "--all", "--force")
 
 print()
+print()
+print("=== a bar the threshold has already allowed is not taken back ===")
+# Estimates move as a job is measured. One that starts at half an hour and is
+# revised down to ninety seconds used to take its own bar away mid-run, then
+# give it back once elapsed crossed the threshold on its own.
+cfg = dict(cc.load_config())
+cfg["min_duration_seconds"] = 120
+now = time.time()
+long_then_short = {"state": "running", "started": now - 20, "samples": [],
+                   "est_total_s": 45, "initial_est_total_s": 1800,
+                   "eta_end": now + 25, "unit": "it"}
+ck("a job once thought long keeps its bar", cc.job_visible(long_then_short, cfg, now))
+never_long = {"state": "running", "started": now - 20, "samples": [],
+              "est_total_s": 20, "initial_est_total_s": 20,
+              "eta_end": now, "unit": "it"}
+ck("a job never thought long stays off the statusline",
+   not cc.job_visible(never_long, cfg, now))
+grown = {"state": "running", "started": now - 20, "samples": [],
+         "est_total_s": 3600, "initial_est_total_s": 30, "eta_end": now + 3580, "unit": "it"}
+ck("and one that turns out to be long earns a bar", cc.job_visible(grown, cfg, now))
+old_enough = {"state": "running", "started": now - 300, "samples": [], "unit": "it"}
+ck("elapsed alone is still enough", cc.job_visible(old_enough, cfg, now))
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

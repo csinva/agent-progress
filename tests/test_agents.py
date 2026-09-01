@@ -305,6 +305,34 @@ ck("but the queue is still bounded", len(inbox) <= cc.CRASH_CEILING, "%d entries
 reset()
 
 print()
+print("=== a bar must not vanish because nobody said which session this is ===")
+# Scoping by session is only meaningful when the session is known. Neither the
+# statusline payload nor the environment is guaranteed to carry the id, and
+# filtering on an unknown identity matches nothing - so every bar disappeared
+# while its job was still running, which is the one failure the plugin exists
+# to prevent.
+reset()
+as_session("sess-A", "start", "train", "--eta", "2h", "--monitor", "time", "--no-watch")
+
+
+def draw(payload, with_env):
+    e = dict(os.environ)
+    if with_env:
+        e["CLAUDE_CODE_SESSION_ID"] = "sess-A"
+    else:
+        e.pop("CLAUDE_CODE_SESSION_ID", None)
+    out = subprocess.run([sys.executable, ENGINE, "statusline"], input=json.dumps(payload),
+                         capture_output=True, text=True, env=e).stdout
+    return "train" in re.sub(r"\033\[[0-9;]*m", "", out)
+
+
+ck("payload and environment both know it", draw({"session_id": "sess-A"}, True))
+ck("only the payload knows it", draw({"session_id": "sess-A"}, False))
+ck("only the environment knows it", draw({}, True))
+ck("neither knows it - the bar is still drawn", draw({}, False))
+reset()
+
+print()
 print("=== the escape hatches still work ===")
 reset()
 for a in ("agent-A", "agent-B"):

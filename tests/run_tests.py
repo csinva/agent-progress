@@ -15,6 +15,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -70,7 +71,7 @@ ck("utf-8 passthrough", "café" in r.stdout and "✓" in r.stdout, repr(r.stdout
 raw = subprocess.run([sys.executable, ENGINE, "exec", "--shell", "printf 'a\\rb\\n'"],
                      capture_output=True)          # bytes: no newline translation
 ck("carriage returns preserved", b"\r" in raw.stdout, repr(raw.stdout))
-big = ex("for i in $(seq 1 5000); do echo line-$i; done")
+big = ex("i=1; while [ $i -le 5000 ]; do echo line-$i; i=$((i+1)); done")  # seq is not POSIX
 ck("5000 lines intact", big.stdout.count("\n") == 5000 and "line-5000" in big.stdout,
    "lines=%d" % big.stdout.count("\n"))
 
@@ -260,10 +261,13 @@ ck("exec still works", r.stdout.strip() == "recovered", repr(r.stdout))
 print()
 print("=== a broken install must not break the command ===")
 import shutil
-ro = os.path.expanduser("~/.claude/agent-tqdm-rotest")
-shutil.rmtree(ro, ignore_errors=True)
-os.makedirs(ro)
-os.chmod(ro, 0o555)                      # tracking is now impossible
+# A directory under a regular file can never be created, by anyone. chmod
+# would be the obvious way to make the state directory unusable, but root
+# ignores it, and tests get run as root in containers often enough that the
+# check would quietly stop checking anything.
+blocker = os.path.join(tempfile.mkdtemp(prefix="agent-tqdm-block-"), "a-file")
+open(blocker, "w").write("not a directory")
+ro = os.path.join(blocker, "state")
 env = dict(os.environ, AGENT_TQDM_HOME=ro)
 try:
     for label, sh, want in [("fast", "echo hello", 0),
@@ -276,8 +280,7 @@ try:
            and (r.stdout + r.stderr).strip(),
            "exit=%s out=%r" % (r.returncode, (r.stdout + r.stderr)[:60]))
 finally:
-    os.chmod(ro, 0o755)
-    shutil.rmtree(ro, ignore_errors=True)
+    shutil.rmtree(os.path.dirname(blocker), ignore_errors=True)
 
 print()
 print("=== a crash reaches exactly one session ===")

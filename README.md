@@ -15,12 +15,13 @@
 </p>
 
 <p align="center">
-  <img src="demo/agent-tqdm.gif" width="100%" alt="a short build runs untracked; a training run crosses the threshold and gets a progress bar">
+  <img src="demo/agent-tqdm.gif" width="100%" alt="a build runs untracked; a training run gets a bar after 20s; a benchmark crashes with a skull">
 </p>
 
 <p align="center">
-  <i>A short build runs and is never tracked. A training run crosses 20 seconds,<br>
-  and only then gets a bar. Real session, waiting compressed — nothing re-enacted.<br>
+  <i>A build finishes in four seconds and is never tracked. A training run crosses<br>
+  twenty seconds and gets a bar. A benchmark crosses it too, then dies.<br>
+  A real session, waiting compressed — nothing re-enacted.
   Full recording: <a href="demo/agent-tqdm.mov">demo/agent-tqdm.mov</a></i>
 </p>
 

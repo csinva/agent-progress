@@ -195,8 +195,18 @@ MAKEFILE = """all:
 \t@echo "ld  build/app";    sleep 1
 """
 
+BENCH = """import time
+print("loading llama-7b", flush=True)
+time.sleep(7)
+print("warmup pass 1/3", flush=True)
+time.sleep(12)
+print("warmup pass 2/3", flush=True)
+time.sleep(12)
+raise MemoryError("unable to allocate 8.00 GiB on cuda:0")
+"""
+
 TRAIN = """import time, sys
-N = 28
+N = 34
 for i in range(1, N + 1):
     time.sleep(2.2)
     print("Epoch %d/%d  loss %.3f  acc %.3f" % (i, N, 2.4 / (i ** 0.5), 1 - 0.9 / i),
@@ -213,9 +223,7 @@ class Take(object):
         self.lines = []
         self.caption = ""
         self.speed = 1.0
-        self.proc = None
-        self.out_path = None
-        self.offset = 0
+        self.streams = []          # every command still worth following
 
     def say(self, text=""):
         self.lines.append(text)
@@ -234,33 +242,33 @@ class Take(object):
         if out:
             actual = json.loads(out)["hookSpecificOutput"]["updatedInput"]["command"]
             actual = actual.replace(" --name ", " --name rec-", 1)
-        self.out_path = os.path.join(self.scratch, "%s.out" % name)
-        self.offset = 0
-        open(self.out_path, "w").close()
-        self.proc = subprocess.Popen(["/bin/sh", "-c", actual], cwd=self.scratch,
-                                     stdin=subprocess.DEVNULL,
-                                     stdout=open(self.out_path, "w"),
-                                     stderr=subprocess.STDOUT)
+        path = os.path.join(self.scratch, "%s.out" % name)
+        open(path, "w").close()
+        # commands overlap here as they would in a session, so each one is
+        # followed separately rather than replacing the last
+        self.streams.append({"path": path, "offset": 0})
+        subprocess.Popen(["/bin/sh", "-c", actual], cwd=self.scratch,
+                         stdin=subprocess.DEVNULL, stdout=open(path, "w"),
+                         stderr=subprocess.STDOUT)
 
     def drain(self):
-        """Move any new output from the running command into the transcript."""
-        if not self.out_path:
-            return
-        try:
-            with open(self.out_path, "rb") as f:
-                f.seek(self.offset)
-                chunk = f.read()
-        except OSError:
-            return
-        if not chunk:
-            return
-        self.offset += len(chunk)
-        for raw in chunk.decode("utf-8", "replace").splitlines():
-            line = raw.rstrip()
-            if not line:
+        """Move any new output from the running commands into the transcript."""
+        for stream in self.streams:
+            try:
+                with open(stream["path"], "rb") as f:
+                    f.seek(stream["offset"])
+                    chunk = f.read()
+            except OSError:
                 continue
-            tone = "warn" if line.startswith("[agent-tqdm]") else "dim"
-            self.say(self.cc.paint("  " + line[:COLS - 4], tone, True))
+            if not chunk:
+                continue
+            stream["offset"] += len(chunk)
+            for raw in chunk.decode("utf-8", "replace").splitlines():
+                line = raw.rstrip()
+                if not line:
+                    continue
+                tone = "warn" if line.startswith("[agent-tqdm]") else "dim"
+                self.say(self.cc.paint("  " + line[:COLS - 4], tone, True))
 
     def frame(self):
         c, cfg = self.cc, self.cfg
@@ -268,7 +276,7 @@ class Take(object):
         if self.speed > 1:
             head += c.paint("      ▶▶ %g× faster" % self.speed, "warn", True)
         body = [head, ""]
-        body += self.lines[-(ROWS - 5):]
+        body += self.lines[-(ROWS - 6):]      # leave a gap above the bars
         while len(body) < ROWS - 3:
             body.append("")
         st = c.state_ro()
@@ -282,27 +290,31 @@ class Take(object):
         body.append(c.paint("  " + self.caption, "run", True))
         return body[:ROWS]
 
-    def job_id(self):
+    def job_id(self, contains="train"):
         st = self.cc.state_ro()
-        for j in st["jobs"].values():
-            if (j.get("id") or "").startswith("rec-"):
-                return j["id"]
+        for j in sorted(st["jobs"].values(), key=lambda x: x.get("started") or 0):
+            jid = j.get("id") or ""
+            if jid.startswith("rec-") and contains in jid:
+                return jid
         return None
 
 
 # (until real-seconds, speed, caption). Speed is how much real time each
 # captured frame covers, so waiting can be skipped past without faking it.
 SCRIPT = [
-    (2.0,  1,  "a command Claude runs, like any other"),
-    (9.0,  1,  "it runs exactly as it would have - nothing is watching yet"),
-    (12.0, 1,  "done in 4s. never tracked: no job, no message, no tokens"),
-    (18.0, 1,  "now something slower. the threshold is 20 seconds"),
-    (32.0, 10, "waiting out the 20 seconds"),
-    (39.0, 1,  "past the threshold: tracked, and left running in the background"),
-    (45.0, 1,  "Claude sets the estimate - the one thing a hook cannot guess"),
-    (49.0, 1,  "now the bar knows when it will finish"),
-    (76.0, 14, "running, and costing nothing while it does"),
-    (83.0, 1,  "done"),
+    (2.0,   1,  "a command Claude runs, like any other"),
+    (8.0,   1,  "it runs exactly as it would have - nothing is watching yet"),
+    (11.0,  1,  "done in 4s. never tracked: no job, no message, no tokens"),
+    (16.0,  1,  "now something slower. the threshold is 20 seconds"),
+    (31.0,  12, "waiting out the 20 seconds"),
+    (36.0,  1,  "past the threshold: tracked, and left running in the background"),
+    (41.0,  1,  "Claude sets the estimate - the one thing a hook cannot guess"),
+    (44.0,  6,  "a second slow command, running alongside the first"),
+    (52.0,  1,  "it crosses the threshold too, and gets its own bar"),
+    (66.0,  6,  "waiting on it"),
+    (74.0,  1,  "then it dies: a skull, and the exit decoded, not a bare number"),
+    (104.0, 14, "the training run carries on, costing nothing while it does"),
+    (110.0, 1,  "done"),
 ]
 
 
@@ -341,6 +353,7 @@ def main():
     os.makedirs(frames)
     open(os.path.join(scratch, "Makefile"), "w").write(MAKEFILE)
     open(os.path.join(scratch, "train.py"), "w").write(TRAIN)
+    open(os.path.join(scratch, "benchmark.py"), "w").write(BENCH)
     subprocess.run([sys.executable, ENGINE, "rm", "--all"], capture_output=True)
 
     take = Take(cc, cfg, scratch)
@@ -370,12 +383,17 @@ def main():
             take.say()
             take.prompt("python3 train.py --epochs 28")
             take.run("python3 train.py --epochs 28", "train")
-        if 42.0 < now and "eta" not in fired:
+        if 25.0 < now and "export" not in fired:
+            fired.add("export")
+            take.say()
+            take.prompt("python3 benchmark.py --model llama-7b")
+            take.run("python3 benchmark.py --model llama-7b", "bench")
+        if 41.0 < now and "eta" not in fired:
             fired.add("eta")
             jid = take.job_id()
             if jid:
                 subprocess.run([sys.executable, ENGINE, "update", jid, "--eta", "50s",
-                                "--note", "28 epochs", "--quiet"], capture_output=True)
+                                "--note", "34 epochs", "--quiet"], capture_output=True)
                 take.say()
                 take.say(cc.paint("  $ agent-tqdm update %s --eta 50s" % jid, "run", True))
 

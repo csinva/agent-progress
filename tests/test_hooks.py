@@ -55,7 +55,7 @@ def statusline(payload):
                           capture_output=True, text=True).stdout
 
 
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 cli("config", "--reset")
 with cc.state_rw() as st:
     st["inbox"] = []
@@ -69,7 +69,7 @@ ck("a note containing newlines does not add rows", out.count("\n") <= 1,
 cli("update", "one", "--desc", "a\nb", "--quiet")
 ck("a description with newlines is contained",
    statusline({}).count("\n") <= 1, repr(statusline({})[:120]))
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 
 for n in range(5):
     cli("start", "job%d" % n, "--eta", "2h", "--monitor", "time", "--no-watch")
@@ -85,7 +85,7 @@ ck("statusline emits no ansi when colour is off",
    "\033[" not in subprocess.run([sys.executable, ENGINE, "statusline"], input="{}",
                                  capture_output=True, text=True,
                                  env=dict(os.environ, NO_COLOR="1")).stdout)
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 
 print()
 print("=== the Stop hook ===")
@@ -112,7 +112,7 @@ cli("config", "--set", "crash_alert=false")
 off = hook(STATUS, "Stop", {"session_id": "s", "stop_hook_active": False})
 ck("crash_alert=false silences the interruption", off == "", off[:100])
 cli("config", "--reset")
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 with cc.state_rw() as st:
     st["inbox"] = []
 
@@ -125,7 +125,7 @@ hook(STATUS, "SessionStart", {"session_id": "s"})
 time.sleep(2)
 pid = json.loads(open(cc.STATE).read())["jobs"]["orphan"].get("watcher_pid")
 ck("a dead watcher is replaced", pid != 999999 and cc.alive(pid), "watcher_pid=%s" % pid)
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 time.sleep(2)
 
 print()
@@ -147,7 +147,7 @@ shutil.rmtree(os.path.dirname(spacey), ignore_errors=True)
 
 print()
 print("=== reporting commands ===")
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 cli("start", "running-one", "--eta", "2h", "--monitor", "time", "--no-watch")
 cli("start", "finished-one", "--eta", "2h", "--monitor", "time", "--no-watch")
 cli("done", "finished-one")
@@ -157,7 +157,7 @@ d = json.loads(cli("show", "running-one", "--json").stdout or "{}")
 ck("show --json carries the estimate", "estimate" in d and d.get("id") == "running-one",
    str(list(d)[:6]))
 ck("inbox --limit is accepted", cli("inbox", "--limit", "2").returncode == 0)
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 
 print()
 print("=== a working directory that is not there ===")
@@ -167,11 +167,11 @@ for label, args in [("exec", ["exec", "--cwd", "/no/such/dir", "--shell", "echo 
     ck("%s reports a missing --cwd cleanly" % label,
        r.returncode != 0 and "Traceback" not in r.stderr and "no such directory" in r.stderr,
        r.stderr.strip()[-90:])
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 
 print()
 print("=== loading into a session that was already running ===")
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 with cc.state_rw() as st:
     st["sessions"] = {}
 
@@ -196,7 +196,7 @@ ck("session_is_new is false for a recorded session",
    not cc.session_is_new("was-already-open"))
 ck("session_is_new is true for one never seen", cc.session_is_new("never-seen-before"))
 ck("no session id means no claim either way", not cc.session_is_new(None))
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 
 print()
 print("=== the wrapped command does not depend on PATH ===")
@@ -214,7 +214,7 @@ for label, path in [("without ~/.local/bin",
 
 print()
 print("=== a long job asked for in words never blocks ===")
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 cli("config", "--reset")
 scratch = tempfile.mkdtemp(prefix="agent-progress-words-")
 open(os.path.join(scratch, "train.py"), "w").write(
@@ -247,7 +247,7 @@ ck("and it is still running afterwards",
    cli("ls", "--json").stdout[:80])
 ck("the caller is told in a few lines, not a wall of text",
    len(r.stdout.strip().splitlines()) <= 12, "%d lines" % len(r.stdout.strip().splitlines()))
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 
 # the explicit route a model should prefer when it knows the job is long
 t = time.time()
@@ -257,7 +257,7 @@ d = json.loads(cli("ls", "--json").stdout or "[]")
 ck("and its bar has an eta from the first frame",
    d and d[0]["remaining_s"] and d[0]["remaining_s"] > 3000, str(d and d[0].get("remaining_human")))
 cli("cancel", "explicit")
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 shutil.rmtree(scratch, ignore_errors=True)
 
 print()
@@ -281,7 +281,7 @@ for form in ["agent-progress ls",
 
 print()
 print("=== the session a job belongs to is recorded ===")
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 for name, sid in [("other", "sessB"), ("mine", "sessA")]:
     subprocess.run([sys.executable, ENGINE, "start", name, "--eta", "3h",
                     "--monitor", "time", "--no-watch"], capture_output=True,
@@ -294,7 +294,7 @@ ck("a job records the session that started it",
 out = statusline({"session_id": "sessA"})
 names = [re.sub(r"\x1b\[[0-9;]*m", "", l).split()[1] for l in out.splitlines() if l.strip()]
 ck("this session's jobs come first", names and names[0] == "mine", str(names))
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 
 print()
 print("=== a clock that jumped ===")

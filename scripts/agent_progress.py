@@ -354,6 +354,39 @@ def _read_state():
     return _sanitize(st)
 
 
+TEMP_GRACE = 300        # a live writer's temp file is seconds old, never minutes
+
+
+def _sweep_temp_files():
+    """Clear temp files left by writers that were killed before the rename.
+
+    The write is a create-then-rename, so the state file itself is never half
+    written - but a process killed in between leaves its temp file behind, and
+    nothing ever came back for it. One is nothing; they accumulate for the life
+    of the installation, each a full copy of the state, and a machine that
+    interrupts commands often (a harness timeout, ctrl-c, a reboot) keeps
+    making them. Anything older than the grace belongs to a process that is
+    gone."""
+    cutoff = time.time() - TEMP_GRACE
+    try:
+        names = os.listdir(ROOT)
+    except OSError:
+        return
+    # ROOT, emphatically not HOME: HOME here is the user's home directory, and
+    # sweeping that for anything with ".tmp." in the name would delete their
+    # files. Only the plugin's own state directory, and only names this module
+    # writes.
+    for name in names:
+        if not name.startswith(("state.json.tmp.", "config.json.tmp.")):
+            continue
+        path = os.path.join(ROOT, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except OSError:
+            pass            # someone else got there first, or it is not ours to remove
+
+
 def _write_state(st):
     tmp = STATE + ".tmp.%d" % os.getpid()
     with open(tmp, "w") as f:
@@ -372,6 +405,38 @@ class StateBusy(RuntimeError):
 # into a permanent stall of the whole plugin. Waiting a bounded time and then
 # giving up is always better: every caller here can carry on knowing less.
 LOCK_TIMEOUT = 20.0
+
+
+@contextlib.contextmanager
+def hold_lock(timeout=None):
+    """Hold the plugin's one exclusive lock, or raise StateBusy trying."""
+    ensure_dirs()
+    if timeout is None:
+        try:
+            timeout = float(os.environ.get("AGENT_PROGRESS_LOCK_TIMEOUT") or LOCK_TIMEOUT)
+        except (TypeError, ValueError):
+            timeout = LOCK_TIMEOUT
+    lf = open(LOCK, "a+")
+    held = False
+    try:
+        deadline = time.time() + max(0.0, timeout)
+        while True:
+            try:
+                fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held = True
+                break
+            except (IOError, OSError):
+                if time.time() >= deadline:
+                    raise StateBusy(
+                        "the agent-progress state file stayed locked for %gs" % timeout)
+                time.sleep(0.05)
+        yield
+    finally:
+        try:
+            if held:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+        finally:
+            lf.close()
 
 
 @contextlib.contextmanager
@@ -422,6 +487,7 @@ def state_ro():
 
 
 def _prune(st):
+    _sweep_temp_files()
     cfg = load_config()
     cutoff = time.time() - cfg["prune_after_hours"] * 3600
     for jid in list(st["jobs"]):
@@ -3234,13 +3300,31 @@ def cmd_rm(args):
     def ours(job):
         return not scoped or job_belongs_here(job, here)
 
+    def live(job):
+        """Is there really a process behind this record right now?
+
+        Forgetting a job whose process is still running does not stop the work -
+        it strips the work of its watcher and its bar, leaving it running with
+        nothing following it and no way to get the tracking back except by
+        finding the pid by hand. Records of jobs that have finished, and of jobs
+        whose process is already gone, are ordinary rubbish and go freely."""
+        pid = job.get("pid")
+        return (job.get("state") in ACTIVE_STATES and pid and alive(pid)) or (
+            job.get("state") == "queued" and job.get("scheduler"))
+
+    def removable(job):
+        return ours(job) and (args.force or not live(job))
+
     with state_rw() as st:
         if args.all:
-            gone = [k for k, v in st["jobs"].items() if ours(v)]
+            gone = [k for k, v in st["jobs"].items() if removable(v)]
+            kept = sum(1 for k, v in st["jobs"].items() if ours(v) and k not in gone)
             for k in gone:
                 del st["jobs"][k]
-            print("removed %d job(s)%s" % (len(gone),
-                                           " from this session" if scoped else ""))
+            print("removed %d job(s)%s%s"
+                  % (len(gone), " from this session" if scoped else "",
+                     "; kept %d still running (--force to forget those too)" % kept
+                     if kept else ""))
             return 0
         if args.finished:
             gone = [k for k, v in st["jobs"].items()
@@ -3251,6 +3335,13 @@ def cmd_rm(args):
             return 0
         for ref in args.job:
             jid = resolve(st, ref, mutating=True, any_session=args.everywhere)
+            if live(st["jobs"][jid]) and not args.force:
+                raise SystemExit(
+                    "%s is still running (pid %s). Forgetting it now would leave it "
+                    "running with nothing watching it.\n"
+                    "  agent-progress cancel %s     stop it\n"
+                    "  agent-progress rm %s --force  forget it and let it run on"
+                    % (jid, st["jobs"][jid].get("pid"), jid, jid))
             del st["jobs"][jid]
             print("removed %s" % jid)
     return 0
@@ -3473,12 +3564,15 @@ def cmd_config(args):
         print(CONFIG)
         return 0
 
-    user = {}
-    try:
-        with open(CONFIG) as f:
-            user = json.load(f)
-    except Exception:
-        pass
+    def read_user():
+        try:
+            with open(CONFIG) as f:
+                loaded = json.load(f)
+            return loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            return {}
+
+    user = read_user()
 
     if args.edit:
         if not os.path.exists(CONFIG):
@@ -3488,37 +3582,45 @@ def cmd_config(args):
         load_config(force=True)
         return 0
 
-    changed = False
-    if args.reset:
-        user, changed = {}, True
-    if args.preset:
-        user.update(CONFIG_PRESETS[args.preset])
-        changed = True
-    for k in (args.unset or []):
-        if k not in CONFIG_SPEC:
-            raise SystemExit(_unknown_key(k))
-        user.pop(k, None)
-        changed = True
-    for pair in (args.set or []):
-        if "=" not in pair:
-            raise SystemExit("--set expects KEY=VALUE, got %r" % pair)
-        k, v = pair.split("=", 1)
-        k = k.strip()
-        if k not in CONFIG_SPEC:
-            raise SystemExit(_unknown_key(k))
-        try:
-            user[k] = coerce(k, v)
-        except ValueError as ex:
-            raise SystemExit("bad value for %s: %s\n  %s" % (k, ex, CONFIG_SPEC[k]["help"]))
-        changed = True
+    # Everything from here to the write happens under the lock. Reading the file,
+    # changing one key in the copy and writing the whole thing back is a lost
+    # update waiting to happen: two sessions doing it at once each keep their own
+    # change and silently discard the other's, which is exactly what several
+    # agents adjusting settings looks like.
+    with hold_lock():
+        user = read_user()
+        changed = False
+        if args.reset:
+            user, changed = {}, True
+        if args.preset:
+            user.update(CONFIG_PRESETS[args.preset])
+            changed = True
+        for k in (args.unset or []):
+            if k not in CONFIG_SPEC:
+                raise SystemExit(_unknown_key(k))
+            user.pop(k, None)
+            changed = True
+        for pair in (args.set or []):
+            if "=" not in pair:
+                raise SystemExit("--set expects KEY=VALUE, got %r" % pair)
+            k, v = pair.split("=", 1)
+            k = k.strip()
+            if k not in CONFIG_SPEC:
+                raise SystemExit(_unknown_key(k))
+            try:
+                user[k] = coerce(k, v)
+            except ValueError as ex:
+                raise SystemExit("bad value for %s: %s\n  %s"
+                                 % (k, ex, CONFIG_SPEC[k]["help"]))
+            changed = True
 
-    if changed:
-        # written the way the state file is: a reader must never catch this
-        # half-done and silently fall back to the defaults
-        tmp = CONFIG + ".tmp.%d" % os.getpid()
-        with open(tmp, "w") as f:
-            json.dump(user, f, indent=2, sort_keys=True)
-        os.replace(tmp, CONFIG)
+        if changed:
+            # written the way the state file is: a reader must never catch this
+            # half-done and silently fall back to the defaults
+            tmp = CONFIG + ".tmp.%d" % os.getpid()
+            with open(tmp, "w") as f:
+                json.dump(user, f, indent=2, sort_keys=True)
+            os.replace(tmp, CONFIG)
     cfg = load_config(force=True)
 
     if args.json:
@@ -3776,6 +3878,8 @@ def build_parser():
     sp.add_argument("--finished", action="store_true")
     sp.add_argument("--everywhere", action="store_true",
                     help="also remove jobs belonging to other sessions")
+    sp.add_argument("--force", action="store_true",
+                    help="forget jobs whose process is still running")
     sp.set_defaults(fn=cmd_rm)
 
     sp = sub.add_parser("statusline", help="render for the Claude Code statusline")

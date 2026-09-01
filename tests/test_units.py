@@ -263,7 +263,7 @@ def run(*a, **kw):
                           capture_output=True, text=True, **kw)
 
 
-run("rm", "--all")
+run("rm", "--all", "--force")
 ck("log for an unknown job fails cleanly",
    run("log", "nope").returncode != 0 and "Traceback" not in run("log", "nope").stderr)
 ck("show for an unknown job fails cleanly",
@@ -289,7 +289,7 @@ ck("an ambiguous job name is reported, not crashed",
 run("done", "aaa-one")
 r = run("done", "aaa-one")
 ck("finishing an already finished job is harmless", r.returncode == 0, r.stderr[-120:])
-run("rm", "--all")
+run("rm", "--all", "--force")
 
 print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))

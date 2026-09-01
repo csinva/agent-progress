@@ -72,6 +72,37 @@ for label, doc in shapes.items():
        (r.stderr + r2.stderr).strip().splitlines()[-1][:70] if (r.stderr or r2.stderr) else "")
 
 print()
+print("=== temp files left by a killed writer ===")
+# The write is create-then-rename, so a killed writer cannot tear the state
+# file - but it does leave its temp file, and nothing used to come back for it.
+run("rm", "--all", "--force")
+stale = []
+for i in range(4):
+    q = os.path.join(sandbox.HOME, "state.json.tmp.%d" % (90000 + i))
+    open(q, "w").write("x" * 4096)
+    os.utime(q, (time.time() - 3600,) * 2)
+    stale.append(q)
+inflight = os.path.join(sandbox.HOME, "state.json.tmp.99999")
+open(inflight, "w").write("x")
+bystander = os.path.join(sandbox.HOME, "my-own.tmp.notes")
+open(bystander, "w").write("keep me")
+os.utime(bystander, (time.time() - 9999,) * 2)
+run("start", "sweep", "--eta", "1h", "--monitor", "time", "--no-watch")
+ck("stale temp files are cleared", not any(os.path.exists(q) for q in stale))
+ck("one still being written is kept", os.path.exists(inflight))
+# This is the check that matters. The first version of the sweep listed HOME -
+# the user's home directory - and deleted anything with ".tmp." in the name.
+ck("a file that is not the plugin's is left alone", os.path.exists(bystander))
+src = open(os.path.join(ROOT, "scripts", "agent_progress.py")).read()
+body = src[src.index("def _sweep_temp_files"):]
+body = body[:body.index("\ndef ")]
+ck("the sweep never looks outside its own state directory",
+   "os.listdir(ROOT)" in body
+   and "os.listdir(HOME)" not in body and "os.path.join(HOME" not in body,
+   "it must list ROOT, never HOME")
+run("rm", "--all", "--force")
+
+print()
 print("=== state directory that is actually a file ===")
 open(STATE, "w").write('{"jobs":{}}')
 # inside the sandbox, not a fixed name in /tmp: two runs at once raced over
@@ -106,13 +137,13 @@ open(STATE, "w").write('{"jobs":{},"inbox":[]}')
 
 print()
 print("=== settings that change behaviour ===")
-run("rm", "--all")
+run("rm", "--all", "--force")
 run("config", "--reset")
 run("start", "vis", "--eta", "30s", "--monitor", "time", "--no-watch")
 ck("a short job is hidden", sl().stdout.count("vis") == 0, sl().stdout[:60])
 run("update", "vis", "--force-show", "--quiet")
 ck("--force-show pins it", "vis" in sl().stdout)
-run("rm", "--all")
+run("rm", "--all", "--force")
 run("config", "--set", "show_context_line=false")
 ck("show_context_line=false leaves the line empty", sl().stdout.strip() == "",
    repr(sl().stdout[:60]))
@@ -126,7 +157,7 @@ ck("a job that ran a while lingers after finishing", "keep" in sl().stdout, sl()
 run("config", "--set", "keep_done_seconds=0")
 ck("keep_done_seconds=0 drops it at once", "keep" not in sl().stdout, sl().stdout[:60])
 run("config", "--reset")
-run("rm", "--all")
+run("rm", "--all", "--force")
 
 env = dict(os.environ, AGENT_PROGRESS_BAR_WIDTH="8", AGENT_PROGRESS_STYLE="ascii")
 run("start", "envjob", "--eta", "2h", "--monitor", "time", "--no-watch")
@@ -139,7 +170,7 @@ ck("and still beat an explicit setting", cc.visible_len(out2.splitlines()[0]) <
    cc.visible_len(sl().stdout.splitlines()[0]), "env=%d file=%d" % (
        cc.visible_len(out2.splitlines()[0]), cc.visible_len(sl().stdout.splitlines()[0])))
 run("config", "--reset")
-run("rm", "--all")
+run("rm", "--all", "--force")
 
 print()
 print("=== the context throttle lets go after its interval ===")
@@ -161,7 +192,7 @@ ck("unchanged status is not resent immediately", first and not second,
    "first=%d second=%d" % (len(first), len(second)))
 ck("but is resent once the interval passes", bool(third), "third=%d" % len(third))
 run("config", "--reset")
-run("rm", "--all")
+run("rm", "--all", "--force")
 
 print()
 print("=== hostile input on stdin ===")
@@ -245,7 +276,7 @@ before = subprocess.run(["git", "-C", ROOT, "status", "--porcelain"],
 run("start", "dirty", "--eta", "1h", "--monitor", "time", "--no-watch")
 run("exec", "--shell", "echo hi")
 sl()
-run("rm", "--all")
+run("rm", "--all", "--force")
 after = subprocess.run(["git", "-C", ROOT, "status", "--porcelain"],
                        capture_output=True, text=True).stdout
 ck("running jobs never write inside the repo", before == after, repr(after[:80]))
@@ -277,7 +308,7 @@ for name, sig in (("SIGTERM", _signal.SIGTERM), ("SIGINT", _signal.SIGINT)):
     time.sleep(6)
     ck("%s: the command dies with it" % name, not os.path.exists(marker),
        "the command outlived the wrapper")
-run("rm", "--all")
+run("rm", "--all", "--force")
 
 print()
 print("=== a job id is only read out of a command that submits one ===")
@@ -300,7 +331,7 @@ r = run("exec", "--shell", "X=5; echo $((X*2))")
 ck("a command printing a number creates no job",
    r.stdout.strip() == "10" and json.loads(run("ls", "--json").stdout or "[]") == [],
    repr(r.stdout))
-run("rm", "--all")
+run("rm", "--all", "--force")
 
 print()
 print("=== the session id never recurses ===")

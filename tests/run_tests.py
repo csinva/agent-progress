@@ -57,7 +57,7 @@ def ex(shell, after=None, extra=()):
 
 
 def reset():
-    cli("rm", "--all")
+    cli("rm", "--all", "--force")
     cli("config", "--reset")
 
 
@@ -125,14 +125,14 @@ ck("over threshold: hands off promptly", 1.5 < dt < 5, "%.1fs" % dt)
 ck("handoff message present", "agent-progress" in r.stdout and "tracked" in r.stdout, repr(r.stdout[:80]))
 jobs = json.loads(cli("ls", "--json").stdout or "[]")
 ck("handoff created exactly one job", len(jobs) == 1, "%d jobs" % len(jobs))
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 
 print()
 print("=== --after 0 means track immediately, not never ===")
 t = time.time(); r = ex("sleep 20", after="0"); dt = time.time() - t
 jobs = json.loads(cli("ls", "--json").stdout or "[]")
 ck("--after 0 hands off at once", dt < 3 and len(jobs) == 1, "%.1fs, %d jobs" % (dt, len(jobs)))
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 
 print()
 print("=== a job that crashes after handoff is reported ===")
@@ -151,7 +151,7 @@ pending = [e for e in inbox if not e.get("delivered")]
 ck("crash queued for Claude", len(pending) >= 1, "%d pending" % len(pending))
 ck("crash names the signal", any("SIGKILL" in (e.get("reason") or "") for e in pending),
    str([e.get("reason") for e in pending]))
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 
 print()
 print("=== hook behaviour ===")
@@ -210,7 +210,7 @@ ck("statusline does not crash", sl.returncode == 0, sl.stderr[:80])
 print()
 print("=== removing a running job stops its watcher ===")
 before = [j["watcher_pid"] for j in jobs if j.get("watcher_pid")]
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 time.sleep(3)
 alive = []
 for pid in before:
@@ -237,7 +237,7 @@ log = json.loads(cli("ls","--json").stdout or "[]")
 ck("backgrounded job was created", len(log) == 1, str(log))
 out = cli("log", log[0]["id"], "-n", "5").stdout if log else ""
 ck("both halves of the command ran", "ran" in out and "done" in out, repr(out))
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 
 print()
 print("=== duration units on --after ===")
@@ -247,7 +247,7 @@ for spec, lo, hi in (("1s", 0.5, 3.5), ("2s", 1.5, 4.5)):
                    capture_output=True)
     dt = time.time() - t
     ck("--after %s" % spec, lo < dt < hi, "%.1fs" % dt)
-    cli("rm", "--all")
+    cli("rm", "--all", "--force")
 
 print()
 print("=== a corrupt state file does not break anything ===")

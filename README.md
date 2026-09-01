@@ -209,7 +209,10 @@ else's run.
 `agent-progress ls` and `agent-progress watch` are asked directly and so show
 every session's work. `rm --all` is scoped the other way: inside a session it
 clears that session's jobs, because one agent tidying up should not throw away
-another's — `--everywhere` if you mean the machine.
+another's — `--everywhere` if you mean the machine. It also keeps any job whose
+process is still alive, and says how many it kept: forgetting a live job does
+not stop the work, it strips the work of its watcher and its bar and leaves it
+running with nothing following it. `--force` if that is really what you want.
 
 ```bash
 agent-progress config --set scope=all       # one statusline for every session

@@ -43,7 +43,7 @@ def cli(*a, **kw):
                           capture_output=True, text=True, **kw)
 
 
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 cfg = cc.load_config()
 
 print("=== a job record from an older build still renders ===")
@@ -96,7 +96,7 @@ try:
 except subprocess.TimeoutExpired:
     watcher.kill()
     ck("the watcher exits when the job ends", False, "still running")
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 
 print()
 print("=== only one watcher, however many sessions start at once ===")
@@ -117,7 +117,7 @@ n = len(subprocess.run(["pgrep", "-f", "_watch " + orph],
                        capture_output=True, text=True).stdout.split())
 ck("five concurrent revivals leave one watcher", n == 1, "%d watchers" % n)
 
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 gone = False
 for _ in range(20):
     time.sleep(1)
@@ -129,8 +129,34 @@ ck("a watcher notices its job was removed within ~15s", gone, "still running")
 sandbox.kill_watchers(cc)
 
 print()
+print("=== forgetting a job that is still running ===")
+# Removing the record of a live job does not stop the work; it strips it of its
+# watcher and its bar and leaves it running with nothing following it. That is
+# almost never what a cleanup meant, and it is easy to type by accident.
+cli("rm", "--all", "--force")
+cli("run", "--name", "alive", "--eta", "1h", "--", "sleep", "60")
+cli("start", "corpse", "--eta", "1h", "--monitor", "time", "--no-watch")
+with cc.state_rw() as st:
+    st["jobs"]["corpse"]["pid"] = 999999          # a pid that is long gone
+time.sleep(2)
+out = cli("rm", "--all").stdout          # deliberately not --force: that is the point
+left = sorted(json.loads(open(cc.STATE).read())["jobs"])
+ck("rm --all keeps the job that is running", left == ["alive"], str(left))
+ck("and says how many it kept", "still running" in out, out.strip()[:70])
+ck("a record with no live process goes freely", "corpse" not in left)
+r = cli("rm", "alive")
+ck("naming it directly is refused too", r.returncode != 0)
+ck("and the refusal says what to do instead",
+   "cancel" in (r.stderr + r.stdout), (r.stderr + r.stdout).strip()[:70])
+ck("--force forgets it", cli("rm", "alive", "--force").returncode == 0)
+ck("and then it is gone", "alive" not in json.loads(open(cc.STATE).read())["jobs"])
+sandbox.kill_watchers(cc)
+subprocess.run(["pkill", "-f", "sleep 60"], capture_output=True)
+cli("rm", "--all", "--force")
+
+print()
 print("=== a pid that has been handed to something else ===")
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 cli("run", "--name", "reused", "--eta", "1h", "--", "sh", "-c", "echo hi; sleep 2")
 time.sleep(4)                       # it finishes, and writes its exit file
 with cc.state_rw() as st:           # now the pid belongs to something very alive
@@ -149,7 +175,7 @@ for _ in range(25):
         break
 ck("a finished job is not held open by a recycled pid", state == "done", str(state))
 sandbox.kill_watchers(cc, jobs={"reused"})
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 
 print()
 print("=== a log that is truncated under the watcher ===")
@@ -198,7 +224,7 @@ ck("but it is when qsub printed it",
 
 for label, final, want in [("that succeeds", "COMPLETED", "done"),
                            ("that is killed", "OUT_OF_MEMORY", "failed")]:
-    cli("rm", "--all")
+    cli("rm", "--all", "--force")
     for f in os.listdir(sched):
         if f.startswith((".state-", "slurm-")):
             os.remove(os.path.join(sched, f))
@@ -238,7 +264,7 @@ ck("the scheduler's own word is kept", raw.get("scheduler_state") == "OUT_OF_MEM
    str(raw.get("scheduler_state")))
 with cc.state_rw() as st:
     st["inbox"] = []
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 shutil.rmtree(sched, ignore_errors=True)
 
 print()
@@ -255,7 +281,7 @@ raw = json.loads(open(cc.STATE).read())["jobs"]["upd"]
 ck("--reset-rate clears the samples", raw["samples"] == [], str(raw["samples"]))
 r = cli("update", "upd", "--note", "", "--quiet")
 ck("an empty note clears it", r.returncode == 0)
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 
 print()
 print("=== pruning old jobs ===")
@@ -269,7 +295,7 @@ with cc.state_rw() as st:
 ids = list(json.loads(open(cc.STATE).read())["jobs"])
 ck("a long-finished job is forgotten", "ancient" not in ids, str(ids))
 ck("a recent one is kept", "recent" in ids, str(ids))
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 
 print()
 print("=== classification is not quadratic on a long command ===")
@@ -291,7 +317,7 @@ ck("a non-ascii name does not break the CLI", out.strip().startswith("["), out[:
 ck("statusline renders it",
    subprocess.run([sys.executable, ENGINE, "statusline"], input="{}",
                   capture_output=True, text=True).returncode == 0)
-cli("rm", "--all")
+cli("rm", "--all", "--force")
 shutil.rmtree(scratch, ignore_errors=True)
 
 print()

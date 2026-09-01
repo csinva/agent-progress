@@ -187,7 +187,7 @@ slurm_says(sacct="COMPLETED|00:20:00|2026-09-01T10:00:00|0:0|gpu-[3-4]\n")
 until(lambda: job("evalsuite").get("state") != "running", 60)
 ck("it finishes on the scheduler's word alone",
    job("evalsuite").get("state") == "done", str(job("evalsuite").get("state")))
-run("rm", "--all")
+run("rm", "--all", "--force")
 
 print()
 print("=== a failed job is a crash, reported like any other ===")
@@ -205,7 +205,7 @@ ck("with slurm's own word kept",
    str(job("doomed").get("scheduler_state")))
 inbox = run("inbox", "--drain").stdout
 ck("and a crash report waiting for Claude", "doomed" in inbox, repr(inbox[:160]))
-run("rm", "--all")
+run("rm", "--all", "--force")
 
 print()
 print("=== an array is its own progress bar ===")
@@ -229,7 +229,7 @@ j = job("sweep")
 ck("an array back in the queue reads as queued", j.get("state") == "queued",
    str(j.get("state")))
 ck("the total does not shrink to what is left", j.get("total") == 8, str(j.get("total")))
-run("rm", "--all")
+run("rm", "--all", "--force")
 
 print()
 print("=== an unreachable cluster changes nothing ===")
@@ -244,7 +244,7 @@ ck("with the default log path guessed",
 time.sleep(3)
 ck("silence never ends a job", job("silent").get("state") == "queued",
    str(job("silent").get("state")))
-run("rm", "--all")
+run("rm", "--all", "--force")
 
 print()
 print("=== a queued job is never pruned, stalled or hidden ===")
@@ -259,7 +259,7 @@ sl = subprocess.run([sys.executable, ENGINE, "statusline"], input="{}",
                     capture_output=True, text=True).stdout
 ck("and is on the statusline", "patient" in sl, repr(sl[:200]))
 ck("showing the wait, not a fake ETA", "queued 30h" in sl, repr(sl[:200]))
-run("rm", "--all")
+run("rm", "--all", "--force")
 
 print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))

@@ -80,7 +80,7 @@ def context(sid):
 
 
 def reset():
-    as_session(None, "rm", "--all")
+    as_session(None, "rm", "--all", "--force")
     as_session(None, "config", "--reset")
     with cc.state_rw() as st:
         st["inbox"] = []
@@ -224,11 +224,11 @@ for a in ("agent-A", "agent-B"):
 as_session("agent-A", "rm", "--all")
 left = sorted(json.loads(open(sandbox.STATE).read())["jobs"])
 ck("agent A's rm --all took only agent A's job", left == ["job-agent-B"], str(left))
-as_session("agent-A", "rm", "--all", "--everywhere")
+as_session("agent-A", "rm", "--all", "--everywhere", "--force")
 ck("--everywhere still clears the lot",
    not json.loads(open(sandbox.STATE).read())["jobs"])
 as_session("agent-A", "start", "solo", "--eta", "3h", "--monitor", "time", "--no-watch")
-as_session(None, "rm", "--all")
+as_session(None, "rm", "--all", "--force")
 ck("and from a plain shell it means everything",
    not json.loads(open(sandbox.STATE).read())["jobs"])
 
@@ -327,6 +327,29 @@ for a in ("agent-A", "agent-B"):
     as_session(a, "start", "job-" + a, "--eta", "3h", "--monitor", "time", "--no-watch")
 ck("and scope=session separates them again", bars("agent-A") == ["job-agent-A"], str(bars("agent-A")))
 reset()
+
+print()
+print("=== settings changed by several sessions at once ===")
+# Reading the config, changing one key in the copy and writing the whole file
+# back is a lost update: two sessions doing it at the same moment each keep
+# their own change and silently discard the other's.
+KEYS = ["max_jobs", "bar_width", "min_interval_seconds", "min_duration_seconds",
+        "keep_done_seconds", "auto_track_after_seconds", "blend_full_at",
+        "prune_after_hours", "spinner_fps", "crash_handover_seconds"]
+lost_total = 0
+for trial in range(3):
+    as_session(None, "config", "--reset")
+    want = {k: 11 + i for i, k in enumerate(KEYS)}
+    th = [threading.Thread(target=as_session,
+                           args=(("w%d" % i), "config", "--set", "%s=%d" % (k, want[k])))
+          for i, k in enumerate(KEYS)]
+    [t.start() for t in th]
+    [t.join() for t in th]
+    cfg = json.loads(as_session(None, "config", "--json").stdout)
+    lost_total += sum(1 for k, v in want.items() if cfg.get(k) != v)
+ck("no setting is lost to a racing writer", lost_total == 0,
+   "%d lost over 3 trials" % lost_total)
+as_session(None, "config", "--reset")
 
 print()
 print("=== six agents running real jobs at once ===")

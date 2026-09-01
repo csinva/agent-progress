@@ -2448,7 +2448,14 @@ def _watch_loop(args):
             snapshot = dict(job)
 
         # ---- look, holding nothing
-        gone = has_pid and not alive(snapshot.get("pid"))
+        # A pid is not proof of life: pids are reused, and a watcher that only
+        # asks `is that pid alive` will wait forever on a number that now
+        # belongs to something else. Our own jobs write an exit file the moment
+        # they finish, which cannot be mistaken for anything, so it is believed
+        # first; the pid check is what is left for jobs we merely attached to.
+        finished_file = snapshot.get("log") and os.path.exists(
+            (snapshot.get("log") or "") + ".exit")
+        gone = bool(finished_file) or (has_pid and not alive(snapshot.get("pid")))
         # a queued job has produced no output to read; the queue is the only
         # thing worth asking, and it is asked below
         reading, verdict, updates, info = observe(

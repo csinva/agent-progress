@@ -129,6 +129,29 @@ ck("a watcher notices its job was removed within ~15s", gone, "still running")
 sandbox.kill_watchers(cc)
 
 print()
+print("=== a pid that has been handed to something else ===")
+cli("rm", "--all")
+cli("run", "--name", "reused", "--eta", "1h", "--", "sh", "-c", "echo hi; sleep 2")
+time.sleep(4)                       # it finishes, and writes its exit file
+with cc.state_rw() as st:           # now the pid belongs to something very alive
+    st["jobs"]["reused"]["pid"] = os.getpid()
+    st["jobs"]["reused"]["state"] = "running"
+    st["jobs"]["reused"]["ended"] = None
+sandbox.kill_watchers(cc, jobs={"reused"})
+time.sleep(0.5)
+subprocess.Popen([sys.executable, ENGINE, "_watch", "reused"],
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+state = None
+for _ in range(25):
+    time.sleep(1)
+    state = json.loads(open(cc.STATE).read())["jobs"]["reused"]["state"]
+    if state != "running":
+        break
+ck("a finished job is not held open by a recycled pid", state == "done", str(state))
+sandbox.kill_watchers(cc, jobs={"reused"})
+cli("rm", "--all")
+
+print()
 print("=== a log that is truncated under the watcher ===")
 log2 = os.path.join(scratch, "rot.log")
 open(log2, "w").write("Epoch 5/10\n" * 50)

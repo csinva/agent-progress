@@ -74,7 +74,10 @@ for label, doc in shapes.items():
 print()
 print("=== state directory that is actually a file ===")
 open(STATE, "w").write('{"jobs":{}}')
-tmpfile = "/tmp/agent-progress-not-a-dir"
+# inside the sandbox, not a fixed name in /tmp: two runs at once raced over
+# that name, and whichever lost left a directory behind, which then failed
+# every later run on the machine until somebody deleted it by hand
+tmpfile = os.path.join(sandbox.HOME, "not-a-dir")
 open(tmpfile, "w").write("x")
 env = dict(os.environ, AGENT_PROGRESS_HOME=tmpfile)
 for cmd in (["ls"], ["run", "--name", "x", "--", "true"], ["statusline"]):

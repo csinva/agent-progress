@@ -264,7 +264,7 @@ agent-progress config --preset eager                      # same thing
 
 Because a quick run now costs nothing, the detector can afford to be broad. A
 command is caught when it is backgrounded, when it is given a timeout of two
-minutes or more, or when it matches one of 33 patterns — training scripts,
+minutes or more, or when it matches one of 38 patterns — training scripts,
 `torchrun`, `accelerate`, `deepspeed`, sweeps, `spark-submit`, `terraform`,
 `ansible`, `docker build`, `rsync`, `aws s3 sync`, model downloads, `dvc`,
 `dbt`, `pg_restore`, `git clone`, and ordinary work like `pytest`, `make`,
@@ -538,7 +538,7 @@ AGENT_PROGRESS_BAR_WIDTH=40 AGENT_PROGRESS_STYLE=bars agent-progress ls
 | --- | --- |
 | **visibility** | `min_duration_seconds`, `max_jobs`, `keep_done_seconds`, `keep_failed_seconds`, `prune_after_hours`, `show_context_line` |
 | **cadence** | `min_interval_seconds`, `interval_fraction` |
-| **bar shape** | `style`, `bar_width`, `name_width`, `fill_char`, `track_char`, `left_cap`, `right_cap`, `spinner`, `spinner_fps`, `glyph_done`, `glyph_failed`, `glyph_cancelled`, `glyph_stalled` |
+| **bar shape** | `style`, `bar_width`, `name_width`, `fill_char`, `track_char`, `left_cap`, `right_cap`, `spinner`, `spinner_fps`, `glyph_done`, `glyph_failed`, `glyph_cancelled`, `glyph_stalled`, `glyph_queued` |
 | **fields** | `show_spinner`, `show_name`, `show_percent`, `show_counts`, `show_clock`, `show_rate`, `show_eta_clock`, `show_drift`, `show_note`, `note_width`, `clock_format` |
 | **color** | `color`, `color_running`, `color_done`, `color_failed`, `color_warn`, `color_dim`, `color_track`, `color_text` |
 | **estimation** | `blend_full_at`, `rate_window`, `rate_min_span`, `drift_threshold` |

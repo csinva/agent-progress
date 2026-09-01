@@ -317,6 +317,81 @@ ck("and scope=session separates them again", bars("agent-A") == ["job-agent-A"],
 reset()
 
 print()
+print("=== six agents running real jobs at once ===")
+# Everything above uses jobs that stand still. This runs six real processes
+# through the real hook, with their watchers writing to the shared state file
+# at the same time, half of them dying - which is where cross-talk and a torn
+# state file would actually show up.
+reset()
+import shutil
+import tempfile
+work = tempfile.mkdtemp(prefix="agent-progress-stress-")
+open(os.path.join(work, "train.py"), "w").write(
+    "import sys, time\n"
+    "n = int(sys.argv[1]); die = sys.argv[2] == 'die'\n"
+    "for i in range(1, n + 1):\n"
+    "    print('Epoch %d/%d' % (i, n), flush=True); time.sleep(0.7)\n"
+    "if die: raise MemoryError('boom')\n")
+N = 6
+AUTO = os.path.join(HOOKS, "auto_track.py")
+
+
+def launch(i):
+    sid = "stress-%d" % i
+    cmd = "python3 %s/train.py 12 %s" % (work, "die" if i % 2 else "live")
+    env = dict(os.environ, CLAUDE_CODE_SESSION_ID=sid)
+    out = subprocess.run([sys.executable, AUTO], env=env, capture_output=True, text=True,
+                         input=json.dumps({"tool_name": "Bash", "session_id": sid,
+                                           "tool_input": {"command": cmd}})).stdout
+    wrapped = json.loads(out)["hookSpecificOutput"]["updatedInput"]["command"]
+    wrapped = wrapped.replace("--after 20", "--after 1").replace("--name train", "--name job-%d" % i)
+    subprocess.run(["/bin/sh", "-c", wrapped], capture_output=True, cwd=work, env=env)
+
+
+th = [threading.Thread(target=launch, args=(i,)) for i in range(N)]
+[t.start() for t in th]
+[t.join() for t in th]
+for i in range(N):
+    as_session("stress-%d" % i, "update", "job-%d" % i, "--eta", "1h", "--interval", "1s", "--quiet")
+mixed = {i: bars("stress-%d" % i) for i in range(N)}
+ck("each agent sees exactly its own live job",
+   all(mixed[i] == ["job-%d" % i] for i in range(N)), str(mixed))
+
+# generous: these wait on real watchers, and the whole suite run has the
+# machine busy - a deadline tight enough to fail under load is a flaky
+# test, not a finding
+deadline = time.time() + 180
+while time.time() < deadline:
+    jobs = json.loads(open(sandbox.STATE).read())["jobs"]
+    if len(jobs) == N and all(j.get("state") not in ("running", "queued") for j in jobs.values()):
+        break
+    time.sleep(1)
+jobs = json.loads(open(sandbox.STATE).read())["jobs"]
+ck("all six finished and none were lost", len(jobs) == N, str(sorted(jobs)))
+ck("three succeeded and three died",
+   sorted(j["state"] for j in jobs.values()) == ["done"] * 3 + ["failed"] * 3,
+   str(sorted(j["state"] for j in jobs.values())))
+ck("every job kept its own owner",
+   len({j.get("session_id") for j in jobs.values()}) == N)
+
+got = {}
+
+
+def collect(i):
+    sid = "stress-%d" % i
+    got[sid] = sorted(re.findall(r"'(job-\d)'", context(sid)))
+
+
+th = [threading.Thread(target=collect, args=(i,)) for i in range(N)]
+[t.start() for t in th]
+[t.join() for t in th]
+ck("and every crash went to the agent whose job died",
+   all(got["stress-%d" % i] == (["job-%d" % i] if i % 2 else []) for i in range(N)), str(got))
+subprocess.run(["pkill", "-f", "agent_progress.py _watch"], capture_output=True)
+shutil.rmtree(work, ignore_errors=True)
+reset()
+
+print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

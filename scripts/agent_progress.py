@@ -1974,7 +1974,9 @@ def take_crash(session_id=None):
             claimed = dict(ev)
             # a report taken on behalf of a session that never came back has to
             # say so, or it is read as this session's own job having died
-            claimed["handover"] = ev not in mine
+            # identity, not equality: two crashes of the same job at the same
+            # instant compare equal, and `in` would then call one of them ours
+            claimed["handover"] = not any(ev is m for m in mine)
             break
     return claimed
 
@@ -2770,7 +2772,9 @@ _PREV_HANDLERS = {}
 _FORWARDED = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
-def _forward_signals(proc):
+def _forward_signals(proc=None):
+    """Start recording interrupts. `proc` is unused - the handler only notes the
+    signal, so this can be armed before the command exists."""
     def handler(sig, _frame):
         if not _INTERRUPT:
             _INTERRUPT.append(sig)
@@ -2923,6 +2927,13 @@ def cmd_exec(args):
     except (Exception, SystemExit):
         return _passthrough(command, args.cwd)
 
+    # Armed before the child exists, not after. Installing the handlers on the
+    # next line after Popen leaves a window - the length of a fork and exec, and
+    # on a loaded machine that is not short - in which an interrupt is taken by
+    # the default handler: the wrapper dies and the command it just started is
+    # left running with nothing watching it. The handler only records the
+    # signal, so arming it early costs nothing.
+    _forward_signals(None)
     started = time.time()
     proc = subprocess.Popen(
         ["/bin/sh", "-c", "( %s ) > %s 2>&1; echo $? > %s"
@@ -2931,7 +2942,9 @@ def cmd_exec(args):
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    _forward_signals(proc)
+    if _INTERRUPT:
+        # it arrived while the child was being started
+        return _interrupted(proc, log, 0)
 
     sent = 0
     while True:

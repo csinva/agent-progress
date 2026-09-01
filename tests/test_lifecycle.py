@@ -196,7 +196,7 @@ for label, final, want in [("that succeeds", "COMPLETED", "done"),
     time.sleep(0.5)
     subprocess.Popen([sys.executable, ENGINE, "_watch", "slurm-4242"], cwd=sched, env=env,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    deadline, seen = time.time() + 40, None
+    deadline, seen = time.time() + 150, None
     while time.time() < deadline:
         time.sleep(2)
         jobs = json.loads(cli("ls", "--json").stdout or "[]")

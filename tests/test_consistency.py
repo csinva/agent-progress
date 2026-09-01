@@ -132,6 +132,20 @@ for f in ["skills/agent-progress/SKILL.md", "commands/track.md", "commands/progr
     ck("%s has frontmatter" % f, head.startswith("---") and head.count("---") >= 2)
 
 
+print()
+README = open(os.path.join(ROOT, "README.md")).read()
+for k in sorted(cc.CONFIG_SPEC):
+    ck("the README mentions %s" % k, k in README)
+for name in sorted(cc.CONFIG_PRESETS):
+    ck("the README mentions preset %s" % name,
+       "`%s`" % name in README or "--preset %s" % name in README)
+for kind in cc.MONITOR_KINDS:
+    ck("the README mentions the %s monitor" % kind, "`%s`" % kind in README)
+m = re.search(r"one of (\d+) patterns", README)
+ck("the README's pattern count is right",
+   m and int(m.group(1)) == len(cc.AUTO_TRACK_PATTERNS),
+   "says %s, there are %d" % (m.group(1) if m else "-", len(cc.AUTO_TRACK_PATTERNS)))
+
 print("  %d declarations checked" % CHECKS[0])
 print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))

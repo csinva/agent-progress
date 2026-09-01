@@ -11,6 +11,7 @@ CLI and the real hooks against real processes - nothing is mocked.
 Takes about a minute; it has to wait on actual commands. It writes to the real
 state directory, so it clears its own jobs as it goes.
 """
+import importlib.util
 import json
 import os
 import subprocess
@@ -22,6 +23,10 @@ ENGINE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))
                       "scripts", "agent_tqdm.py")
 HOOKS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "hooks")
 HOOK = os.path.join(HOOKS, "auto_track.py")
+_spec = importlib.util.spec_from_file_location("agent_tqdm", ENGINE)
+cc = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(cc)
+
 FAILS = []
 
 
@@ -277,6 +282,8 @@ finally:
 print()
 print("=== a crash reaches exactly one session ===")
 reset()
+with cc.state_rw() as st:
+    st["inbox"] = []                     # start from a known-empty queue
 subprocess.run([sys.executable, ENGINE, "exec", "--after", "1s", "--name", "boom",
                 "--shell", "sleep 2; exit 9"], capture_output=True)
 deadline = time.time() + 25
@@ -285,15 +292,24 @@ while time.time() < deadline:
     if jj and jj[0]["state"] != "running":
         break
     time.sleep(1)
+# Count who was handed *this* crash, not who was handed any crash. On a busy
+# machine another job can crash while these six are racing, and a second
+# session claiming that one says nothing about whether this one was claimed
+# twice - which is the property under test.
 got = []
+
+
 def grab(i):
     r = subprocess.run([sys.executable, os.path.join(HOOKS, "inject_status.py"),
                         "UserPromptSubmit"], input=json.dumps({"session_id": "c%d" % i}),
                        capture_output=True, text=True).stdout
-    got.append("CRASHED" in r)
+    got.append("'boom'" in r)
+
+
 th = [threading.Thread(target=grab, args=(i,)) for i in range(6)]
 [t.start() for t in th]; [t.join() for t in th]
-ck("crash delivered exactly once", sum(got) == 1, "delivered %d times" % sum(got))
+ck("a crash is delivered to exactly one session", sum(got) == 1,
+   "delivered %d times" % sum(got))
 
 reset()
 print()

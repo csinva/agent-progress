@@ -199,6 +199,33 @@ r = run("exec", "--shell", "printf 'a\\000b\\377c\\n'")
 ck("binary output does not crash exec", r.returncode == 0 and "Traceback" not in r.stderr)
 r = run("exec", "--shell", "echo 'h\u00e9llo \U0001f680'")
 ck("unicode survives exec", "\U0001f680" in r.stdout, repr(r.stdout[:30]))
+import threading
+with cc.state_rw() as st:
+    st["inbox"] = [{"job": "q%d" % i, "ts": time.time(), "exit_code": 1,
+                    "reason": "exited with status 1", "duration": 1, "delivered": None}
+                   for i in range(5)]
+claimed = []
+lock = threading.Lock()
+
+
+def claim(i):
+    for _ in range(4):
+        ev = cc.take_crash("sess%d" % i)
+        if not ev:
+            break
+        with lock:
+            claimed.append(ev["job"])
+
+
+th = [threading.Thread(target=claim, args=(i,)) for i in range(8)]
+[t.start() for t in th]; [t.join() for t in th]
+ck("every queued crash is claimed exactly once, under contention",
+   sorted(claimed) == ["q0", "q1", "q2", "q3", "q4"], str(sorted(claimed)))
+ck("nothing is left unclaimed",
+   not [e for e in json.loads(open(STATE).read())["inbox"] if not e.get("delivered")])
+with cc.state_rw() as st:
+    st["inbox"] = []
+
 before = subprocess.run(["git", "-C", ROOT, "status", "--porcelain"],
                         capture_output=True, text=True).stdout
 run("start", "dirty", "--eta", "1h", "--monitor", "time", "--no-watch")

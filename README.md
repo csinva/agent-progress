@@ -189,6 +189,23 @@ agent-tqdm autotrack 'pytest tests/'
 #                only tracked if still running after 20s
 ```
 
+### What it cannot catch
+
+Work that is *submitted* rather than run — `sbatch`, `qsub`, `bsub` — is
+invisible to this. The command returns in well under a second, so it never
+reaches the threshold, and the job itself runs on another machine entirely.
+Track those deliberately, pointing the bar at the queue or at the output file
+the scheduler writes:
+
+```bash
+JOB=$(sbatch --parsable train.sbatch)
+agent-tqdm start train-$JOB --eta 6h --log slurm-$JOB.out
+```
+
+Claude is told to do this when it submits a batch job. Because there is no local
+process, nothing notices such a job ending by itself — close it out with
+`agent-tqdm done <id>` when it is finished.
+
 ### Modes
 
 | `auto_track` | behavior |

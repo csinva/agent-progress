@@ -94,6 +94,37 @@ else entirely (a database, a queue, an API, a remote host).
 If nothing is observable, that is a fine answer — use `--monitor time` and the
 bar runs on your estimate alone. That is still better than no bar.
 
+## Jobs that are submitted rather than run
+
+`sbatch`, `qsub`, `bsub` and friends are a blind spot for the automatic path,
+and you have to cover it yourself. The command returns in under a second - it
+only puts work in a queue - so it finishes long before the threshold and is
+never tracked, while the thing worth watching runs somewhere else for hours.
+
+When you submit a batch job, track it deliberately. Slurm writes the job's
+output to a file, which is all a bar needs:
+
+```bash
+JOB=$(sbatch --parsable train.sbatch)
+agent-tqdm start train-$JOB --eta 6h --log slurm-$JOB.out
+```
+
+Progress then comes from the log exactly as it would for a local run. If the
+script prints nothing countable, watch the queue instead:
+
+```bash
+agent-tqdm start train-$JOB --eta 6h \
+  --probe "squeue -j $JOB -h -o %T | grep -c RUNNING" --total 1
+```
+
+One thing to know: there is no local process, so nothing can notice the job
+ending on its own. Check on it when you are next in the conversation - `squeue
+-j $JOB` or the tail of the log - and close it out yourself:
+
+```bash
+agent-tqdm done train-$JOB          # or: agent-tqdm fail train-$JOB --note "OOM"
+```
+
 ## Step 2: estimate the duration
 
 `--eta` is time **remaining from now**. It only has to be roughly right; the

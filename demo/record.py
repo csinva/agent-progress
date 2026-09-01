@@ -33,8 +33,11 @@ HOOK = os.path.join(ROOT, "hooks", "auto_track.py")
 
 BG = (13, 17, 23)
 FG = (210, 210, 210)
-PAD = 24
-COLS, ROWS = 116, 16
+PAD = 22
+PANEL_COLS = 42                 # each of the three columns
+GAP = " \u2502 "                 # what separates them
+COLS = PANEL_COLS * 3 + len(GAP) * 2
+ROWS = 17
 
 PRIMARY_FONT = "/System/Library/Fonts/Menlo.ttc"
 FALLBACK_FONTS = ["/System/Library/Fonts/Apple Symbols.ttf",
@@ -195,45 +198,84 @@ MAKEFILE = """all:
 \t@echo "ld  build/app";    sleep 1
 """
 
-BENCH = """import time
-print("loading llama-7b", flush=True)
-time.sleep(7)
-print("warmup pass 1/3", flush=True)
-time.sleep(12)
-print("warmup pass 2/3", flush=True)
-time.sleep(12)
-raise MemoryError("unable to allocate 8.00 GiB on cuda:0")
-"""
-
-TRAIN = """import time, sys
+TRAIN = """import time
 N = 34
 for i in range(1, N + 1):
-    time.sleep(2.2)
-    print("Epoch %d/%d  loss %.3f  acc %.3f" % (i, N, 2.4 / (i ** 0.5), 1 - 0.9 / i),
-          flush=True)
+    time.sleep(1.9)
+    print("Epoch %d/%d  loss %.3f" % (i, N, 2.4 / (i ** 0.5)), flush=True)
 print("saved checkpoints/final.pt", flush=True)
 """
 
+BENCH = """import time
+print("loading llama-7b", flush=True)
+time.sleep(9)
+print("warmup 1/3", flush=True)
+time.sleep(11)
+print("warmup 2/3", flush=True)
+time.sleep(10)
+raise MemoryError("unable to allocate 8.00 GiB on cuda:0")
+"""
 
-class Take(object):
-    """Runs the session, keeps the transcript, and captures frames."""
+# One column each. They run at the same time, as three commands in a session
+# would, so the clip shows the three outcomes together rather than in turn.
+PANELS = [
+    {"key": "make", "title": "make -j8", "command": "make -j8",
+     "file": "Makefile", "body": MAKEFILE,
+     "idle": "under 20s - never tracked"},
+    {"key": "train", "title": "python3 train.py", "command": "python3 train.py",
+     "file": "train.py", "body": TRAIN,
+     "idle": "not tracked yet"},
+    {"key": "benchmark", "title": "python3 benchmark.py", "command": "python3 benchmark.py",
+     "file": "benchmark.py", "body": BENCH,
+     "idle": "not tracked yet"},
+]
 
-    def __init__(self, cc, cfg, scratch):
-        self.cc, self.cfg, self.scratch = cc, cfg, scratch
+
+def pad(line, width):
+    """Clip a line to a column and pad it out, counting visible columns only."""
+    line = ansi_clip(line, width)
+    return line + " " * max(0, width - visible_columns(line))
+
+
+def visible_columns(text):
+    return sum(char_width(c) for c in ANSI.sub("", text))
+
+
+def ansi_clip(text, width):
+    if visible_columns(text) <= width:
+        return text
+    out, seen, i = [], 0, 0
+    while i < len(text):
+        if text[i] == "\033":
+            k = text.find("m", i)
+            if k == -1:
+                break
+            out.append(text[i:k + 1]); i = k + 1
+            continue
+        w = char_width(text[i])
+        if seen + w > width - 1:
+            break
+        out.append(text[i]); seen += w; i += 1
+    return "".join(out) + "\u2026\033[0m"
+
+
+class Panel(object):
+    """One column: a command, whatever it has printed, and its bar."""
+
+    def __init__(self, cc, spec, scratch):
+        self.cc, self.spec, self.scratch = cc, spec, scratch
         self.lines = []
-        self.caption = ""
-        self.speed = 1.0
-        self.streams = []          # every command still worth following
+        self.path = None
+        self.offset = 0
+        self.started = False
 
     def say(self, text=""):
         self.lines.append(text)
 
-    def prompt(self, text):
+    def launch(self):
+        """Send the command through the real hook, then run what it produced."""
         c = self.cc
-        self.say(c.paint("> ", "run", True) + c.paint(text, "text", True))
-
-    def run(self, command, name):
-        """Send a command through the real hook, then run whatever it produced."""
+        command = self.spec["command"]
         payload = {"tool_name": "Bash", "session_id": "demo",
                    "tool_input": {"command": command}}
         out = subprocess.run([sys.executable, HOOK], input=json.dumps(payload),
@@ -242,82 +284,78 @@ class Take(object):
         if out:
             actual = json.loads(out)["hookSpecificOutput"]["updatedInput"]["command"]
             actual = actual.replace(" --name ", " --name rec-", 1)
-        path = os.path.join(self.scratch, "%s.out" % name)
-        open(path, "w").close()
-        # commands overlap here as they would in a session, so each one is
-        # followed separately rather than replacing the last
-        self.streams.append({"path": path, "offset": 0})
+        self.path = os.path.join(self.scratch, "%s.out" % self.spec["key"])
+        open(self.path, "w").close()
         subprocess.Popen(["/bin/sh", "-c", actual], cwd=self.scratch,
-                         stdin=subprocess.DEVNULL, stdout=open(path, "w"),
+                         stdin=subprocess.DEVNULL, stdout=open(self.path, "w"),
                          stderr=subprocess.STDOUT)
+        self.started = True
 
     def drain(self):
-        """Move any new output from the running commands into the transcript."""
-        for stream in self.streams:
-            try:
-                with open(stream["path"], "rb") as f:
-                    f.seek(stream["offset"])
-                    chunk = f.read()
-            except OSError:
+        if not self.path:
+            return
+        try:
+            with open(self.path, "rb") as f:
+                f.seek(self.offset)
+                chunk = f.read()
+        except OSError:
+            return
+        if not chunk:
+            return
+        self.offset += len(chunk)
+        for raw in chunk.decode("utf-8", "replace").splitlines():
+            line = raw.rstrip()
+            if not line:
                 continue
-            if not chunk:
-                continue
-            stream["offset"] += len(chunk)
-            for raw in chunk.decode("utf-8", "replace").splitlines():
-                line = raw.rstrip()
-                if not line:
+            tone = "warn" if line.startswith("[agent-tqdm]") else "dim"
+            # the handoff message is written for a wide terminal; in a column
+            # only its first sentence earns the space
+            bare = line.strip()
+            if bare.startswith("[agent-tqdm]"):
+                if any("tracked, now" in l for l in self.lines):
                     continue
-                tone = "warn" if line.startswith("[agent-tqdm]") else "dim"
-                self.say(self.cc.paint("  " + line[:COLS - 4], tone, True))
+                line = "[agent-tqdm] tracked, now in the background"
+            elif bare.startswith(("agent-tqdm ", "If you expect", "bar can say",
+                                  "running in the background", "Note:", "statusline was",
+                                  "Restart Claude Code", "and `agent-tqdm")):
+                continue        # the full banner is written for a wide terminal
+            self.say(self.cc.paint("  " + line, tone, True))
 
-    def frame(self):
-        c, cfg = self.cc, self.cfg
-        head = c.paint("agent-tqdm", "dim", True)
-        if self.speed > 1:
-            head += c.paint("      ▶▶ %g× faster" % self.speed, "warn", True)
-        body = [head, ""]
-        body += self.lines[-(ROWS - 7):]
-        while len(body) < ROWS - 4:
-            body.append("")
-        st = c.state_ro()
-        jobs = sorted((j for j in st["jobs"].values()
-                       if (j.get("id") or "").startswith("rec-")),
-                      key=lambda j: j.get("started") or 0)
-        # everything above is the terminal; everything below is what Claude
-        # Code actually shows you, which is the part worth pointing at
-        body.append(c.paint("  \u2500\u2500 statusline " + "\u2500" * (COLS - 18), "dim", True))
-        for j in jobs:
-            body.append("  " + c.render_line(j, cfg, width=COLS - 4))
-        while len(body) < ROWS - 1:
-            body.append("")
-        body.append(c.paint("  " + self.caption, "run", True))
-        return body[:ROWS]
-
-    def job_id(self, contains="train"):
-        st = self.cc.state_ro()
-        for j in sorted(st["jobs"].values(), key=lambda x: x.get("started") or 0):
-            jid = j.get("id") or ""
-            if jid.startswith("rec-") and contains in jid:
-                return jid
+    def job(self):
+        for j in self.cc.state_ro()["jobs"].values():
+            if (j.get("id") or "") == "rec-" + self.spec["key"]:
+                return j
         return None
+
+    def render(self, cfg, height):
+        c = self.cc
+        body = [c.paint("$ " + self.spec["title"], "text", True), ""]
+        body += self.lines[-(height - 4):]
+        while len(body) < height - 2:
+            body.append("")
+        body.append(c.paint("\u2500\u2500 statusline " + "\u2500" * (PANEL_COLS - 15),
+                            "dim", True))
+        j = self.job()
+        body.append(c.render_line(j, cfg, width=PANEL_COLS) if j
+                    else c.paint("  " + self.spec["idle"], "dim", True))
+        return [pad(l, PANEL_COLS) for l in body[:height]]
 
 
 # (until real-seconds, speed, caption). Speed is how much real time each
 # captured frame covers, so waiting can be skipped past without faking it.
+# (until real-seconds, speed, caption). Speed is how much real time each
+# captured frame covers, so the waiting can be skipped past without faking it.
 SCRIPT = [
-    (2.0,   1,  "a command Claude runs, like any other"),
-    (8.0,   1,  "it runs exactly as it would have - nothing is watching yet"),
-    (11.0,  1,  "done in 4s. never tracked: no job, no message, no tokens"),
-    (16.0,  1,  "now something slower. the threshold is 20 seconds"),
-    (31.0,  12, "waiting out the 20 seconds"),
-    (36.0,  1,  "past the threshold: tracked, and left running in the background"),
-    (41.0,  1,  "Claude sets the estimate - the one thing a hook cannot guess"),
-    (44.0,  6,  "a second slow command, running alongside the first"),
-    (52.0,  1,  "it crosses the threshold too, and gets its own bar"),
-    (66.0,  6,  "waiting on it"),
-    (74.0,  1,  "then it dies: a skull, and the exit decoded, not a bare number"),
-    (104.0, 14, "the training run carries on, costing nothing while it does"),
-    (110.0, 1,  "done"),
+    (3.0,  1,  "three commands, launched together"),
+    (7.0,  1,  "the build is done already - four seconds, so it is never tracked"),
+    (14.0, 1,  "the other two are still going. the threshold is 20 seconds"),
+    (22.0, 8,  "waiting out the 20 seconds"),
+    (27.0, 1,  "both crossed it: tracked, moved to the background, bars"),
+    (33.0, 1,  "Claude gives the training run an estimate - a hook cannot guess one"),
+    (39.0, 5,  "waiting on the benchmark"),
+    (46.0, 1,  "the benchmark dies: skull, and the exit decoded"),
+    (66.0, 14, "the training run carries on, costing nothing while it does"),
+    (72.0, 1,  "done"),
 ]
 
 
@@ -326,8 +364,8 @@ def main():
     ap.add_argument("--out", default=os.path.join(HERE, "agent-tqdm.mov"))
     ap.add_argument("--gif", default=os.path.join(HERE, "agent-tqdm.gif"))
     ap.add_argument("--fps", type=int, default=12)
-    ap.add_argument("--font-size", type=int, default=20)
-    ap.add_argument("--gif-width", type=int, default=900)
+    ap.add_argument("--font-size", type=int, default=18)
+    ap.add_argument("--gif-width", type=int, default=1040)
     ap.add_argument("--gif-every", type=int, default=2)
     ap.add_argument("--gif-colors", type=int, default=48)
     args = ap.parse_args()
@@ -336,12 +374,15 @@ def main():
     spec = importlib.util.spec_from_file_location("agent_tqdm", ENGINE)
     cc = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cc)
-    cfg = cc.load_config()
-    cfg["bar_width"] = 26
+
+    # a bar has one narrow column to live in, so it keeps only what fits
+    cfg = dict(cc.load_config())
+    cfg.update(bar_width=10, show_name=False, show_rate=False, show_eta_clock=False,
+               show_drift=False, show_note=False, show_counts=False, name_width=10)
 
     font = ImageFont.truetype(PRIMARY_FONT, args.font_size)
     cell_w = font.getlength("M")
-    line_h = int(args.font_size * 1.5)
+    line_h = int(args.font_size * 1.55)
     width = int(PAD * 2 + cell_w * COLS)
     height = PAD * 2 + line_h * ROWS
     size = (width + (width % 2), height + (height % 2))
@@ -349,61 +390,69 @@ def main():
     g = emoji_glyph("\U0001f480", int(line_h * 0.78))
     if g:
         emoji["\U0001f480"] = g
-    fallbacks = build_fallbacks(cfg["spinner"] + "✓→·▶", args.font_size)
+    fallbacks = build_fallbacks(cfg["spinner"] + "\u2713\u2192\u00b7\u25b6\u2502\u2500",
+                                args.font_size)
 
     scratch = tempfile.mkdtemp(prefix="agent-tqdm-rec-")
     frames = os.path.join(scratch, "frames")
     os.makedirs(frames)
-    open(os.path.join(scratch, "Makefile"), "w").write(MAKEFILE)
-    open(os.path.join(scratch, "train.py"), "w").write(TRAIN)
-    open(os.path.join(scratch, "benchmark.py"), "w").write(BENCH)
+    for spec_ in PANELS:
+        open(os.path.join(scratch, spec_["file"]), "w").write(spec_["body"])
     subprocess.run([sys.executable, ENGINE, "rm", "--all"], capture_output=True)
 
-    take = Take(cc, cfg, scratch)
+    panels = [Panel(cc, spec_, scratch) for spec_ in PANELS]
     total = SCRIPT[-1][0]
     print("recording %.0fs of real time..." % total)
 
     start = time.time()
-    n = 0
-    last = 0.0
+    n, last, caption, speed = 0, 0.0, "", 1.0
     fired = set()
+    panel_height = ROWS - 2
     while True:
         now = time.time() - start
         if now > total:
             break
-        for at, speed, caption in SCRIPT:
+        for at, sp, cap in SCRIPT:
             if now <= at:
-                take.speed, take.caption = speed, caption
+                speed, caption = sp, cap
                 break
 
-        # the session itself, driven off the same clock
-        if 0.3 < now and "make" not in fired:
-            fired.add("make")
-            take.prompt("make -j8")
-            take.run("make -j8", "make")
-        if 12.2 < now and "train" not in fired:
-            fired.add("train")
-            take.say()
-            take.prompt("python3 train.py --epochs 28")
-            take.run("python3 train.py --epochs 28", "train")
-        if 25.0 < now and "export" not in fired:
-            fired.add("export")
-            take.say()
-            take.prompt("python3 benchmark.py --model llama-7b")
-            take.run("python3 benchmark.py --model llama-7b", "bench")
-        if 41.0 < now and "eta" not in fired:
+        if now > 0.4 and "launch" not in fired:
+            fired.add("launch")
+            for pan in panels:
+                pan.launch()
+        if now > 24.0 and "quick" not in fired:
+            fired.add("quick")
+            # A real job is re-observed every 2 minutes, or once per 5% of its
+            # estimate. Over a job this short that is a single reading, and the
+            # bars would sit still for the whole clip. Forced to 2s here so
+            # there is something to watch; the header says so.
+            for jid in ("rec-train", "rec-benchmark"):
+                subprocess.run([sys.executable, ENGINE, "update", jid,
+                                "--interval", "2s", "--quiet"], capture_output=True)
+        if now > 31.0 and "eta" not in fired:
             fired.add("eta")
-            jid = take.job_id()
-            if jid:
-                subprocess.run([sys.executable, ENGINE, "update", jid, "--eta", "50s",
-                                "--note", "34 epochs", "--quiet"], capture_output=True)
-                take.say()
-                take.say(cc.paint("  $ agent-tqdm update %s --eta 50s" % jid, "run", True))
+            subprocess.run([sys.executable, ENGINE, "update", "rec-train",
+                            "--eta", "45s", "--quiet"], capture_output=True)
+            panels[1].say(cc.paint("  $ agent-tqdm update rec-train --eta 45s",
+                                   "run", True))
+        for pan in panels:
+            pan.drain()
 
-        take.drain()
-        if now - last >= (take.speed / float(args.fps)):
+        if now - last >= (speed / float(args.fps)):
             last = now
-            make_frame(take.frame(), font, cell_w, line_h, size, emoji, fallbacks).save(
+            head = cc.paint("agent-tqdm", "dim", True)
+            if speed > 1:
+                head += cc.paint("   \u25b6\u25b6 %g\u00d7 faster" % speed, "warn", True)
+            head += cc.paint("      probes forced to 2s for this clip "
+                             "(a real job: every 2m, or 5% of its estimate)",
+                             "dim", True)
+            columns = [pan.render(cfg, panel_height) for pan in panels]
+            lines = [head]
+            for row in range(panel_height):
+                lines.append(GAP.join(col[row] for col in columns))
+            lines.append(cc.paint("  " + caption, "run", True))
+            make_frame(lines[:ROWS], font, cell_w, line_h, size, emoji, fallbacks).save(
                 os.path.join(frames, "f%05d.png" % n))
             n += 1
         time.sleep(0.03)

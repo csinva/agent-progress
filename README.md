@@ -15,13 +15,13 @@
 </p>
 
 <p align="center">
-  <img src="demo/agent-tqdm.gif" width="100%" alt="a build runs untracked; a training run gets a bar after 20s; a benchmark crashes with a skull">
+  <img src="demo/agent-tqdm.gif" width="100%" alt="three commands side by side: a build never tracked, a training run with a bar, a benchmark that crashes">
 </p>
 
 <p align="center">
-  <i>A build finishes in four seconds and is never tracked. A training run crosses<br>
-  twenty seconds and gets a bar. A benchmark crosses it too, then dies.<br>
-  A real session, waiting compressed — nothing re-enacted.
+  <i>Three commands running at once. The build finishes in four seconds and is never<br>
+  tracked; the training run and the benchmark both cross twenty seconds and get bars;<br>
+  the benchmark then dies. A real session, waiting compressed — nothing re-enacted.<br>
   Full recording: <a href="demo/agent-tqdm.mov">demo/agent-tqdm.mov</a></i>
 </p>
 
@@ -83,11 +83,14 @@ you lose nothing.
 
 ## See it in action
 
-The clip above is a real session, recorded frame by frame from live job state
-through the same renderer the statusline uses. The commands go through the
-actual hook. Waiting is compressed by capturing fewer frames per second of real
-time, with the multiplier shown on screen — so the 20-second threshold in the
-clip really is 20 seconds.
+The clip above is one real session with three commands running side by side,
+recorded frame by frame from live job state through the same renderer the
+statusline uses. The commands go through the actual hook. Waiting is compressed
+by capturing fewer frames per second of real time, with the multiplier shown on
+screen — so the twenty-second threshold in the clip really is twenty seconds.
+The only thing bent for the recording is the probe cadence, forced to two
+seconds so the bars visibly move over a job that lasts a minute; the header says
+so on screen.
 
 Regenerate it with `python3 demo/record.py`; encoding uses AVFoundation, so no
 ffmpeg is needed.

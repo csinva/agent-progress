@@ -58,7 +58,9 @@ r = ex("printf 'out\\n'; printf 'err\\n' >&2")
 ck("stderr captured", "err" in r.stdout, repr(r.stdout))
 r = ex("printf 'no trailing newline'")
 ck("no trailing newline preserved", r.stdout == "no trailing newline", repr(r.stdout))
-r = ex("printf 'caf\\xc3\\xa9 \\xe2\\x9c\\x93\\n'")
+# octal, not \xNN: hex escapes are a bash extension, and /bin/sh is dash on
+# Debian and Ubuntu, where printf would emit the backslashes literally
+r = ex("printf 'caf\\303\\251 \\342\\234\\223\\n'")
 ck("utf-8 passthrough", "café" in r.stdout and "✓" in r.stdout, repr(r.stdout))
 raw = subprocess.run([sys.executable, ENGINE, "exec", "--shell", "printf 'a\\rb\\n'"],
                      capture_output=True)          # bytes: no newline translation

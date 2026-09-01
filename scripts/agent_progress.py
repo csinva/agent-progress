@@ -509,19 +509,47 @@ def new_id(st, name):
     return "%s-%d" % (base, n)
 
 
-def resolve(st, ref):
-    """Find a job by exact id, then unique prefix, then substring."""
+def resolve(st, ref, mutating=False, any_session=False):
+    """Find a job by exact id, then unique prefix, then substring.
+
+    This session's jobs come first. Ids are global but names are not chosen -
+    they come from the command, so two agents each training something both have
+    a job called `train`, and without this `cancel train` in one of them kills
+    the other's run. That is not a bookkeeping mistake: cancel signals the
+    process group.
+
+    Anything that changes a job refuses to reach into another session unless
+    asked to in as many words. Reading one - `show`, `log` - is allowed, since
+    looking is harmless and sometimes the point."""
     jobs = st["jobs"]
+    here = current_session()
+
+    def own(keys):
+        mine = [k for k in keys if job_belongs_here(jobs[k], here)]
+        return mine or keys
+
+    def guard(jid):
+        # outside a session there is nothing to reach out of: a plain shell owns
+        # the lot, and refusing there would just make the CLI unusable
+        if (mutating and here and not any_session
+                and not job_belongs_here(jobs[jid], here)):
+            raise SystemExit(
+                "%s belongs to another session (%s), so this would reach outside "
+                "this one.\nPass --any-session if that is really what you want."
+                % (jid, (jobs[jid].get("session_id") or "unknown")[:12]))
+        return jid
+
     if ref in jobs:
-        return ref
+        return guard(ref)
     for match in (
         [k for k in jobs if k.startswith(ref)],
         [k for k in jobs if ref.lower() in k.lower()],
     ):
+        match = own(match)
         running = [k for k in match if jobs[k].get("state") in ACTIVE_STATES]
         pool = running or match
         if len(pool) == 1:
-            return pool[0]
+            return guard(pool[0])
         if len(pool) > 1:
             raise SystemExit("ambiguous job ref %r: matches %s" % (ref, ", ".join(sorted(pool))))
     raise SystemExit("no such job: %r (try: agent-progress ls)" % ref)
@@ -1880,7 +1908,29 @@ def enqueue_crash(st, job, now):
         "bridge_id": job.get("bridge_id"),
         "delivered": None,
     })
-    del st["inbox"][:-50]
+    trim_inbox(st)
+
+
+CRASH_KEEP = 50         # the comfortable size of the queue
+CRASH_CEILING = 200     # and the point past which even undelivered ones go
+
+
+def trim_inbox(st):
+    """Keep the queue small without losing anything anyone still needs.
+
+    Dropping the oldest entries is wrong when several agents share the queue: a
+    session that crashes sixty times evicts the one report a quieter session had
+    not yet collected, and that session then never learns its job died. Reports
+    already handed over have done their work and go first."""
+    inbox = st.get("inbox") or []
+    if len(inbox) <= CRASH_KEEP:
+        return
+    pending = [e for e in inbox if not e.get("delivered")]
+    delivered = [e for e in inbox if e.get("delivered")]
+    room = max(0, CRASH_KEEP - len(pending))
+    kept = pending + (delivered[-room:] if room else [])
+    kept.sort(key=lambda e: e.get("ts") or 0)
+    st["inbox"] = kept[-CRASH_CEILING:]
 
 
 ORPHAN_GRACE = 600      # after this, a crash nobody claimed is offered to anyone
@@ -2977,7 +3027,8 @@ def cmd_slurm(args):
 
 def cmd_update(args):
     with state_rw() as st:
-        jid = resolve(st, args.job)
+        jid = resolve(st, args.job, mutating=True,
+                      any_session=getattr(args, "any_session", False))
         job = st["jobs"][jid]
         now = time.time()
         if args.step is not None:
@@ -3025,7 +3076,8 @@ def cmd_update(args):
 
 def cmd_finish(args, state):
     with state_rw() as st:
-        jid = resolve(st, args.job)
+        jid = resolve(st, args.job, mutating=True,
+                      any_session=getattr(args, "any_session", False))
         job = st["jobs"][jid]
         if state == "cancelled" and job.get("pid") and alive(job["pid"]):
             try:
@@ -3077,6 +3129,9 @@ def cmd_ls(args):
                 "rate_per_s": e["rate"], "observations": e["nobs"],
                 "exit_code": j.get("exit_code"),
                 "progress_source": j.get("progress_source"),
+                "session_id": j.get("session_id"),
+                "bridge_id": j.get("bridge_id"),
+                "mine": job_belongs_here(j),
                 "scheduler": (j.get("batch") or {}).get("scheduler"),
                 "scheduler_job_id": (j.get("batch") or {}).get("job_id"),
                 "scheduler_state": j.get("scheduler_state"),
@@ -3148,7 +3203,7 @@ def cmd_rm(args):
             print("removed %d finished job(s)" % len(gone))
             return 0
         for ref in args.job:
-            jid = resolve(st, ref)
+            jid = resolve(st, ref, mutating=True, any_session=args.everywhere)
             del st["jobs"][jid]
             print("removed %s" % jid)
     return 0
@@ -3510,8 +3565,11 @@ def cmd_doctor(args):
     st = state_ro()
     running = [j for j in st["jobs"].values() if j.get("state") in ACTIVE_STATES]
     queued = [j for j in running if j.get("state") == "queued"]
+    mine = [x for x in st["jobs"].values() if job_belongs_here(x)]
     print("jobs       : %d total, %d active (%d queued)"
           % (len(st["jobs"]), len(running), len(queued)))
+    if current_session():
+        print("             %d of them belong to this session" % len(mine))
     for j in running:
         w = j.get("watcher_pid")
         print("  %-16s watcher=%s%s  pid=%s%s" % (
@@ -3634,6 +3692,8 @@ def build_parser():
     sp.add_argument("--pattern")
     sp.add_argument("--quiet", action="store_true")
     sp.add_argument("--force-show", action="store_true")
+    sp.add_argument("--any-session", action="store_true",
+                    help="allow acting on a job another session started")
     monitor_flags(sp)
     sp.set_defaults(fn=cmd_update)
 
@@ -3641,6 +3701,8 @@ def build_parser():
         sp = sub.add_parser(name, help="mark a job %s" % state)
         sp.add_argument("job")
         sp.add_argument("--note")
+        sp.add_argument("--any-session", action="store_true",
+                        help="allow acting on a job another session started")
         if name == "fail":
             sp.add_argument("--exit-code", type=int, default=1)
         sp.set_defaults(fn=(lambda s: (lambda a: cmd_finish(a, s)))(state))

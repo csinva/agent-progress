@@ -196,9 +196,14 @@ print("=== invariants ===")
 with cc.state_rw() as st:
     st["inbox"] = [{"job": "j%d" % i, "ts": time.time(), "delivered": None} for i in range(80)]
     cc.enqueue_crash(st, {"id": "one-more", "exit_code": 1, "started": 1, "ended": 2}, time.time())
-ck("the crash inbox stays capped",
-   len(json.loads(open(STATE).read())["inbox"]) <= 50,
-   str(len(json.loads(open(STATE).read())["inbox"])))
+# Undelivered reports are kept up to a higher ceiling: several sessions share
+# this queue, and trimming to the comfortable size on every append let a noisy
+# session evict the one report a quiet session had not collected yet.
+inbox = json.loads(open(STATE).read())["inbox"]
+ck("the crash inbox stays bounded", len(inbox) <= cc.CRASH_CEILING, str(len(inbox)))
+ck("and undelivered reports are the last to go",
+   sum(1 for e in inbox if not e.get("delivered")) >= 50,
+   "%d undelivered" % sum(1 for e in inbox if not e.get("delivered")))
 with cc.state_rw() as st:
     st["inbox"] = []
 r = run("exec", "--shell", "printf 'a\\000b\\377c\\n'")

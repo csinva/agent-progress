@@ -222,6 +222,66 @@ ck("and from a plain shell it means everything",
    not json.loads(open(sandbox.STATE).read())["jobs"])
 
 print()
+print("=== one agent cannot act on another's job by name ===")
+reset()
+as_session("agent-A", "start", "train", "--eta", "3h", "--monitor", "time", "--no-watch")
+as_session("agent-B", "start", "train", "--eta", "3h", "--monitor", "time", "--no-watch")
+raw = json.loads(open(sandbox.STATE).read())["jobs"]
+ck("the second agent's job gets its own id", sorted(raw) == ["train", "train-2"], str(sorted(raw)))
+r = as_session("agent-B", "cancel", "train")
+ck("cancelling across sessions is refused",
+   r.returncode != 0 and "another session" in (r.stderr + r.stdout), (r.stderr or r.stdout)[:80])
+ck("and the other agent's job is untouched",
+   json.loads(open(sandbox.STATE).read())["jobs"]["train"]["state"] == "running")
+ck("its own job it can cancel", as_session("agent-B", "cancel", "train-2").returncode == 0)
+ck("reading another session's job is allowed",
+   as_session("agent-B", "show", "train").returncode == 0)
+for verb in ("done", "fail", "update"):
+    args = ["update", "train", "--eta", "1h", "--quiet"] if verb == "update" else [verb, "train"]
+    ck("%s is refused across sessions too" % verb,
+       as_session("agent-B", *args).returncode != 0)
+ck("rm by name is refused too", as_session("agent-B", "rm", "train").returncode != 0)
+ck("--any-session is the way through",
+   as_session("agent-B", "cancel", "train", "--any-session").returncode == 0)
+reset()
+as_session("agent-A", "start", "solo", "--eta", "3h", "--monitor", "time", "--no-watch")
+ck("and a plain shell is never restricted",
+   as_session(None, "cancel", "solo").returncode == 0)
+
+print()
+print("=== a noisy agent cannot bury a quiet one's crash ===")
+reset()
+queue_crash("quiet-agents-job", "agent-quiet")
+for i in range(60):
+    with cc.state_rw() as st:
+        cc.enqueue_crash(st, {"id": "noisy-%d" % i, "exit_code": 1, "started": 1,
+                              "ended": 2, "session_id": "agent-noisy"}, time.time())
+inbox = json.loads(open(sandbox.STATE).read())["inbox"]
+ck("the quiet agent's report is still queued",
+   any(e.get("job") == "quiet-agents-job" for e in inbox), "%d entries" % len(inbox))
+ck("and it is still the quiet agent that gets it",
+   "quiet-agents-job" in context("agent-quiet"))
+with cc.state_rw() as st:
+    for e in st["inbox"][:-5]:
+        e["delivered"] = {"session_id": "x", "ts": time.time()}
+    before = sum(1 for e in st["inbox"] if not e.get("delivered"))
+for i in range(30):
+    with cc.state_rw() as st:
+        cc.enqueue_crash(st, {"id": "more-%d" % i, "exit_code": 1, "started": 1,
+                              "ended": 2, "session_id": "agent-noisy"}, time.time())
+inbox = json.loads(open(sandbox.STATE).read())["inbox"]
+ck("reports already handed over are the ones dropped",
+   sum(1 for e in inbox if not e.get("delivered")) >= before,
+   "%d undelivered" % sum(1 for e in inbox if not e.get("delivered")))
+for i in range(300):
+    with cc.state_rw() as st:
+        cc.enqueue_crash(st, {"id": "flood-%d" % i, "exit_code": 1, "started": 1,
+                              "ended": 2, "session_id": "agent-flood"}, time.time())
+inbox = json.loads(open(sandbox.STATE).read())["inbox"]
+ck("but the queue is still bounded", len(inbox) <= cc.CRASH_CEILING, "%d entries" % len(inbox))
+reset()
+
+print()
 print("=== the escape hatches still work ===")
 reset()
 for a in ("agent-A", "agent-B"):

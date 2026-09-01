@@ -236,10 +236,13 @@ SLURM_STUBS = {
 date +%s > "$AP_FAKE_SLURM/t0"
 (
   sleep @QUEUED@
-  for i in 1 2 3; do
+  for i in 1 2; do
     echo "warmup $i/3" >> "$PWD/slurm-81734.out"
     sleep 3
   done
+  sleep 3
+  # it dies during the third pass, so the bar stops at two of three rather than
+  # filling up first - a skull over a complete bar reads like it succeeded
   echo "torch.cuda.OutOfMemoryError: unable to allocate 8.00 GiB on cuda:0" \
       >> "$PWD/slurm-81734.out"
 ) >/dev/null 2>&1 &
@@ -486,9 +489,10 @@ def main():
     height = PAD * 2 + line_h * ROWS
     size = (width + (width % 2), height + (height % 2))
     emoji = {}
-    g = emoji_glyph("\U0001f480", int(line_h * 0.78))
-    if g:
-        emoji["\U0001f480"] = g
+    for ch in ("\U0001f480", "\u23f3"):     # the skull, and the hourglass a queue gets
+        g = emoji_glyph(ch, int(line_h * 0.78))
+        if g:
+            emoji[ch] = g
     fallbacks = build_fallbacks(cfg["spinner"] + "\u2713\u2192\u00b7\u25b6\u2502\u2500",
                                 args.font_size)
 
@@ -541,7 +545,9 @@ def main():
                 fired.add(key)
                 pan.reply(pan.spec["reply"], "run")
             done_key = "done%d" % idx
-            if (j and j.get("state") not in (None, "running")
+            # queued is not finished: a job waiting for nodes has not ended,
+            # and answering as though it had puts the obituary before the job
+            if (j and j.get("state") not in (None, "running", "queued")
                     and done_key not in fired and pan.spec.get("done_reply")):
                 fired.add(done_key)
                 pan.reply(pan.spec["done_reply"],

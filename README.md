@@ -63,6 +63,19 @@ script wires the statusline and puts `agent-tqdm` on your `PATH`; it backs up
 `~/.claude/settings.json` first, and `--uninstall` reverts it. Restart Claude
 Code afterwards.
 
+### Installing into sessions that are already open
+
+`/reload-plugins` activates the skills and hooks in a running session, and
+tracking starts working there immediately — jobs are caught, bars are drawn into
+the state file, `agent-tqdm ls` and the completion notification behave normally.
+
+The one thing it cannot do is show the bar. A session reads its statusline
+setting once, when it starts, so a session that was already open has no place to
+draw one however it is reloaded. Restart Claude Code for that. A job tracked
+from such a session says so when it starts rather than leaving you wondering
+where the bar went, and `agent-tqdm doctor` will tell you which kind of session
+you are in.
+
 When no job is running the statusline falls back to `⏺ model · dir · branch`, so
 you lose nothing.
 

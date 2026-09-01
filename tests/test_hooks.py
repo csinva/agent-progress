@@ -8,6 +8,7 @@ twice, misbehaves in ways the CLI never would.
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -161,6 +162,66 @@ for label, args in [("exec", ["exec", "--cwd", "/no/such/dir", "--shell", "echo 
     ck("%s reports a missing --cwd cleanly" % label,
        r.returncode != 0 and "Traceback" not in r.stderr and "no such directory" in r.stderr,
        r.stderr.strip()[-90:])
+cli("rm", "--all")
+
+print()
+print("=== loading into a session that was already running ===")
+cli("rm", "--all")
+with cc.state_rw() as st:
+    st["sessions"] = {}
+
+env_old = dict(os.environ, CLAUDE_CODE_SESSION_ID="was-already-open")
+r = subprocess.run([sys.executable, ENGINE, "start", "s1", "--eta", "3h",
+                    "--monitor", "time", "--no-watch"],
+                   capture_output=True, text=True, env=env_old)
+warned = "started before agent-tqdm was loaded" in r.stdout
+ck("a job from an older session explains the missing bar",
+   warned or not cc.statusline_wired(), r.stdout[-120:])
+ck("doctor says which kind of session this is",
+   "started BEFORE" in subprocess.run([sys.executable, ENGINE, "doctor"],
+                                      capture_output=True, text=True,
+                                      env=env_old).stdout or not cc.statusline_wired())
+hook(STATUS, "SessionStart", {"session_id": "was-already-open"})
+r2 = subprocess.run([sys.executable, ENGINE, "start", "s2", "--eta", "3h",
+                     "--monitor", "time", "--no-watch"],
+                    capture_output=True, text=True, env=env_old)
+ck("and stops saying it once the session is known",
+   "started before agent-tqdm was loaded" not in r2.stdout, r2.stdout[-120:])
+ck("session_is_new is false for a recorded session",
+   not cc.session_is_new("was-already-open"))
+ck("session_is_new is true for one never seen", cc.session_is_new("never-seen-before"))
+ck("no session id means no claim either way", not cc.session_is_new(None))
+cli("rm", "--all")
+
+print()
+print("=== the wrapped command does not depend on PATH ===")
+launcher = cc.launcher_prefix()
+ck("the launcher is an absolute path", launcher.strip("'").startswith("/"), launcher)
+wrapped = cc.wrap_command("echo ran", "t", after=20)
+for label, path in [("without ~/.local/bin",
+                     ":".join(d for d in os.environ["PATH"].split(":")
+                              if not d.endswith("/.local/bin"))),
+                    ("with no PATH at all", "")]:
+    r = subprocess.run(["/bin/sh", "-c", wrapped], capture_output=True, text=True,
+                       env=dict(os.environ, PATH=path))
+    ck("a rewritten command still runs %s" % label,
+       r.returncode == 0 and "ran" in r.stdout, "exit=%d %s" % (r.returncode, r.stderr[:50]))
+
+print()
+print("=== the session a job belongs to is recorded ===")
+cli("rm", "--all")
+for name, sid in [("other", "sessB"), ("mine", "sessA")]:
+    subprocess.run([sys.executable, ENGINE, "start", name, "--eta", "3h",
+                    "--monitor", "time", "--no-watch"], capture_output=True,
+                   env=dict(os.environ, CLAUDE_CODE_SESSION_ID=sid))
+    time.sleep(0.1)
+raw = json.loads(open(cc.STATE).read())["jobs"]
+ck("a job records the session that started it",
+   raw["mine"]["session_id"] == "sessA" and raw["other"]["session_id"] == "sessB",
+   str({k: v.get("session_id") for k, v in raw.items()}))
+out = statusline({"session_id": "sessA"})
+names = [re.sub(r"\x1b\[[0-9;]*m", "", l).split()[1] for l in out.splitlines() if l.strip()]
+ck("this session's jobs come first", names and names[0] == "mine", str(names))
 cli("rm", "--all")
 
 print()

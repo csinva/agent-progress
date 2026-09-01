@@ -57,9 +57,10 @@ PYEOF
 
 if [ "$MODE" != "--uninstall" ]; then
   mkdir -p "$BINDIR"
+  PY="$(command -v python3 || echo /usr/bin/python3)"
   cat > "$BINDIR/agent-tqdm" <<EOF
 #!/bin/sh
-exec python3 "$ENGINE" "\$@"
+exec "$PY" "$ENGINE" "\$@"
 EOF
   chmod +x "$BINDIR/agent-tqdm"
   echo "shim installed -> $BINDIR/agent-tqdm"
@@ -73,4 +74,16 @@ else
 fi
 
 echo
-echo "Restart Claude Code (or run /reload-plugins) to pick up the change."
+if [ "$MODE" != "--uninstall" ]; then
+  cat <<'MSG'
+Sessions already running:
+  /reload-plugins   brings in the skills and hooks, so tracking starts working
+  restart           needed for the bar itself - a session reads its statusline
+                    setting once, when it starts, so already-open sessions
+                    cannot show one however they are reloaded
+Either way `agent-tqdm ls` and the desktop notification work immediately, and
+a job tracked from an older session says so when it starts.
+MSG
+else
+  echo "Run /reload-plugins in open sessions to drop the hooks."
+fi

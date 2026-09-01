@@ -146,6 +146,26 @@ def should_send(cc, cfg, session_id, signature):
         return True
 
 
+def remember_session(cc, session_id):
+    """Note that this session began with the plugin already loaded.
+
+    Anything not in this list was already running when the plugin arrived, and
+    its statusline - read once, at startup - cannot show a bar."""
+    if not session_id:
+        return
+    try:
+        import time as _t
+        with cc.state_rw() as st:
+            seen = st.setdefault("sessions", {})
+            now = _t.time()
+            for k, v in list(seen.items()):
+                if now - (v or 0) > 30 * 86400:
+                    del seen[k]
+            seen[session_id] = now
+    except Exception:
+        pass
+
+
 def revive_watchers(cc):
     """A watcher killed by a reboot leaves a frozen bar; restart it.
 
@@ -196,6 +216,7 @@ def main():
         return 0
 
     if event == "SessionStart":
+        remember_session(cc, session_id)
         revive_watchers(cc)
 
     blocks = collect_crashes(cc, cfg, session_id)

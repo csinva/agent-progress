@@ -319,6 +319,9 @@ def _sanitize(st):
     for key in ("auto_track_seen", "context_sent"):
         if not isinstance(st.get(key), dict):
             st[key] = {}
+    for key in ("sessions",):
+        if not isinstance(st.get(key), dict):
+            st[key] = {}
     st.setdefault("version", STATE_VERSION)
     return st
 
@@ -370,6 +373,37 @@ def _prune(st):
         j = st["jobs"][jid]
         if j.get("state") != "running" and (j.get("ended") or 0) < cutoff:
             del st["jobs"][jid]
+
+
+def current_session():
+    """The session this process belongs to.
+
+    Claude Code exports CLAUDE_CODE_SESSION_ID; the shorter name was a guess,
+    and reading it meant every job recorded a session of None, which quietly
+    disabled putting the current session's jobs first on the statusline."""
+    return (os.environ.get("CLAUDE_CODE_SESSION_ID")
+            or current_session())
+
+
+def session_is_new(session_id, st=None):
+    """True when this session started before the plugin's hooks were loaded.
+
+    SessionStart records every session that begins with the plugin already
+    active. A session that never got recorded was already running when the
+    plugin arrived - which matters, because the statusline is read from
+    settings.json when a session starts, so no bar will appear in it."""
+    if not session_id:
+        return False
+    st = st if st is not None else state_ro()
+    return session_id not in (st.get("sessions") or {})
+
+
+def statusline_wired():
+    try:
+        with open(os.path.join(HOME, ".claude", "settings.json")) as f:
+            return "agent_tqdm" in json.dumps(json.load(f).get("statusLine", {}))
+    except Exception:
+        return False
 
 
 def slug(text):
@@ -1160,11 +1194,16 @@ def classify_command(command, tool_input=None, cfg=None):
 
 
 def launcher_prefix():
-    """How to invoke this tool from a shell: the shim if it is on PATH, else
-    this very file, so wrapping works on a machine that never ran the installer."""
-    for d in (os.environ.get("PATH") or "").split(os.pathsep):
-        if d and os.path.exists(os.path.join(d, "agent-tqdm")):
-            return "agent-tqdm"
+    """How to invoke this tool from a shell, as an absolute path.
+
+    Never the bare name. This string is handed back to Claude Code and run by
+    the session's own shell, whose PATH is not this process's - a session that
+    was already running when the shim was installed still has the older one.
+    A name that does not resolve there would fail the whole command, which is
+    the user's command, not ours."""
+    shim = os.path.join(os.path.expanduser("~"), ".local", "bin", "agent-tqdm")
+    if os.path.isfile(shim) and os.access(shim, os.X_OK):
+        return shlex.quote(shim)
     return "%s %s" % (shlex.quote(sys.executable), shlex.quote(os.path.abspath(__file__)))
 
 
@@ -1796,7 +1835,7 @@ def _new_job(args, cmd=None, log=None, pid=None):
         "force_show": bool(getattr(args, "force_show", False)),
         "auto_launched": bool(getattr(args, "auto_launched", False)),
         "samples": [],
-        "session_id": os.environ.get("CLAUDE_SESSION_ID"),
+        "session_id": current_session(),
         "cwd": os.getcwd(),
     }
     return job
@@ -1812,6 +1851,11 @@ def _announce(job):
         describe_monitor(job), fmt_short(iv),
         " (5%% of the %s estimate)" % fmt_short(est)
         if est and iv > cfg.get("min_interval_seconds", 120) else ""))
+    if session_is_new(current_session()) and statusline_wired():
+        print("  Note: this session started before agent-tqdm was loaded, so its")
+        print("  statusline was fixed at startup and no bar will appear here.")
+        print("  Restart Claude Code to get one; tracking itself works either way,")
+        print("  and `agent-tqdm ls` shows this job now.")
     if job.get("auto_launched"):
         print("  Tracked automatically, and now running detached - this command will not")
         print("  print its output here. To work with it:")
@@ -2039,7 +2083,7 @@ def _handoff(command, name, log, pid, started, sent, cfg, args):
             "monitor": {"kind": "auto"}, "interval_override": None,
             "est_total_s": None, "initial_est_total_s": None,
             "log_offset": 0, "force_show": False, "auto_launched": True,
-            "samples": [], "session_id": os.environ.get("CLAUDE_SESSION_ID"),
+            "samples": [], "session_id": current_session(),
             "cwd": args.cwd or os.getcwd(),
         }
     wpid = spawn_watcher(jid)
@@ -2343,7 +2387,7 @@ def cmd_demo(args):
 def cmd_inbox(args):
     """Crash reports waiting to be handed to a Claude session."""
     if args.drain:
-        ev = take_crash(os.environ.get("CLAUDE_SESSION_ID"))
+        ev = take_crash(current_session())
         if not ev:
             print("no undelivered crash reports")
             return 0
@@ -2583,6 +2627,15 @@ def cmd_doctor(args):
     except Exception:
         pass
     print("autotrack  : %s" % cfg["auto_track"])
+    sid = current_session()
+    if not sid:
+        print("session    : not running inside Claude Code")
+    elif session_is_new(sid):
+        print("session    : %s - started BEFORE the plugin was loaded, so this\n"
+              "             session's statusline cannot show a bar. Tracking works;\n"
+              "             restart Claude Code for the bar." % sid[:8])
+    else:
+        print("session    : %s - started with the plugin loaded" % sid[:8])
     print("statusline : %s" % ("wired into settings.json" if wired else
                                "NOT wired - run scripts/install-statusline.sh"))
     print("config     : %s" % json.dumps(cfg))

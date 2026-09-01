@@ -75,9 +75,9 @@ def job_lines(cc, cfg):
         st = cc.state_ro()
         running = [j for j in st["jobs"].values() if j.get("state") == "running"]
     except Exception:
-        return [], 0
+        return [], 0, ""
     if not running:
-        return [], 0
+        return [], 0, ""
     shown = [j for j in running if cc.job_visible(j, cfg)]
     hidden = len(running) - len(shown)
     lines = []
@@ -109,7 +109,40 @@ def job_lines(cc, cfg):
             bits.append("TRACKED AUTOMATICALLY, still has no estimate - set one with "
                         "`agent-tqdm update %s --eta <duration>`" % j.get("id"))
         lines.append("- " + ", ".join(bits))
-    return lines, hidden
+    # what counts as "the picture changed": which jobs exist, their state, and
+    # whether each has an estimate yet. Not progress, which Claude can ask for.
+    signature = ";".join(sorted(
+        "%s/%s/%s" % (j.get("id"), j.get("state"), bool(j.get("eta_end")))
+        for j in shown)) + "|%d" % hidden
+    return lines, hidden, signature
+
+
+def should_send(cc, cfg, session_id, signature):
+    """Whether this summary is worth spending context on.
+
+    Job status was previously re-sent on every single prompt, which is a steady
+    tax for repeating something Claude already knows. Now it goes out when the
+    picture actually changes - a job appears, finishes, or gains an estimate -
+    and otherwise no more than once per `context_min_interval_seconds`."""
+    import time
+    interval = cfg["context_min_interval_seconds"]
+    if not interval:
+        return True
+    key = session_id or "-"
+    try:
+        with cc.state_rw() as st:
+            seen = st.setdefault("context_sent", {})
+            now = time.time()
+            for k, v in list(seen.items()):
+                if now - (v.get("ts") or 0) > 24 * 3600:
+                    del seen[k]
+            last = seen.get(key) or {}
+            if last.get("sig") == signature and (now - (last.get("ts") or 0)) < interval:
+                return False
+            seen[key] = {"sig": signature, "ts": now}
+            return True
+    except Exception:
+        return True
 
 
 def revive_watchers(cc):
@@ -159,7 +192,12 @@ def main():
         revive_watchers(cc)
 
     blocks = collect_crashes(cc, cfg, session_id)
-    lines, hidden = job_lines(cc, cfg)
+    lines, hidden, signature = job_lines(cc, cfg)
+
+    # a crash is always worth sending; a routine status update is not
+    if not blocks and (lines or hidden) and not should_send(
+            cc, cfg, session_id, signature):
+        return 0
 
     parts = list(blocks)
     if lines:

@@ -125,12 +125,18 @@ CONFIG_SPEC = {
     "notify": _spec("behavior", True, "desktop notification on completion (macOS)", "bool"),
     "crash_alert": _spec("behavior", True,
                          "interrupt Claude when a job crashes, so it tells you right away", "bool"),
+    "context_min_interval_seconds": _spec(
+        "behavior", 300,
+        "least time between unchanged job summaries sent to Claude", lo=0),
 
     # Automatic tracking: catch long jobs as they are launched, with no
     # /agent-tqdm:track needed. See `agent-tqdm autotrack`.
-    "auto_track": _spec("auto", "wrap",
+    "auto_track": _spec("auto", "defer",
                         "what to do when a long-running command is launched", "str",
-                        choices=["wrap", "instruct", "off"]),
+                        choices=["defer", "instruct", "off"]),
+    "auto_track_after_seconds": _spec(
+        "auto", 20,
+        "only start tracking once a command has run this long (0 = immediately)", lo=0),
     "auto_track_timeout_seconds": _spec(
         "auto", 120,
         "treat a command given at least this long a timeout as long-running", lo=0),
@@ -167,6 +173,7 @@ CONFIG_PRESETS = {
     "quiet": {"min_duration_seconds": 600, "max_jobs": 1, "notify": False},
     "manual": {"auto_track": "off"},
     "guided": {"auto_track": "instruct"},
+    "eager": {"auto_track_after_seconds": 0},
 }
 
 
@@ -197,6 +204,8 @@ def coerce(key, value):
         value = float(value)
     else:
         value = str(value)
+    if key == "auto_track" and value == "wrap":
+        value = "defer"          # the old name, kept working
     if spec["choices"] and value not in spec["choices"]:
         raise ValueError("must be one of: %s" % ", ".join(str(c) for c in spec["choices"]))
     if spec["lo"] is not None and value < spec["lo"]:
@@ -928,11 +937,15 @@ AUTO_TRACK_PATTERNS = [
     (r"\bpython3?\s+-m\s+(?:torch\.distributed|accelerate|vllm)\b", "a distributed run"),
     (r"\bwandb\s+(?:agent|sweep)\b", "a wandb sweep"),
     (r"\b(?:optuna|ray)\s+\w+", "a hyperparameter sweep"),
-    # builds that are usually slow. Ordinary builds and test suites are
-    # deliberately absent: they are more often quick than not, Claude generally
-    # wants their output inline, and anything under two minutes would not earn
-    # a bar anyway. AUTO_TRACK_OPT_IN below has them for whoever disagrees.
-    (r"\bcargo\s+build\b[^|;&]*--release", "a release build"),
+    # builds and test suites. Being often quick used to be a reason to leave
+    # these out; with deferral it is not, because a run that finishes inside
+    # the threshold is never tracked at all.
+    (r"\bcargo\s+(?:build|test|bench)\b", "a cargo build"),
+    (r"\bmake\b(?!\s+(?:clean|help|list))", "make"),
+    (r"\b(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:build|test)\b", "a JS build or test"),
+    (r"\b(?:pytest|py\.test)\b", "a pytest run"),
+    (r"\bgo\s+(?:test|build)\b", "a go build or test"),
+    (r"\b(?:tox|nox)\b", "tox or nox"),
     (r"\bdocker(?:\s+compose)?\s+build\b", "a docker build"),
     (r"\bdocker\s+compose\s+up\b", "docker compose up"),
     (r"\bbazel\s+(?:build|test)\b", "bazel"),
@@ -955,18 +968,6 @@ AUTO_TRACK_PATTERNS = [
     (r"\b(?:wget|curl)\b[^|;&]*\s-[a-zA-Z]*[oO]\b", "a download"),
     (r"\bgit\s+clone\b", "a git clone"),
     (r"\bsleep\s+(?:[2-9]\d\d|\d{4,})\b", "a long sleep"),
-]
-
-# Not on by default - each is quick as often as it is slow. Copy any you want:
-#   agent-tqdm config --set auto_track_patterns='\bpytest\b;\bmake\b'
-AUTO_TRACK_OPT_IN = [
-    (r"\b(?:pytest|py\.test)\b", "a pytest run"),
-    (r"\b(?:npm|pnpm|yarn)\s+(?:run\s+)?test\b", "a JS test run"),
-    (r"\bgo\s+test\b", "go test"),
-    (r"\b(?:tox|nox)\b", "tox or nox"),
-    (r"\bmake\b(?!\s+(?:clean|help|list))", "make"),
-    (r"\b(?:npm|pnpm|yarn)\s+(?:run\s+)?build\b", "a JS build"),
-    (r"\bcargo\s+(?:build|test)\b", "a cargo build"),
 ]
 
 # Checked before anything else. Anything matching here is never auto-tracked.
@@ -1076,10 +1077,20 @@ def launcher_prefix():
     return "%s %s" % (shlex.quote(sys.executable), shlex.quote(os.path.abspath(__file__)))
 
 
-def wrap_command(command, name, launcher=None):
-    """The `agent-tqdm run` form of a command, for transparent wrapping."""
-    return "%s run --name %s --auto-launched -- %s" % (
-        launcher or launcher_prefix(), shlex.quote(name), command)
+def wrap_command(command, name, launcher=None, after=None, background=False):
+    """The tracked form of a command.
+
+    The original is passed as a single quoted string, never interpolated raw:
+    a command containing `&&`, `|` or a redirect would otherwise be cut in half,
+    with the tail applying to the wrapper instead of to the command."""
+    launcher = launcher or launcher_prefix()
+    if background:
+        # already detached by the caller, so there is nothing to wait and see
+        return "%s run --name %s --auto-launched -- %s" % (
+            launcher, shlex.quote(name), shlex.quote(command))
+    opts = "" if after is None else " --after %s" % shlex.quote(str(after))
+    return "%s exec --name %s%s --shell %s" % (
+        launcher, shlex.quote(name), opts, shlex.quote(command))
 
 
 def auto_seen(command, session_id, remember=True, ttl=6 * 3600):
@@ -1758,6 +1769,122 @@ def cmd_run(args):
     return 0
 
 
+def _pump(path, offset, stream):
+    """Copy new bytes from the log to a stream, so the command's output appears
+    as it would have if nothing were wrapping it."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            chunk = f.read()
+    except OSError:
+        return offset
+    if chunk:
+        try:
+            stream.write(chunk.decode("utf-8", "replace"))
+            stream.flush()
+        except Exception:
+            pass
+    return offset + len(chunk)
+
+
+def cmd_exec(args):
+    """Run a command normally, and start tracking it only if it turns out to be slow.
+
+    This is what keeps the plugin free. A command that finishes inside the
+    threshold is untouched: its output is forwarded, its exit code is passed
+    through, no job is created, nothing is written, and Claude is told nothing.
+    Only once a command has actually proven itself long-running does any of the
+    machinery - the bar, the estimate, the reminders - come into existence.
+    """
+    cfg = load_config()
+    after = parse_duration(args.after) if args.after else cfg["auto_track_after_seconds"]
+    command = args.shell
+    if not command:
+        parts = list(args.command)
+        if parts and parts[0] == "--":
+            parts = parts[1:]
+        if not parts:
+            raise SystemExit("nothing to run")
+        command = (" ".join(shlex.quote(p) for p in parts)
+                   if len(parts) > 1 else parts[0])
+
+    ensure_dirs()
+    name = args.name or suggest_job_name(command)
+    stamp = "%s-%d" % (slug(name), os.getpid())
+    log = os.path.join(LOGS, "%s.log" % stamp)
+    exitf = log + ".exit"
+    for stale in (log, exitf):
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
+
+    started = time.time()
+    proc = subprocess.Popen(
+        ["/bin/sh", "-c", "( %s ) > %s 2>&1; echo $? > %s"
+         % (command, shlex.quote(log), shlex.quote(exitf))],
+        cwd=args.cwd or os.getcwd(), stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    sent = 0
+    while True:
+        sent = _pump(log, sent, sys.stdout)
+        if proc.poll() is not None:
+            break
+        if after and (time.time() - started) >= after:
+            return _handoff(command, name, log, proc.pid, started, sent, cfg, args)
+        time.sleep(0.08)
+
+    _pump(log, sent, sys.stdout)          # whatever it wrote on the way out
+    code = proc.returncode
+    try:
+        with open(exitf) as f:
+            code = int(f.read().strip())
+    except Exception:
+        pass
+    if not args.keep_log:
+        for f in (log, exitf):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+    return code
+
+
+def _handoff(command, name, log, pid, started, sent, cfg, args):
+    """The command outlived the threshold: register it and let go of it."""
+    with state_rw() as st:
+        jid = new_id(st, name)
+        st["jobs"][jid] = {
+            "id": jid, "desc": args.desc, "cmd": command, "log": log, "pid": pid,
+            "unit": "it", "total": None, "total_locked": False, "step": None,
+            "units": None, "pct": None, "state": "running", "exit_code": None,
+            "started": started, "updated": time.time(), "ended": None,
+            "eta_end": None, "eta_prior_s": None, "note": None, "pattern": None,
+            "monitor": {"kind": "auto"}, "interval_override": None,
+            "est_total_s": None, "initial_est_total_s": None,
+            "log_offset": 0, "force_show": False, "auto_launched": True,
+            "samples": [], "session_id": os.environ.get("CLAUDE_SESSION_ID"),
+            "cwd": args.cwd or os.getcwd(),
+        }
+    wpid = spawn_watcher(jid)
+    with state_rw() as st:
+        st["jobs"][jid]["watcher_pid"] = wpid
+
+    floor = fmt_short(cfg["min_duration_seconds"])
+    print("\n[agent-tqdm] Still going after %s, so it is now tracked as '%s' and left\n"
+          "running in the background. Its remaining output goes to the log, not here.\n"
+          "  agent-tqdm log %s -n 40      what it has printed\n"
+          "  agent-tqdm ls --json            progress and state\n"
+          "If you expect it to run for more than about %s, give it an estimate so the\n"
+          "bar can say when it will finish. If not, just carry on - it needs nothing.\n"
+          "  agent-tqdm update %s --eta <duration>"
+          % (fmt_short(time.time() - started), jid, jid, floor, jid))
+    return 0
+
+
 def cmd_update(args):
     with state_rw() as st:
         jid = resolve(st, args.job)
@@ -2068,21 +2195,18 @@ def cmd_autotrack(args):
     cfg = load_config()
     if not args.command:
         print("Auto-tracking is %s.\n" % cfg["auto_track"])
-        print("  wrap      rewrite the command silently so it is tracked, and let it")
-        print("            run; Claude fills in the estimate afterwards (default)")
-        print("  instruct  interrupt the command once and ask Claude to relaunch it")
-        print("            through agent-tqdm, with an estimate and a monitor already")
+        print("  defer     run it normally, and track it only if it is still going")
+        print("            after %s; one that finishes first costs nothing (default)"
+              % fmt_short(cfg["auto_track_after_seconds"]))
+        print("  instruct  interrupt it before it starts and ask Claude to relaunch")
+        print("            it through agent-tqdm, with an estimate already chosen")
         print("  off       never intervene\n")
         print("Caught when a command is backgrounded, is given a timeout of %s or\n"
               "more, or matches one of %d built-in patterns.\n"
               % (fmt_short(cfg["auto_track_timeout_seconds"]), len(AUTO_TRACK_PATTERNS)))
         print("  agent-tqdm autotrack '<command>'    what would happen to this command")
         print("  agent-tqdm config --set auto_track=off")
-        print("  agent-tqdm config --set auto_track_ignore='^my-script'\n")
-        print("Test suites and ordinary builds are left alone by default - they are")
-        print("quick as often as they are slow. To catch them too:\n")
-        print("  agent-tqdm config --set auto_track_patterns=%s"
-              % shlex.quote(";".join(rx for rx, _l in AUTO_TRACK_OPT_IN)))
+        print("  agent-tqdm config --set auto_track_ignore='^my-script'")
         return 0
 
     command = " ".join(args.command)
@@ -2098,8 +2222,11 @@ def cmd_autotrack(args):
     if verdict["track"]:
         print("  %-12s %s" % ("name", verdict["name"]))
         print("  %-12s %s" % ("mode", cfg["auto_track"]))
-        if cfg["auto_track"] == "wrap":
-            print("  %-12s %s" % ("becomes", wrap_command(command, verdict["name"])))
+        if cfg["auto_track"] == "defer":
+            print("  %-12s %s" % ("becomes", wrap_command(
+                command, verdict["name"], after=cfg["auto_track_after_seconds"])))
+            print("  %-12s only tracked if still running after %s"
+                  % ("", fmt_short(cfg["auto_track_after_seconds"])))
     return 0
 
 
@@ -2322,6 +2449,17 @@ def build_parser():
     monitor_flags(sp)
     sp.add_argument("command", nargs=argparse.REMAINDER, help="-- the command to run")
     sp.set_defaults(fn=cmd_run)
+
+    sp = sub.add_parser("exec", help="run a command, tracking it only if it proves slow")
+    sp.add_argument("--after", help="start tracking after this long (default: config)")
+    sp.add_argument("--name", help="job name if it does get tracked")
+    sp.add_argument("--shell", help="the command, as one string, run with /bin/sh -c")
+    sp.add_argument("--cwd")
+    sp.add_argument("--desc")
+    sp.add_argument("--keep-log", action="store_true",
+                    help="keep the capture file even if no job was created")
+    sp.add_argument("command", nargs=argparse.REMAINDER)
+    sp.set_defaults(fn=cmd_exec)
 
     sp = sub.add_parser("start", help="track an already-running job (by pid and/or log)")
     sp.add_argument("name")

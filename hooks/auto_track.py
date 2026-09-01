@@ -6,12 +6,12 @@ bar if somebody remembers to ask for one.
 
 Two modes, set by the `auto_track` setting:
 
-  instruct  (default) interrupt the command once and tell Claude to relaunch it
-            through agent-tqdm. Costs one round-trip and gains the two things
-            only a model can supply: an estimate of how long the job will take,
-            and a choice of what to watch for progress.
-  wrap      rewrite the command silently. No round-trip, but the job starts
-            with no estimate until Claude sets one.
+  defer     (default) run the command normally, and start tracking it only if
+            it is still going after `auto_track_after_seconds`. A command that
+            finishes first is untouched and costs nothing at all - no job, no
+            message, no tokens.
+  instruct  interrupt the command before it starts and tell Claude to relaunch
+            it through agent-tqdm, with an estimate and a monitor chosen first.
 
 Any command is interrupted at most once per session, so a command deliberately
 re-run untracked is left alone the second time.
@@ -111,17 +111,22 @@ def main():
     except Exception:
         pass
 
-    if cfg["auto_track"] == "wrap":
-        wrapped = cc.wrap_command(command, verdict["name"])
+    if cfg["auto_track"] == "defer":
+        background = bool(tool_input.get("run_in_background"))
+        wrapped = cc.wrap_command(
+            command, verdict["name"],
+            after=None if background else cfg["auto_track_after_seconds"],
+            background=background)
+        updated = dict(tool_input, command=wrapped)
+        if background:
+            updated["run_in_background"] = False   # agent-tqdm detaches it itself
         emit({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             # deliberately no permissionDecision: the rewritten command still
-            # goes through the normal permission flow, so wrapping cannot be
-            # used to slip a command past approval
-            "updatedInput": dict(tool_input, command=wrapped,
-                                 run_in_background=False),
-        }, "systemMessage": "agent-tqdm: tracking '%s' (%s)"
-                            % (verdict["name"], verdict["why"])})
+            # goes through the normal permission flow, so this cannot be used
+            # to slip a command past approval
+            "updatedInput": updated,
+        }})
         return 0
 
     emit({"hookSpecificOutput": {

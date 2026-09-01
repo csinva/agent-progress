@@ -133,6 +133,7 @@ agent-tqdm watch                 # live dashboard for a second pane
 agent-tqdm inbox                 # crash reports
 agent-tqdm monitors              # explain the monitor kinds
 agent-tqdm autotrack '<cmd>'     # would this be tracked automatically?
+agent-tqdm exec --after 20s -- <cmd>   # run it, track it only if it is slow
 agent-tqdm preview               # see your settings rendered
 agent-tqdm demo                  # simulated job, end to end
 agent-tqdm doctor                # check the install
@@ -143,70 +144,67 @@ records the real exit code.
 
 ---
 
-## It triggers itself
+## It triggers itself, and costs nothing until it has to
 
-You do not have to ask for a progress bar. When a long-running command is
-launched through Claude Code, a `PreToolUse` hook catches it and it gets tracked
-— no slash command, no "please track this".
+You never ask for a progress bar. Long commands are caught by a `PreToolUse`
+hook — but catching one is not the same as tracking it.
 
-A command is caught when **any** of these is true:
+A caught command is wrapped so that **it runs exactly as it would have**: same
+output, streamed as it appears, same exit code. If it finishes within **20
+seconds**, that is the end of it. No job is created, no file is written, nothing
+is said to Claude, and no tokens are spent. The overwhelming majority of
+commands land here.
 
-- it was launched in the background,
-- it was given a timeout of two minutes or more — whoever wrote the command has
-  already said it is slow,
-- it matches one of ~30 built-in patterns: training scripts, `torchrun`,
-  `accelerate launch`, `deepspeed`, sweeps, `spark-submit`, `terraform apply`,
-  `ansible-playbook`, `docker build`, `rsync`, `aws s3 sync`, `huggingface-cli
-  download`, `dvc repro`, `dbt run`, `pg_restore`, `git clone`, and so on.
-
-Test suites and ordinary builds — `pytest`, `npm test`, `make`, `cargo build` —
-are **not** caught by default. They are quick as often as they are slow, Claude
-usually wants their output in front of it, and anything under two minutes would
-not earn a bar anyway. They are still caught if you background them or give them
-a long timeout, and you can opt in permanently:
+Only a command still running after the threshold is handed off: it keeps going
+in the background, a bar appears, and Claude is told once — at which point it
+can spend a moment on an estimate, because now there is something worth
+estimating.
 
 ```bash
-agent-tqdm config --set auto_track_patterns='\bpytest\b;\bmake\b;\bgo\s+test\b'
+agent-tqdm config --set auto_track_after_seconds=60   # more patient
+agent-tqdm config --set auto_track_after_seconds=0    # track immediately
+agent-tqdm config --preset eager                      # same thing
 ```
 
-Check any command against the detector:
+Because a quick run now costs nothing, the detector can afford to be broad. A
+command is caught when it is backgrounded, when it is given a timeout of two
+minutes or more, or when it matches one of ~35 patterns — training scripts,
+`torchrun`, `accelerate`, `deepspeed`, sweeps, `spark-submit`, `terraform`,
+`ansible`, `docker build`, `rsync`, `aws s3 sync`, model downloads, `dvc`,
+`dbt`, `pg_restore`, `git clone`, and ordinary work like `pytest`, `make`,
+`cargo build`, `npm test`, `go test`. Catching `pytest` is free when the suite
+takes four seconds, and useful when it takes four minutes.
 
 ```bash
-agent-tqdm autotrack 'python train.py --epochs 50'
-#   TRACK        python train.py --epochs 50
-#                it looks like a training or evaluation script
+agent-tqdm autotrack 'pytest tests/'
+#   TRACK        pytest tests/
+#                it looks like a pytest run
+#   becomes      agent-tqdm exec --name pytest --after 20 --shell 'pytest tests/'
+#                only tracked if still running after 20s
 ```
 
-### What happens when one is caught
+### Modes
 
 | `auto_track` | behavior |
 | --- | --- |
-| `wrap` *(default)* | the command is rewritten into `agent-tqdm run …` and runs immediately — tracked, detached, no round-trip |
-| `instruct` | the command is stopped once, and Claude is told to relaunch it through `agent-tqdm`, choosing a monitor and an estimate first |
+| `defer` *(default)* | run it normally; track it only once it outlives `auto_track_after_seconds` |
+| `instruct` | stop it before it starts and ask Claude to relaunch it through `agent-tqdm`, with an estimate and monitor chosen first |
 | `off` | never intervene |
 
-Under `wrap` the job starts with **no estimate** — a hook cannot produce one.
-Claude is handed the job id and told to fill it in, and is reminded on each
-prompt while any auto-tracked job still lacks one. The bar works from the first
-moment either way: progress comes from the log, and the ETA follows measured
-throughput once there is enough of it.
+`instruct` buys a bar that is correct from the first frame, at the price of a
+round-trip on every long job — including the ones that would have turned out
+short. `defer` pays nothing up front and fills the estimate in afterwards.
 
-The trade is one round-trip. `instruct` pays it and gets a job that is correct
-from the first frame — an estimate, and a monitor chosen for that job. `wrap`
-starts instantly and fills the estimate in afterwards. Under `instruct`, a given
-command is interrupted **at most once per session**, so if Claude decides it
-needs the output inline it re-runs the command unchanged and it goes through.
+Two more things kept cheap:
 
-One thing to know about `wrap`: the command is detached, so **its output no
-longer appears inline** — it goes to the job's log, and Claude reads it with
-`agent-tqdm log <id>`. That is the point for a two-hour training run, and a
-nuisance for something you wanted to watch. Set `auto_track=instruct` (or
-`--preset guided`) if you would rather be asked.
+- A job handed off below the two-minute statusline floor is tracked but never
+  shown, and Claude is told not to bother estimating it.
+- Job status used to be re-sent to Claude on every prompt. It now goes out only
+  when the picture changes — a job appears, finishes, or gains an estimate — and
+  otherwise at most once per `context_min_interval_seconds` (default 5 minutes).
+  Crashes are always sent immediately.
 
-Nothing is ever silently allowed past a permission prompt: the rewritten command
-still goes through the normal approval flow.
-
-Turning it off, wholly or in part:
+Turning it down:
 
 ```bash
 agent-tqdm config --set auto_track=instruct            # ask before taking over
@@ -214,6 +212,9 @@ agent-tqdm config --set auto_track=off                 # leave everything alone
 agent-tqdm config --set auto_track_ignore='^\./scripts/quick'
 AGENT_TQDM_NO_AUTO=1 <command>                         # just this once
 ```
+
+Nothing is ever silently allowed past a permission prompt: the rewritten command
+still goes through the normal approval flow.
 
 ## What counts as progress
 
@@ -360,8 +361,8 @@ AGENT_TQDM_BAR_WIDTH=40 AGENT_TQDM_STYLE=bars agent-tqdm ls
 | **fields** | `show_spinner`, `show_name`, `show_percent`, `show_counts`, `show_clock`, `show_rate`, `show_eta_clock`, `show_drift`, `show_note`, `note_width`, `clock_format` |
 | **color** | `color`, `color_running`, `color_done`, `color_failed`, `color_warn`, `color_dim`, `color_track`, `color_text` |
 | **estimation** | `blend_full_at`, `rate_window`, `rate_min_span`, `drift_threshold` |
-| **behavior** | `notify`, `notify_sound_ok`, `notify_sound_fail`, `crash_alert` |
-| **auto** | `auto_track`, `auto_track_timeout_seconds`, `auto_track_background`, `auto_track_patterns`, `auto_track_ignore` |
+| **behavior** | `notify`, `notify_sound_ok`, `notify_sound_fail`, `crash_alert`, `context_min_interval_seconds` |
+| **auto** | `auto_track`, `auto_track_after_seconds`, `auto_track_timeout_seconds`, `auto_track_background`, `auto_track_patterns`, `auto_track_ignore` |
 
 Styles are `blocks`, `tqdm`, `ascii`, `dots`, `bars`, and any of them can be
 overridden character by character:

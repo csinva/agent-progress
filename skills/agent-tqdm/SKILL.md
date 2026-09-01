@@ -23,53 +23,47 @@ Use `agent-tqdm`. If it is not on PATH, use
 `agent-tqdm autotrack '<command>'` shows whether a given command would be caught
 automatically, and why.
 
-## It usually starts without you
+## It costs nothing until a job proves slow
 
-Long-running commands are tracked automatically. When you run something through
-Bash that looks like a long job, a hook rewrites it into `agent-tqdm run`, so
-**the job is already tracked and already detached** by the time you see the
-result. You did not ask for this and cannot prevent it per-command; what matters
-is how you handle it.
+Long-running commands are tracked automatically, but **only after they have
+earned it**. A command you run through Bash is wrapped so that it runs exactly
+as it would have; if it finishes within 20 seconds nothing happens at all - no
+job, no bar, no message, no tokens. You will not even know it was wrapped.
 
-The tool result you get back is a launch banner, not the command's output. It
-tells you the job id and where its log is. Two consequences:
+Only when a command is *still running* after that threshold is it tracked. At
+that point it is handed off: it keeps running in the background, and the tool
+result ends with a note telling you so.
 
-- **The command's output is not in front of you.** Read it with
-  `agent-tqdm log <id> -n 40`, and the job's state with `agent-tqdm ls --json`.
-  Do not re-run the command to see its output; it is running right now.
-- **The job has no estimate.** The hook cannot make one - that is your job.
-  Work out roughly how long it should take and set it:
+When you get that note:
+
+- **The command is still running.** Do not re-run it. Its remaining output goes
+  to the job's log: `agent-tqdm log <id> -n 40`, and `agent-tqdm ls --json` for
+  progress and state.
+- **Give it an estimate if it is worth one.** The hook cannot guess a duration -
+  that is the one thing only you can supply:
 
   ```bash
   agent-tqdm update <id> --eta 40m --note "what it is doing"
   ```
 
-  Do this promptly, in the same turn where you can. Until you do, the bar has no
-  ETA and cannot tell anyone when the job will finish. You will also be reminded
-  on your next prompt while any auto-tracked job still lacks one.
+  Judge whether it is worth doing. A job that will be over in a minute never
+  reaches the statusline anyway, so leave it alone and carry on. Spend the
+  estimate on things that will actually run for a while.
+- **Check what it is watching.** The handoff picks no monitor, so progress comes
+  from reading markers in the log. If the job instead writes files, grows one
+  file, or prints stage names, say so:
 
-While you are there, check the monitor it guessed. The hook picks none, so the
-job falls back to reading progress markers out of the log. If the command
-produces no such markers but does something else observable - writing files,
-growing one file, printing stage names - say so:
+  ```bash
+  agent-tqdm update <id> --monitor files --glob 'out/*.parquet' --total 500
+  ```
 
-```bash
-agent-tqdm update <id> --monitor files --glob 'out/*.parquet' --total 500
-```
+You can still start a job yourself with `agent-tqdm run`, and it is better when
+you already know something will be slow: the bar is then correct from the first
+frame instead of starting blind 20 seconds in.
 
-You can also start tracking yourself, with `agent-tqdm run`, whenever you are
-about to launch something slow and want the estimate right from the start. That
-is better than letting the hook catch it, because the bar is correct from the
-first frame.
-
-If a job should not have been tracked - it turned out to be quick, or you needed
-its output to decide what to do next - just let it finish and read the log. It
-is not worth undoing.
-
-Under the `instruct` setting the hook stops the command instead and asks you to
-relaunch it yourself with an estimate and a monitor already chosen. If you get
-that message, follow it: it is the same two decisions, made before the job
-starts rather than after.
+Under the `instruct` setting the command is stopped before it starts and you are
+asked to relaunch it with an estimate and monitor chosen up front. Follow that
+message if you see it - same two decisions, made earlier.
 
 ## Step 1: how will progress be observed?
 

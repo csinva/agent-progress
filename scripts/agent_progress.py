@@ -1274,9 +1274,13 @@ def auto_seen(command, session_id, remember=True, ttl=6 * 3600):
 
 # What a submission command prints back, and how to read the id out of it.
 SUBMIT_PATTERNS = [
-    (re.compile(r"Submitted batch job (\d+)"), "slurm"),          # sbatch
-    (re.compile(r"Job <(\d+)> is submitted"), "lsf"),             # bsub
-    (re.compile(r"^\s*(\d+)[.\w-]*\s*$", re.M), "pbs"),          # qsub
+    # (pattern, scheduler, whether the command itself must vouch for it)
+    (re.compile(r"Submitted batch job (\d+)"), "slurm", None),      # sbatch
+    (re.compile(r"Job <(\d+)> is submitted"), "lsf", None),         # bsub
+    # qsub prints a bare id, which on its own is indistinguishable from any
+    # command that happens to print a number. Only trust it from qsub.
+    (re.compile(r"^\s*(\d+(?:\.[\w-]+)?)\s*$", re.M), "pbs",
+     re.compile(r"\bqsub\b")),
 ]
 
 # Scheduler states, as words. Anything not named here leaves the job alone,
@@ -1297,9 +1301,15 @@ PBS_STATE_CMD = "qstat -x -f %(id)s 2>/dev/null | grep -o 'job_state = .' | head
 STATE_CMDS = {"slurm": SLURM_STATE_CMD, "lsf": LSF_STATE_CMD, "pbs": PBS_STATE_CMD}
 
 
-def detect_submission(text):
-    """(scheduler, job id) if this output is a queue accepting work."""
-    for rx, kind in SUBMIT_PATTERNS:
+def detect_submission(text, command=None):
+    """(scheduler, job id) if this output is a queue accepting work.
+
+    `command` is what produced the output. Some schedulers answer with nothing
+    but a number, which any command might print, so those are only believed
+    when the command was the submission tool."""
+    for rx, kind, needs in SUBMIT_PATTERNS:
+        if needs is not None and not needs.search(command or ""):
+            continue
         m = rx.search(text or "")
         if m:
             return kind, m.group(1)
@@ -2209,7 +2219,7 @@ def cmd_exec(args):
     code = proc.returncode
     try:
         with open(log) as f:
-            kind, sub_id = detect_submission(f.read())
+            kind, sub_id = detect_submission(f.read(), command)
     except Exception:
         kind, sub_id = None, None
     if kind and (proc.returncode in (0, None)):

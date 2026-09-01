@@ -160,6 +160,12 @@ ck("the id is read out of what it prints",
    str(cc.detect_submission("Submitted batch job 4242")))
 ck("other schedulers too",
    cc.detect_submission("Job <991> is submitted to default queue.") == ("lsf", "991"))
+ck("a bare number is not a submission on its own",
+   cc.detect_submission("10", "echo $((X*2))") == (None, None),
+   str(cc.detect_submission("10", "echo $((X*2))")))
+ck("but it is when qsub printed it",
+   cc.detect_submission("1234.head", "qsub job.pbs") == ("pbs", "1234.head"),
+   str(cc.detect_submission("1234.head", "qsub job.pbs")))
 
 for label, final, want in [("that succeeds", "COMPLETED", "done"),
                            ("that is killed", "OUT_OF_MEMORY", "failed")]:

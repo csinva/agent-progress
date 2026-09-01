@@ -391,16 +391,19 @@ hooks/auto_track.py          catches long commands as they are launched
 hooks/inject_status.py       job status into context; crash delivery
 scripts/agent_tqdm.py        the engine - state, monitors, estimation, rendering
 scripts/install-statusline.sh
+tests/all.py                 runs every suite
 tests/run_tests.py           integration: the real CLI, hooks and processes
 tests/test_units.py          unit: parsing, the estimator, monitors, config
+tests/test_lifecycle.py      the watcher, old state, pruning, the installer
+tests/test_hooks.py          hook contracts and the statusline's shape
 demo/tour.py                 the narrated tour
 demo/record.py               renders the .mov and .gif from live job state
 demo/mov_encoder.swift       PNG frames -> .mov via AVFoundation
 ```
 
-Run the tests with `python3 tests/run_tests.py` (integration, ~1 minute) and
-`python3 tests/test_units.py` (unit, fast). 177 checks between them, over real
-processes — nothing is mocked.
+Run the tests with `python3 tests/all.py` — 226 checks over real processes,
+nothing mocked. A couple of minutes, most of it spent waiting on actual
+commands, which is the only way to check a threshold or a watcher.
 
 State lives in `~/.claude/agent-tqdm/` (`state.json`, `logs/`, `config.json`).
 The statusline renders in ~40ms. A watcher killed by a reboot is respawned at

@@ -809,7 +809,8 @@ def render_line(job, cfg, width=None, now=None):
             parts.append(paint(crash_reason(job.get("exit_code"))[0], "fail", color))
 
     if cfg["show_note"] and job.get("note"):
-        parts.append(paint("\u00b7 " + job["note"][:cfg["note_width"]], "dim", color))
+        parts.append(paint("\u00b7 " + one_line(job["note"], cfg["note_width"]),
+                           "dim", color))
 
     line = " ".join(p for p in parts if p)
     return clip(line, width) if width else line
@@ -820,6 +821,24 @@ def char_width(ch):
     if unicodedata.combining(ch):
         return 0
     return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+_ESCAPES = re.compile(r"\033\[[0-9;]*[A-Za-z]|[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def one_line(text, limit=None):
+    """Free text, made safe to put on a rendered line.
+
+    A note or description is whatever someone passed on the command line, and
+    that has reached here with newlines in it - a $(...) substitution, a pasted
+    error. One of those turns a single statusline row into three, which breaks
+    the row budget the statusline is supposed to keep. Escape sequences would
+    likewise leak colour into everything after them."""
+    if not text:
+        return text
+    text = _ESCAPES.sub("", str(text))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit] if limit else text
 
 
 def visible_len(s):
@@ -857,10 +876,10 @@ def render_block(job, cfg, width):
     head = render_line(job, cfg, width=width, now=now)
     bits = []
     if job.get("desc"):
-        bits.append(job["desc"])
+        bits.append(one_line(job["desc"], 120))
     if job.get("cmd"):
-        bits.append("$ " + job["cmd"])
-    bits.append("watching " + describe_monitor(job))
+        bits.append("$ " + one_line(job["cmd"], 160))
+    bits.append(one_line("watching " + describe_monitor(job), 160))
     if e.get("total_est"):
         init = job.get("initial_est_total_s")
         bits.append("est total %s%s" % (
@@ -1692,7 +1711,7 @@ def _new_job(args, cmd=None, log=None, pid=None):
             or UNIT_BY_MONITOR.get((mon or {}).get("kind"), "it"))
     job = {
         "id": None,
-        "desc": getattr(args, "desc", None),
+        "desc": one_line(getattr(args, "desc", None)),
         "cmd": cmd,
         "log": log,
         "pid": pid,
@@ -1709,7 +1728,7 @@ def _new_job(args, cmd=None, log=None, pid=None):
         "ended": None,
         "eta_end": (now + eta) if eta else None,
         "eta_prior_s": eta,
-        "note": getattr(args, "note", None),
+        "note": one_line(getattr(args, "note", None)),
         "pattern": check_pattern(getattr(args, "pattern", None)),
         "monitor": mon,
         "interval_override": parse_duration(getattr(args, "interval", None)),
@@ -1781,6 +1800,7 @@ def cmd_run(args):
     # A single argument is passed through raw, so `run -- "a && b"` still works.
     cmd = (" ".join(shlex.quote(p) for p in cmd_parts)
            if len(cmd_parts) > 1 else cmd_parts[0])
+    check_cwd(args.cwd)
 
     ensure_dirs()
     with state_rw() as st:
@@ -1837,6 +1857,13 @@ def _pump(path, offset, stream):
     return offset + len(chunk)
 
 
+def check_cwd(path):
+    """A missing working directory is a typo, not a crash."""
+    if path and not os.path.isdir(os.path.expanduser(path)):
+        raise SystemExit("no such directory: %s" % path)
+    return path
+
+
 def _passthrough(command, cwd):
     """Run the command as though this wrapper were never here."""
     try:
@@ -1857,6 +1884,7 @@ def cmd_exec(args):
     machinery - the bar, the estimate, the reminders - come into existence.
     """
     cfg = load_config()
+    check_cwd(args.cwd)
     after = (parse_duration(args.after) if args.after is not None
              else cfg["auto_track_after_seconds"])
     command = args.shell
@@ -1987,11 +2015,11 @@ def cmd_update(args):
             if args.reset_rate:
                 job["samples"] = []
         if args.note is not None:
-            job["note"] = args.note or None
+            job["note"] = one_line(args.note) or None
         if args.desc is not None:
-            job["desc"] = args.desc or None
+            job["desc"] = one_line(args.desc) or None
         if args.unit is not None:
-            job["unit"] = args.unit
+            job["unit"] = one_line(args.unit, 12)
         if args.pattern is not None:
             job["pattern"] = check_pattern(args.pattern) or None
         mon = build_monitor(args, job.get("monitor"))

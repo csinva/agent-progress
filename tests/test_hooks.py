@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""Hook and statusline contract tests.
+
+Claude Code reads these outputs, so their shape matters as much as their
+content: a statusline that emits an extra line, or a Stop hook that blocks
+twice, misbehaves in ways the CLI never would.
+"""
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ENGINE = os.path.join(ROOT, "scripts", "agent_tqdm.py")
+HOOKS = os.path.join(ROOT, "hooks")
+STATUS = os.path.join(HOOKS, "inject_status.py")
+AUTO = os.path.join(HOOKS, "auto_track.py")
+spec = importlib.util.spec_from_file_location("agent_tqdm", ENGINE)
+cc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(cc)
+
+FAILS = []
+CHECKS = [0]
+
+
+def ck(name, cond, detail=""):
+    CHECKS[0] += 1
+    print("  %s %s%s" % ("ok  " if cond else "FAIL", name, "" if cond else "   <- " + detail))
+    if not cond:
+        FAILS.append(name)
+
+
+def cli(*a, **kw):
+    return subprocess.run([sys.executable, ENGINE] + list(a),
+                          capture_output=True, text=True, **kw)
+
+
+def hook(script, event, payload):
+    return subprocess.run([sys.executable, script, event], input=json.dumps(payload),
+                          capture_output=True, text=True).stdout.strip()
+
+
+def statusline(payload):
+    return subprocess.run([sys.executable, ENGINE, "statusline"], input=json.dumps(payload),
+                          capture_output=True, text=True).stdout
+
+
+cli("rm", "--all")
+cli("config", "--reset")
+with cc.state_rw() as st:
+    st["inbox"] = []
+
+print("=== the statusline stays inside its own lines ===")
+cli("start", "one", "--eta", "2h", "--monitor", "time", "--no-watch",
+    "--note", "first line\nsecond line\rthird")
+out = statusline({})
+ck("a note containing newlines does not add rows", out.count("\n") <= 1,
+   "%d rows: %r" % (out.count("\n"), out[:120]))
+cli("update", "one", "--desc", "a\nb", "--quiet")
+ck("a description with newlines is contained",
+   statusline({}).count("\n") <= 1, repr(statusline({})[:120]))
+cli("rm", "--all")
+
+for n in range(5):
+    cli("start", "job%d" % n, "--eta", "2h", "--monitor", "time", "--no-watch")
+out = statusline({})
+ck("never more rows than max_jobs plus the overflow note",
+   len([l for l in out.splitlines() if l.strip()]) <= 4,
+   "%d rows" % len(out.splitlines()))
+narrow = statusline({"terminal_width": 40})
+ck("honours the terminal width",
+   all(cc.visible_len(l) <= 40 for l in narrow.splitlines() if l.strip()),
+   str([cc.visible_len(l) for l in narrow.splitlines()]))
+ck("statusline emits no ansi when colour is off",
+   "\033[" not in subprocess.run([sys.executable, ENGINE, "statusline"], input="{}",
+                                 capture_output=True, text=True,
+                                 env=dict(os.environ, NO_COLOR="1")).stdout)
+cli("rm", "--all")
+
+print()
+print("=== the Stop hook ===")
+cli("config", "--reset")
+subprocess.run([sys.executable, ENGINE, "exec", "--after", "1s", "--name", "dies",
+                "--shell", "sleep 2; exit 4"], capture_output=True)
+deadline = time.time() + 30
+while time.time() < deadline:
+    jobs = json.loads(cli("ls", "--json").stdout or "[]")
+    if jobs and jobs[0]["state"] != "running":
+        break
+    time.sleep(1)
+first = hook(STATUS, "Stop", {"session_id": "s", "stop_hook_active": False})
+ck("a crash blocks the stop once",
+   json.loads(first or "{}").get("decision") == "block", first[:100])
+second = hook(STATUS, "Stop", {"session_id": "s", "stop_hook_active": False})
+ck("and only once", second == "", second[:100])
+with cc.state_rw() as st:
+    for e in st.get("inbox", []):
+        e["delivered"] = None
+guarded = hook(STATUS, "Stop", {"session_id": "s", "stop_hook_active": True})
+ck("never blocks when already inside a stop hook", guarded == "", guarded[:100])
+cli("config", "--set", "crash_alert=false")
+off = hook(STATUS, "Stop", {"session_id": "s", "stop_hook_active": False})
+ck("crash_alert=false silences the interruption", off == "", off[:100])
+cli("config", "--reset")
+cli("rm", "--all")
+with cc.state_rw() as st:
+    st["inbox"] = []
+
+print()
+print("=== SessionStart brings back a lost watcher ===")
+cli("start", "orphan", "--eta", "2h", "--monitor", "time", "--no-watch")
+with cc.state_rw() as st:
+    st["jobs"]["orphan"]["watcher_pid"] = 999999      # a pid that cannot exist
+hook(STATUS, "SessionStart", {"session_id": "s"})
+time.sleep(2)
+pid = json.loads(open(cc.STATE).read())["jobs"]["orphan"].get("watcher_pid")
+ck("a dead watcher is replaced", pid != 999999 and cc.alive(pid), "watcher_pid=%s" % pid)
+cli("rm", "--all")
+time.sleep(2)
+
+print()
+print("=== a state directory whose path contains spaces ===")
+spacey = os.path.join(tempfile.mkdtemp(prefix="agent tqdm "), "state dir")
+env = dict(os.environ, AGENT_TQDM_HOME=spacey)
+r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "1s", "--shell",
+                    "echo hello from a spacey path"], capture_output=True, text=True, env=env)
+ck("a fast command works from a path with spaces",
+   r.returncode == 0 and "hello from a spacey path" in r.stdout, repr(r.stdout[:80]))
+r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "1s", "--name", "spacey",
+                    "--shell", "echo a; sleep 3; echo b"], capture_output=True, text=True, env=env)
+ck("a handoff works from a path with spaces", "tracked as" in r.stdout, repr(r.stdout[:120]))
+jobs = json.loads(subprocess.run([sys.executable, ENGINE, "ls", "--json"],
+                                 capture_output=True, text=True, env=env).stdout or "[]")
+ck("the job's log is readable there", jobs and os.path.exists(jobs[0]["log"] or ""), str(jobs))
+time.sleep(3)
+shutil.rmtree(os.path.dirname(spacey), ignore_errors=True)
+
+print()
+print("=== reporting commands ===")
+cli("rm", "--all")
+cli("start", "running-one", "--eta", "2h", "--monitor", "time", "--no-watch")
+cli("start", "finished-one", "--eta", "2h", "--monitor", "time", "--no-watch")
+cli("done", "finished-one")
+ck("ls --running shows only what is running",
+   len(json.loads(cli("ls", "--json", "--running").stdout or "[]")) == 1)
+d = json.loads(cli("show", "running-one", "--json").stdout or "{}")
+ck("show --json carries the estimate", "estimate" in d and d.get("id") == "running-one",
+   str(list(d)[:6]))
+ck("inbox --limit is accepted", cli("inbox", "--limit", "2").returncode == 0)
+cli("rm", "--all")
+
+print()
+print("=== a working directory that is not there ===")
+for label, args in [("exec", ["exec", "--cwd", "/no/such/dir", "--shell", "echo hi"]),
+                    ("run", ["run", "--name", "cw", "--cwd", "/no/such/dir", "--", "echo hi"])]:
+    r = cli(*args)
+    ck("%s reports a missing --cwd cleanly" % label,
+       r.returncode != 0 and "Traceback" not in r.stderr and "no such directory" in r.stderr,
+       r.stderr.strip()[-90:])
+cli("rm", "--all")
+
+print()
+print("=== a clock that jumped ===")
+future = {"id": "future", "state": "running", "started": time.time() + 600,
+          "unit": "it", "samples": [], "eta_end": time.time() + 1200}
+cfg = cc.load_config()
+ck("a job that appears to start in the future still renders",
+   isinstance(cc.render_line(future, cfg, width=100), str))
+ck("and its elapsed time is not negative",
+   "-" not in cc.fmt_dur(cc.estimate(future, None, cfg)["elapsed"]))
+
+print()
+print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
+for f in FAILS:
+    print("   -", f)
+sys.exit(1 if FAILS else 0)

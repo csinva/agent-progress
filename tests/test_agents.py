@@ -399,7 +399,7 @@ th = [threading.Thread(target=collect, args=(i,)) for i in range(N)]
 [t.join() for t in th]
 ck("and every crash went to the agent whose job died",
    all(got["stress-%d" % i] == (["job-%d" % i] if i % 2 else []) for i in range(N)), str(got))
-subprocess.run(["pkill", "-f", "agent_progress.py _watch"], capture_output=True)
+sandbox.kill_watchers(cc)
 shutil.rmtree(work, ignore_errors=True)
 reset()
 

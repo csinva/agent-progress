@@ -28,3 +28,31 @@ atexit.register(shutil.rmtree, HOME, ignore_errors=True)
 STATE = os.path.join(HOME, "state.json")
 CONFIG = os.path.join(HOME, "config.json")
 LOGS = os.path.join(HOME, "logs")
+
+
+# A sandbox isolates the state directory, not the process table. Killing or
+# counting watchers with `pkill -f agent_progress.py _watch` therefore reaches
+# every watcher on the machine - another test run's, and a user's real jobs,
+# whose tracking simply stops. TAG makes this run's job names unique so a
+# pattern can be narrowed to them, and kill_watchers only signals pids this
+# sandbox's own state file knows about.
+TAG = "t%d" % os.getpid()
+
+
+def kill_watchers(cc, jobs=None):
+    """Stop the watchers belonging to this sandbox, and nobody else's."""
+    import signal
+    try:
+        records = (cc.state_ro().get("jobs") or {}).values()
+    except Exception:
+        return
+    for job in records:
+        if jobs is not None and job.get("id") not in jobs:
+            continue
+        pid = job.get("watcher_pid")
+        if not pid:
+            continue
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except (OSError, TypeError, ValueError):
+            pass

@@ -101,18 +101,19 @@ cli("rm", "--all")
 print()
 print("=== only one watcher, however many sessions start at once ===")
 import threading
-subprocess.run(["pkill", "-f", "agent_progress.py _watch"], capture_output=True)
+sandbox.kill_watchers(cc)
 time.sleep(1)
-cli("start", "orph", "--eta", "2h", "--monitor", "time", "--no-watch")
+orph = "orph-" + sandbox.TAG
+cli("start", orph, "--eta", "2h", "--monitor", "time", "--no-watch")
 with cc.state_rw() as st:
-    st["jobs"]["orph"]["watcher_pid"] = 999999      # as a reboot would leave it
+    st["jobs"][orph]["watcher_pid"] = 999999      # as a reboot would leave it
 th = [threading.Thread(target=lambda i=i: subprocess.run(
     [sys.executable, os.path.join(HOOKS, "inject_status.py"), "SessionStart"],
     input=json.dumps({"session_id": "s%d" % i}), capture_output=True, text=True))
     for i in range(5)]
 [t.start() for t in th]; [t.join() for t in th]
 time.sleep(1.5)
-n = len(subprocess.run(["pgrep", "-f", "_watch orph"],
+n = len(subprocess.run(["pgrep", "-f", "_watch " + orph],
                        capture_output=True, text=True).stdout.split())
 ck("five concurrent revivals leave one watcher", n == 1, "%d watchers" % n)
 
@@ -120,12 +121,12 @@ cli("rm", "--all")
 gone = False
 for _ in range(20):
     time.sleep(1)
-    if not subprocess.run(["pgrep", "-f", "_watch orph"],
+    if not subprocess.run(["pgrep", "-f", "_watch " + orph],
                           capture_output=True, text=True).stdout.split():
         gone = True
         break
 ck("a watcher notices its job was removed within ~15s", gone, "still running")
-subprocess.run(["pkill", "-f", "agent_progress.py _watch"], capture_output=True)
+sandbox.kill_watchers(cc)
 
 print()
 print("=== a log that is truncated under the watcher ===")
@@ -192,7 +193,7 @@ for label, final, want in [("that succeeds", "COMPLETED", "done"),
     ck("the queued job is tracked (%s)" % label,
        len(jobs) == 1 and jobs[0]["id"] == "slurm-4242", str([j["id"] for j in jobs]))
     cli("update", "slurm-4242", "--interval", "2s", "--quiet")
-    subprocess.run(["pkill", "-f", "_watch slurm-4242"], capture_output=True)
+    sandbox.kill_watchers(cc, jobs={"slurm-4242"})
     time.sleep(0.5)
     subprocess.Popen([sys.executable, ENGINE, "_watch", "slurm-4242"], cwd=sched, env=env,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -207,7 +208,7 @@ for label, final, want in [("that succeeds", "COMPLETED", "done"),
        str(seen and seen["state"]))
     ck("progress came from the scheduler's log (%s)" % label,
        seen and (seen["step"] or 0) > 0, str(seen and seen.get("step")))
-    subprocess.run(["pkill", "-f", "_watch slurm-4242"], capture_output=True)
+    sandbox.kill_watchers(cc, jobs={"slurm-4242"})
 
 raw = json.loads(open(cc.STATE).read())["jobs"].get("slurm-4242", {})
 ck("the scheduler's own word is kept", raw.get("scheduler_state") == "OUT_OF_MEMORY",

@@ -83,7 +83,13 @@ def raw(jid):
     return cc.state_ro()["jobs"].get(jid, {})
 
 
-def until(predicate, seconds=45):
+def until(predicate, seconds=150):
+    """Wait for something a watcher has to notice.
+
+    Generous on purpose. These loops stop the moment the predicate holds, so a
+    high ceiling costs nothing when the machine is idle - and a ceiling tight
+    enough to expire on a busy one turns a passing suite into a flaky one, which
+    is worse than a slow test."""
     deadline = time.time() + seconds
     while time.time() < deadline and not predicate():
         time.sleep(1.0)

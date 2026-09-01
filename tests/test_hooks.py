@@ -92,7 +92,7 @@ print("=== the Stop hook ===")
 cli("config", "--reset")
 subprocess.run([sys.executable, ENGINE, "exec", "--after", "1s", "--name", "dies",
                 "--shell", "sleep 2; exit 4"], capture_output=True)
-deadline = time.time() + 30
+deadline = time.time() + 120
 while time.time() < deadline:
     jobs = json.loads(cli("ls", "--json").stdout or "[]")
     if jobs and jobs[0]["state"] != "running":

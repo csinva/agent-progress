@@ -232,6 +232,18 @@ as_session(None, "rm", "--all")
 ck("and from a plain shell it means everything",
    not json.loads(open(sandbox.STATE).read())["jobs"])
 
+reset()
+for a in ("agent-A", "agent-B"):
+    as_session(a, "start", "done-" + a, "--eta", "3h", "--monitor", "time", "--no-watch")
+    with cc.state_rw() as st:
+        st["jobs"]["done-" + a]["started"] = time.time() - 600
+    as_session(a, "done", "done-" + a)
+as_session("agent-A", "rm", "--finished")
+left = sorted(json.loads(open(sandbox.STATE).read())["jobs"])
+ck("rm --finished is scoped the same way", left == ["done-agent-B"], str(left))
+ck("agent B can still see its finished job", bars("agent-B") == ["done-agent-B"],
+   str(bars("agent-B")))
+
 print()
 print("=== one agent cannot act on another's job by name ===")
 reset()

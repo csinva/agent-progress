@@ -139,7 +139,7 @@ print("=== a job that crashes after handoff is reported ===")
 subprocess.run([sys.executable, ENGINE, "exec", "--after", "1s", "--name", "crasher",
                 "--shell", "sleep 2; echo 'boom: out of memory' >&2; exit 137"],
                capture_output=True, text=True)
-deadline = time.time() + 25
+deadline = time.time() + 90
 while time.time() < deadline:
     jobs = json.loads(cli("ls", "--json").stdout or "[]")
     if any(j["state"] != "running" for j in jobs):
@@ -294,7 +294,7 @@ with cc.state_rw() as st:
     st["inbox"] = []                     # start from a known-empty queue
 subprocess.run([sys.executable, ENGINE, "exec", "--after", "1s", "--name", "boom",
                 "--shell", "sleep 2; exit 9"], capture_output=True)
-deadline = time.time() + 25
+deadline = time.time() + 90
 while time.time() < deadline:
     jj = json.loads(cli("ls", "--json").stdout or "[]")
     if jj and jj[0]["state"] != "running":

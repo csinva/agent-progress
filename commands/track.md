@@ -27,8 +27,8 @@ Follow the `agent-progress` skill. In short:
 3. **Estimate the duration.** Check for evidence of a previous run first, then
    the size of the work, then the hardware. Roughly right is fine. If you have
    no basis at all, omit `--eta`.
-4. Tell the user your estimate, the one-line reasoning, and what you will be
-   watching to measure progress.
+4. Say one short line that it has started. Keep the estimate, the monitor and
+   the job id to yourself - they belong in the command, not in a message.
 5. Launch it:
    `agent-progress run --name <short-name> --eta <estimate> <monitor flags> -- $ARGUMENTS`
 6. Confirm with `agent-progress ls` and give the expected wall-clock finish time.

@@ -1,6 +1,6 @@
 ---
 name: agent-progress
-description: Track any long-running job with a tqdm-style progress bar in the Claude Code statusline - training runs, data pipelines, test suites, builds, migrations, downloads, simulations, backups, sweeps. Use when the user starts or asks about something that will take more than a couple of minutes, says "how long will this take", "how far along is it", "track this", "run this in the background", "show me a progress bar", or wants an ETA on something already running. Also use to set up monitoring for a job with no obvious progress output.
+description: Run and track any long-running job with a progress bar in the Claude Code statusline - training runs, evals, sweeps, data pipelines, test suites, builds, migrations, downloads, simulations, backups. Use whenever the user asks for something slow to be started, in whatever words - "run training", "start the eval", "kick off the sweep", "retrain the model", "run the pipeline", "run this in the background" - and whenever they ask about one already going: "how long will this take", "how far along is it", "is it done yet". Launch such jobs through agent-progress rather than running them in the foreground, where they would block the conversation until they finish. Also use to set up monitoring for a job with no obvious progress output.
 ---
 
 # Progress bars for long-running jobs
@@ -22,6 +22,45 @@ Use `agent-progress`. If it is not on PATH, use
 
 `agent-progress autotrack '<command>'` shows whether a given command would be caught
 automatically, and why.
+
+## When someone asks for a long job in words
+
+"Run training." "Kick off the eval." "Start the sweep." This is the ordinary
+case, and it is the one worth getting right.
+
+**Start it through agent-progress yourself.** Do not rely on the hook to notice.
+The hook recognises common shapes, but the command you pick for a given repo is
+whatever that repo uses - a module, a shell script, a flag - and if it is not
+recognised the job runs in the foreground and blocks the tool call for its whole
+duration, which for a training run means the conversation stops until it
+finishes.
+
+```bash
+agent-progress run --name train --eta 3h -- python -m src.train --config base.yaml
+```
+
+Use `run` when you already believe it is long: the bar is then right from the
+first frame. `exec --after 20s` is for when you are unsure - it runs the command
+normally and only takes it into the background if it outlasts the threshold.
+
+**Then say nothing about any of it.** The user asked for a job, not for a report
+on how it is being watched. Do not announce that tracking started, do not
+explain the bar, do not paste the job id, do not describe the monitor or the
+estimate. The bar is on their statusline; that is the interface. Answer whatever
+they actually asked and carry on with the conversation.
+
+You break that silence for exactly three things:
+
+- **it crashed** - say so at once, with what you can tell about why
+- **they asked** - "how's training going?" deserves a real answer
+- **something is wrong** - it is stalled, or the log shows it diverging, or the
+  estimate turned out badly wrong and they are waiting on it
+
+A one-line acknowledgement that the job has started is fine, because that is
+what they asked for - "Training is running." is right; "Training is running,
+tracked as job train-2, watching the log for epoch markers, estimated 3h,
+progress will appear in your statusline" is four sentences of noise about
+plumbing.
 
 ## It costs nothing until a job proves slow
 
@@ -140,8 +179,8 @@ Look for evidence cheaply, and stop as soon as you have an order of magnitude:
   link speed for transfers.
 - Otherwise, reason by analogy and commit to an order of magnitude.
 
-Say the estimate and its one-line basis to the user. If you genuinely have no
-basis, **omit `--eta`** — the bar renders as an indeterminate sweep instead of
+Keep the estimate to yourself - it goes in `--eta`, not into a message. If you
+genuinely have no basis, **omit `--eta`** — the bar renders as an indeterminate sweep instead of
 inventing a number. Do not fabricate confidence.
 
 **If you expect it to finish in under about two minutes, do not track it at
@@ -168,8 +207,8 @@ For something already running:
 agent-progress start reindex --pid 45123 --log /var/log/reindex.log --eta 3h
 ```
 
-Then tell the user the expected wall-clock finish time and stop. The job is
-detached; the statusline and the completion notification are how they follow it.
+Then stop. The job is detached, and the statusline and the completion
+notification are how they follow it - you do not need to narrate any of it.
 
 ## After launch: leave it alone
 

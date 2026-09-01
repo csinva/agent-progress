@@ -1047,6 +1047,19 @@ AUTO_TRACK_PATTERNS = [
     (r"\b(?:python3?|uv\s+run|poetry\s+run|pipenv\s+run)\s+[^|;&]{0,120}"
      r"(?:train|finetune|fine_tune|pretrain|sweep|eval|benchmark|experiment)"
      r"[\w.-]*\.py\b", "a training or evaluation script"),
+    # The same work, invoked the other ways people actually invoke it. A model
+    # asked to "run training" picks whatever the repo uses, and that is a module,
+    # a shell script or a flag at least as often as it is a .py file.
+    (r"\b(?:python3?|uv\s+run|poetry\s+run|pipenv\s+run)\s+(?:python3?\s+)?-m\s+[\w.]{0,60}"
+     r"(?:train|finetune|fine_tune|pretrain|sweep|eval|benchmark|experiment)",
+     "a training module"),
+    (r"\b(?:bash|sh|zsh)\s+[^|;&]{0,80}"
+     r"(?:train|finetune|pretrain|sweep|eval|benchmark|experiment)[\w.-]{0,40}\.sh\b",
+     "a training script"),
+    (r"(?:^|\s)\./[\w./-]{0,60}"
+     r"(?:train|finetune|pretrain|sweep|eval|benchmark|experiment)[\w.-]{0,40}",
+     "a training script"),
+    (r"--(?:mode|stage|task)[= ](?:train|fit|finetune|pretrain)\b", "a training run"),
     (r"\btorchrun\b", "torchrun"),
     (r"\baccelerate\s+launch\b", "accelerate launch"),
     (r"\bdeepspeed\b", "deepspeed"),

@@ -15,13 +15,13 @@
 </p>
 
 <p align="center">
-  <img src="demo/agent-progress.gif" width="100%" alt="three commands side by side: a build never tracked, a training run with a bar, a benchmark that crashes">
+  <img src="demo/agent-progress.gif" width="100%" alt="three things asked for in words, the commands Claude ran, and the resulting progress bars">
 </p>
 
 <p align="center">
-  <i>Three commands running at once. The build finishes in four seconds and is never<br>
-  tracked; the training run and the benchmark both cross twenty seconds and get bars;<br>
-  the benchmark then dies. A real session, waiting compressed — nothing re-enacted.<br>
+  <i>Three things asked for in plain words, the commands Claude chose, and what happened.<br>
+  The build finishes in four seconds and is never tracked; the training run and the<br>
+  benchmark both cross twenty seconds and get bars; the benchmark then dies.<br>
   Full recording: <a href="demo/agent-progress.mov">demo/agent-progress.mov</a></i>
 </p>
 
@@ -165,6 +165,30 @@ agent-progress doctor                # check the install
 records the real exit code.
 
 ---
+
+## Asking for a job in words
+
+The ordinary way to use this is not to type a command at all:
+
+> **run training on the new dataset**
+
+Claude picks the command, starts it through agent-progress, and carries on. The
+job is detached within seconds, so the conversation is never blocked waiting for
+it, and a bar appears on your statusline.
+
+**It stays quiet.** You asked for a job, not for a report about how it is being
+watched — so there is no announcement that tracking started, no job id, no
+explanation of the bar. The bar is the interface. Claude speaks up for three
+things only:
+
+- the job **crashed** — you hear immediately, with what the log says about why
+- you **asked** — "how's training going?" gets a real answer
+- something is **wrong** — stalled, diverging, or an estimate badly enough off
+  that you would want to know
+
+This is also why the skill tells Claude to launch such jobs through
+agent-progress rather than in the foreground. A foreground training run blocks
+the tool call until it finishes, which means the conversation stops for hours.
 
 ## It triggers itself, and costs nothing until it has to
 

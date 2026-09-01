@@ -219,13 +219,15 @@ raise MemoryError("unable to allocate 8.00 GiB on cuda:0")
 # One column each. They run at the same time, as three commands in a session
 # would, so the clip shows the three outcomes together rather than in turn.
 PANELS = [
-    {"key": "make", "title": "make -j8", "command": "make -j8",
+    {"key": "make", "ask": "build the project", "command": "make -j8",
      "file": "Makefile", "body": MAKEFILE,
      "idle": "under 20s - never tracked"},
-    {"key": "train", "title": "python3 train.py", "command": "python3 train.py",
+    {"key": "train", "ask": "train the model on the new data",
+     "command": "python3 train.py --epochs 34",
      "file": "train.py", "body": TRAIN,
      "idle": "not tracked yet"},
-    {"key": "benchmark", "title": "python3 benchmark.py", "command": "python3 benchmark.py",
+    {"key": "benchmark", "ask": "benchmark llama-7b",
+     "command": "python3 benchmark.py --model llama-7b",
      "file": "benchmark.py", "body": BENCH,
      "idle": "not tracked yet"},
 ]
@@ -329,8 +331,10 @@ class Panel(object):
 
     def render(self, cfg, height):
         c = self.cc
-        body = [c.paint("$ " + self.spec["title"], "text", True), ""]
-        body += self.lines[-(height - 4):]
+        # what the user typed, then what Claude ran, then what happened
+        body = [c.paint("\u203a ", "run", True) + c.paint(self.spec["ask"], "text", True),
+                c.paint("  $ " + self.spec["command"], "dim", True), ""]
+        body += self.lines[-(height - 5):]
         while len(body) < height - 2:
             body.append("")
         body.append(c.paint("\u2500\u2500 statusline " + "\u2500" * (PANEL_COLS - 15),
@@ -346,7 +350,7 @@ class Panel(object):
 # (until real-seconds, speed, caption). Speed is how much real time each
 # captured frame covers, so the waiting can be skipped past without faking it.
 SCRIPT = [
-    (3.0,  1,  "three commands, launched together"),
+    (3.0,  1,  "three things asked for in plain words. Claude picks the commands"),
     (7.0,  1,  "the build is done already - four seconds, so it is never tracked"),
     (14.0, 1,  "the other two are still going. the threshold is 20 seconds"),
     (22.0, 8,  "waiting out the 20 seconds"),

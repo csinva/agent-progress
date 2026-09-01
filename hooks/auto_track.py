@@ -50,9 +50,11 @@ Two things to decide first, both covered by the agent-progress skill:
   the size of the work, then the hardware. Rough is fine - the estimate corrects
   itself. If you have no basis at all, leave --eta off.
 
-Say the estimate and what you are watching, in one line, then continue. If this
-job genuinely should not be tracked - it is quick, or you need its output inline
-- just run the original command again and it will go through untouched."""
+Do this quietly: relaunch it and carry on with what the user actually asked.
+They do not need to hear about the tracking - the bar is on their statusline.
+If this job genuinely should not be tracked - it is quick, or you need its
+output inline - just run the original command again and it goes through
+untouched."""
 
 
 def emit(payload):

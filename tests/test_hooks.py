@@ -208,6 +208,54 @@ for label, path in [("without ~/.local/bin",
        r.returncode == 0 and "ran" in r.stdout, "exit=%d %s" % (r.returncode, r.stderr[:50]))
 
 print()
+print("=== a long job asked for in words never blocks ===")
+cli("rm", "--all")
+cli("config", "--reset")
+scratch = tempfile.mkdtemp(prefix="agent-progress-words-")
+open(os.path.join(scratch, "train.py"), "w").write(
+    "import time\nfor i in range(1, 40):\n    print('Epoch %d/40' % i, flush=True)\n"
+    "    time.sleep(1)\n")
+
+# the shapes a model actually picks when told "run training"
+for label, cmd in [
+        ("a script", "python3 train.py --epochs 40"),
+        ("a module", "python3 -m src.train --config base.yaml"),
+        ("a shell script", "bash scripts/train.sh"),
+        ("a flag", "python3 main.py --mode train")]:
+    out = hook(AUTO, "PreToolUse", {"tool_name": "Bash", "session_id": "words",
+                                    "tool_input": {"command": cmd}})
+    ck("caught when Claude runs %s" % label, bool(out), cmd)
+
+# and the job really does come back long before it finishes
+real = "python3 %s" % os.path.join(scratch, "train.py")
+out = hook(AUTO, "PreToolUse", {"tool_name": "Bash", "session_id": "words",
+                                "tool_input": {"command": real}})
+wrapped = json.loads(out)["hookSpecificOutput"]["updatedInput"]["command"]
+wrapped = wrapped.replace("--after 20", "--after 2")
+t = time.time()
+r = subprocess.run(["/bin/sh", "-c", wrapped], capture_output=True, text=True)
+elapsed = time.time() - t
+ck("a 40s job returns in about the threshold, not 40s", elapsed < 8,
+   "%.1fs" % elapsed)
+ck("and it is still running afterwards",
+   any(j["state"] == "running" for j in json.loads(cli("ls", "--json").stdout or "[]")),
+   cli("ls", "--json").stdout[:80])
+ck("the caller is told in a few lines, not a wall of text",
+   len(r.stdout.strip().splitlines()) <= 12, "%d lines" % len(r.stdout.strip().splitlines()))
+cli("rm", "--all")
+
+# the explicit route a model should prefer when it knows the job is long
+t = time.time()
+r = cli("run", "--name", "explicit", "--eta", "3h", "--", "sleep", "60")
+ck("an explicit run returns at once", time.time() - t < 5, "%.1fs" % (time.time() - t))
+d = json.loads(cli("ls", "--json").stdout or "[]")
+ck("and its bar has an eta from the first frame",
+   d and d[0]["remaining_s"] and d[0]["remaining_s"] > 3000, str(d and d[0].get("remaining_human")))
+cli("cancel", "explicit")
+cli("rm", "--all")
+shutil.rmtree(scratch, ignore_errors=True)
+
+print()
 print("=== the wrapper never wraps itself ===")
 
 

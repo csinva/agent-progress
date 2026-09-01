@@ -221,7 +221,9 @@ def ensure_dirs():
             os.makedirs(d)
         except OSError as e:
             if e.errno != errno.EEXIST:
-                raise
+                raise SystemExit("cannot use the agent-tqdm directory %s: %s" % (d, e))
+        if not os.path.isdir(d):
+            raise SystemExit("not a directory: %s" % d)
 
 
 _CFG_CACHE = {"mtime": None, "cfg": None}
@@ -266,18 +268,68 @@ def load_config(force=False):
 
 # --------------------------------------------------------------------------- state
 
+_NUMERIC_FIELDS = ("started", "updated", "ended", "eta_end", "eta_prior_s",
+                   "est_total_s", "initial_est_total_s", "next_probe", "interval_s",
+                   "interval_override", "units", "total", "pct", "step", "exit_code",
+                   "pid", "watcher_pid", "log_offset", "size_bytes")
+
+
+def _sanitize(st):
+    """Make a state document safe to walk.
+
+    Several processes write this file, and it is a plain file on disk that
+    anyone can edit or truncate. Everything below reads it many times a second
+    to draw the statusline, so a value of the wrong shape must not become an
+    exception - it becomes a missing value, and the bar simply knows less."""
+    if not isinstance(st, dict):
+        st = {}
+    jobs = st.get("jobs")
+    clean = {}
+    if isinstance(jobs, dict):
+        for jid, job in jobs.items():
+            if not isinstance(job, dict):
+                continue                    # not a job record; forget it
+            for key in _NUMERIC_FIELDS:
+                if key in job and not isinstance(job[key], (int, float)):
+                    job[key] = None
+                if isinstance(job.get(key), bool):
+                    job[key] = None
+            for key in ("id", "state", "unit", "note", "desc", "cmd", "log", "pattern"):
+                if key in job and job[key] is not None and not isinstance(job[key], str):
+                    job[key] = None
+            job["id"] = job.get("id") or str(jid)
+            job["state"] = job.get("state") or "running"
+            if not isinstance(job.get("monitor"), dict):
+                job["monitor"] = None
+            samples = job.get("samples")
+            job["samples"] = [
+                list(pair) for pair in samples
+                if isinstance(pair, (list, tuple)) and len(pair) == 2
+                and all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                        for x in pair)
+            ] if isinstance(samples, list) else []
+            hit = job.get("milestones_hit")
+            job["milestones_hit"] = [x for x in hit if isinstance(x, str)] \
+                if isinstance(hit, list) else []
+            clean[str(jid)] = job
+    st["jobs"] = clean
+    if not isinstance(st.get("inbox"), list):
+        st["inbox"] = []
+    st["inbox"] = [e for e in st["inbox"] if isinstance(e, dict)]
+    for key in ("auto_track_seen", "context_sent"):
+        if not isinstance(st.get(key), dict):
+            st[key] = {}
+    st.setdefault("version", STATE_VERSION)
+    return st
+
+
 def _read_state():
     try:
         with open(STATE) as f:
             st = json.load(f)
     except Exception:
         st = {}
-    if not isinstance(st, dict):
-        st = {}
-    st.setdefault("version", STATE_VERSION)
-    st.setdefault("jobs", {})
-    st.setdefault("inbox", [])
-    return st
+    return _sanitize(st)
 
 
 def _write_state(st):
@@ -1340,7 +1392,7 @@ def tail_job_log(job, max_bytes=262144):
     log = job.get("log")
     if not log or not os.path.exists(log):
         return ""
-    text, new_off = read_tail(log, job.get("log_offset", 0), max_bytes)
+    text, new_off = read_tail(log, job.get("log_offset") or 0, max_bytes)
     job["log_offset"] = new_off
     return text
 
@@ -1646,11 +1698,17 @@ def cmd_watch_daemon(args):
                        "%s after %s" % (crash_reason(finished.get("exit_code"))[1], dur), False)
             return 0
 
-        # liveness ticks stay frequent; progress probes do not
+        # Liveness ticks stay frequent; progress probes do not. Both branches
+        # are capped so the loop comes back to look at the job record itself
+        # within a few seconds - otherwise a job with no pid and a long probe
+        # interval would leave its watcher asleep for hours after the job had
+        # been cancelled or removed. Waking is nearly free; probing is not, and
+        # probing stays gated on the interval.
         if has_pid:
             time.sleep(min(15.0, max(1.0, interval / 20.0)))
         else:
-            time.sleep(max(1.0, min(interval, (last_probe + interval) - time.time())))
+            time.sleep(max(1.0, min(15.0, interval,
+                                    (last_probe + interval) - time.time())))
 
 
 # ------------------------------------------------------------------- commands
@@ -1774,6 +1832,9 @@ def _announce(job):
 
 
 def cmd_start(args):
+    if args.pid and not alive(args.pid):
+        raise SystemExit("pid %s is not running, so there is nothing to track"
+                         % args.pid)
     log = os.path.abspath(args.log) if args.log else None
     with state_rw() as st:
         job = _new_job(args, cmd=args.cmd, log=log, pid=args.pid)
@@ -1793,7 +1854,7 @@ def cmd_run(args):
     cmd_parts = list(args.command)
     if cmd_parts and cmd_parts[0] == "--":
         cmd_parts = cmd_parts[1:]
-    if not cmd_parts:
+    if not cmd_parts or not "".join(cmd_parts).strip():
         raise SystemExit("nothing to run: agent-tqdm run --name train -- python train.py")
     # Re-quote each argument: the caller's shell already tokenized them, so a
     # naive join would break `-c "..."`, paths with spaces, and quoted flags.
@@ -1885,6 +1946,10 @@ def cmd_exec(args):
     """
     cfg = load_config()
     check_cwd(args.cwd)
+    if args.shell is not None and not args.shell.strip():
+        # `( ) > log` is a shell syntax error, which is a puzzling way to
+        # report that there was nothing to run
+        raise SystemExit("nothing to run")
     after = (parse_duration(args.after) if args.after is not None
              else cfg["auto_track_after_seconds"])
     command = args.shell
@@ -1913,7 +1978,7 @@ def cmd_exec(args):
             except OSError:
                 pass
         open(log, "a").close()
-    except Exception:
+    except (Exception, SystemExit):
         return _passthrough(command, args.cwd)
 
     started = time.time()

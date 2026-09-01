@@ -396,12 +396,13 @@ tests/run_tests.py           integration: the real CLI, hooks and processes
 tests/test_units.py          unit: parsing, the estimator, monitors, config
 tests/test_lifecycle.py      the watcher, old state, pruning, the installer
 tests/test_hooks.py          hook contracts and the statusline's shape
+tests/test_robust.py         damaged state, scale, settings
 demo/tour.py                 the narrated tour
 demo/record.py               renders the .mov and .gif from live job state
 demo/mov_encoder.swift       PNG frames -> .mov via AVFoundation
 ```
 
-Run the tests with `python3 tests/all.py` — 226 checks over real processes,
+Run the tests with `python3 tests/all.py` — 253 checks over real processes,
 nothing mocked. A couple of minutes, most of it spent waiting on actual
 commands, which is the only way to check a threshold or a watcher.
 

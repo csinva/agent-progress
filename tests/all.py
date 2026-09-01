@@ -12,7 +12,8 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SUITES = ["test_units.py", "test_lifecycle.py", "test_hooks.py", "run_tests.py"]
+SUITES = ["test_units.py", "test_lifecycle.py", "test_hooks.py",
+          "test_robust.py", "run_tests.py"]
 
 total = failed = 0
 broken = []

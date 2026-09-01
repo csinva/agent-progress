@@ -94,6 +94,35 @@ except subprocess.TimeoutExpired:
 cli("rm", "--all")
 
 print()
+print("=== only one watcher, however many sessions start at once ===")
+import threading
+subprocess.run(["pkill", "-f", "agent_tqdm.py _watch"], capture_output=True)
+time.sleep(1)
+cli("start", "orph", "--eta", "2h", "--monitor", "time", "--no-watch")
+with cc.state_rw() as st:
+    st["jobs"]["orph"]["watcher_pid"] = 999999      # as a reboot would leave it
+th = [threading.Thread(target=lambda i=i: subprocess.run(
+    [sys.executable, os.path.join(HOOKS, "inject_status.py"), "SessionStart"],
+    input=json.dumps({"session_id": "s%d" % i}), capture_output=True, text=True))
+    for i in range(5)]
+[t.start() for t in th]; [t.join() for t in th]
+time.sleep(1.5)
+n = len(subprocess.run(["pgrep", "-f", "_watch orph"],
+                       capture_output=True, text=True).stdout.split())
+ck("five concurrent revivals leave one watcher", n == 1, "%d watchers" % n)
+
+cli("rm", "--all")
+gone = False
+for _ in range(20):
+    time.sleep(1)
+    if not subprocess.run(["pgrep", "-f", "_watch orph"],
+                          capture_output=True, text=True).stdout.split():
+        gone = True
+        break
+ck("a watcher notices its job was removed within ~15s", gone, "still running")
+subprocess.run(["pkill", "-f", "agent_tqdm.py _watch"], capture_output=True)
+
+print()
 print("=== a log that is truncated under the watcher ===")
 log2 = os.path.join(scratch, "rot.log")
 open(log2, "w").write("Epoch 5/10\n" * 50)

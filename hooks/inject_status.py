@@ -146,18 +146,24 @@ def should_send(cc, cfg, session_id, signature):
 
 
 def revive_watchers(cc):
-    """A watcher killed by a reboot leaves a frozen bar; restart it."""
+    """A watcher killed by a reboot leaves a frozen bar; restart it.
+
+    The liveness check and the spawn have to happen inside the same lock. Two
+    sessions starting at once would otherwise both read the same dead pid and
+    both spawn, leaving several watchers polling one job - and running its
+    probe command once each."""
     try:
         st = cc.state_ro()
-        dead = [j for j in st["jobs"].values()
-                if j.get("state") == "running" and not cc.alive(j.get("watcher_pid"))]
-        if not dead:
-            return
+        if not any(j.get("state") == "running" and not cc.alive(j.get("watcher_pid"))
+                   for j in st["jobs"].values()):
+            return                      # nothing to do, and no need to take the lock
         with cc.state_rw() as w:
-            for j in dead:
-                jid = j.get("id")
-                if jid in w["jobs"] and w["jobs"][jid].get("state") == "running":
-                    w["jobs"][jid]["watcher_pid"] = cc.spawn_watcher(jid)
+            for jid, job in w["jobs"].items():
+                if job.get("state") != "running":
+                    continue
+                if cc.alive(job.get("watcher_pid")):
+                    continue            # re-checked under the lock, so only one wins
+                job["watcher_pid"] = cc.spawn_watcher(jid)
     except Exception:
         pass
 

@@ -108,6 +108,7 @@ orph = "orph-" + sandbox.TAG
 cli("start", orph, "--eta", "2h", "--monitor", "time", "--no-watch")
 with cc.state_rw() as st:
     st["jobs"][orph]["watcher_pid"] = 999999      # as a reboot would leave it
+    st["jobs"][orph]["no_watch"] = False          # it had a watcher; --no-watch was only to skip spawning one here
 th = [threading.Thread(target=lambda i=i: subprocess.run(
     [sys.executable, os.path.join(HOOKS, "inject_status.py"), "SessionStart"],
     input=json.dumps({"session_id": "s%d" % i}), capture_output=True, text=True))
@@ -688,6 +689,113 @@ shutil.rmtree(home, ignore_errors=True)
 
 
 print()
+print()
+print("=== the wrapper leaves comments and heredocs alone ===")
+home, renv = reap_home()
+for label, cmd, want in (("a trailing comment", "echo one  # quick", b"one\n"),
+                         ("a heredoc at the end", "cat <<'EOF'\nhello\nEOF", b"hello\n"),
+                         ("a comment then a newline", "echo two # c\necho three", b"two\nthree\n")):
+    r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "60", "--shell", cmd],
+                       capture_output=True, env=renv)
+    ck("%s survives the wrapper" % label, r.returncode == 0 and r.stdout == want,
+       repr((r.returncode, r.stdout)))
+subprocess.run([sys.executable, ENGINE, "run", "--name", "hd", "--", "sh", "-c", "cat <<'EOF'\nfrom run\nEOF"],
+               capture_output=True, text=True, env=renv)
+time.sleep(2)
+logf = [j.get("log") for j in records(home) if j.get("id") == "hd"]
+ck("run copes with a heredoc too", bool(logf) and os.path.exists(logf[0]) and "from run" in open(logf[0]).read(),
+   str(logf))
+sandbox.kill_watchers(cc)
+shutil.rmtree(home, ignore_errors=True)
+
+print()
+print("=== odd inputs are refused cleanly, and nothing is left behind ===")
+home, renv = reap_home()
+r = subprocess.run([sys.executable, ENGINE, "start", "z", "--pid", "0", "--eta", "1h"],
+                   capture_output=True, text=True, env=renv)
+ck("--pid 0 is refused", r.returncode != 0 and "Traceback" not in r.stderr, r.stderr[-100:])
+r = subprocess.run([sys.executable, ENGINE, "start", "big", "--eta", "99999999999999999999h", "--no-watch"],
+                   capture_output=True, text=True, env=renv)
+ck("an absurd --eta is refused", r.returncode != 0 and "Traceback" not in r.stderr, r.stderr[-100:])
+subprocess.run([sys.executable, ENGINE, "start", "ok", "--eta", "1h", "--no-watch"], capture_output=True, env=renv)
+for flag in (("--eta", ""), ("--eta", "  "), ("--pct", "nan"), ("--pct", "inf")):
+    r = subprocess.run([sys.executable, ENGINE, "update", "ok"] + list(flag), capture_output=True, text=True, env=renv)
+    ck("update %s %r is refused cleanly" % flag, r.returncode != 0 and "Traceback" not in r.stderr, r.stderr[-100:])
+json.dump({"version": 1, "jobs": {"bad": {"id": "bad", "state": "running", "started": time.time(),
+                                           "eta_end": 1e20, "est_total_s": float("inf"), "total": 10 ** 30}},
+           "sessions": {}, "inbox": []}, open(os.path.join(home, "state.json"), "w"))
+for cmd in (["statusline"], ["ls"], ["ls", "--json"]):
+    r = subprocess.run([sys.executable, ENGINE] + cmd, input="{}", capture_output=True, text=True, env=renv)
+    ck("%s survives a record with impossible numbers" % " ".join(cmd), r.returncode == 0, r.stderr[-120:])
+r = subprocess.run([sys.executable, ENGINE, "run", "--name", "ghost", "--cwd", "/nonexistent/dir", "--", "echo", "hi"],
+                   capture_output=True, text=True, env=renv)
+ck("a bad --cwd is a clean error", r.returncode != 0 and "Traceback" not in r.stderr, r.stderr[-100:])
+ck("and leaves no ghost job behind", not [j for j in records(home) if j.get("id") == "ghost"])
+r = subprocess.run([sys.executable, ENGINE, "run", "--name", "tilde", "--cwd", "~", "--", "pwd"],
+                   capture_output=True, text=True, env=renv)
+ck("--cwd ~ is expanded", r.returncode == 0, r.stderr[-100:])
+subprocess.run([sys.executable, ENGINE, "run", "--", "python3", "-c", "print(1)", "--epochs", "10"],
+               capture_output=True, text=True, env=renv)
+ids = [j.get("id") for j in records(home)]
+ck("run does not name the job after its last argument", "10" not in ids, str(ids))
+time.sleep(2)
+subprocess.run([sys.executable, ENGINE, "done", "tilde"], capture_output=True, text=True, env=renv)
+r = subprocess.run([sys.executable, ENGINE, "cancel", "tilde"], capture_output=True, text=True, env=renv)
+ck("cancelling a finished job is refused", r.returncode != 0 and "already ended" in r.stderr, r.stderr[-100:])
+sandbox.kill_watchers(cc)
+shutil.rmtree(home, ignore_errors=True)
+
+print()
+print("=== rm says only what it did ===")
+home, renv = reap_home()
+for n in ("alpha", "beta"):
+    subprocess.run([sys.executable, ENGINE, "start", n, "--eta", "1h", "--no-watch"], capture_output=True, env=renv)
+r = subprocess.run([sys.executable, ENGINE, "rm", "alpha", "nosuch"], capture_output=True, text=True, env=renv)
+ids = [j.get("id") for j in records(home)]
+ck("the job it could remove is removed", "alpha" not in ids and "removed alpha" in r.stdout, str((ids, r.stdout)))
+ck("and the one it could not is reported, with a non-zero exit", r.returncode != 0 and "nosuch" in r.stderr,
+   r.stderr[-100:])
+shutil.rmtree(home, ignore_errors=True)
+
+print()
+print("=== cancel never signals its own process group ===")
+home, renv = reap_home()
+child = subprocess.Popen(["sleep", "60"])          # in this test's own process group
+subprocess.run([sys.executable, ENGINE, "start", "grp", "--pid", str(child.pid), "--eta", "1h", "--no-watch"],
+               capture_output=True, env=renv)
+r = subprocess.run([sys.executable, ENGINE, "cancel", "grp"], capture_output=True, text=True, env=renv)
+ck("the cancel command itself survives", r.returncode == 0, str((r.returncode, r.stderr[-100:])))
+try:
+    child.wait(timeout=5)
+    stopped = True
+except subprocess.TimeoutExpired:
+    stopped = False
+    child.kill()
+ck("and the job's process is stopped", stopped)
+ck("and the record says cancelled",
+   [j.get("state") for j in records(home) if j.get("id") == "grp"] == ["cancelled"])
+shutil.rmtree(home, ignore_errors=True)
+
+print()
+print("=== --no-watch is honoured, context mode reaches Claude ===")
+home, renv = reap_home()
+renv = dict(renv, CLAUDE_CODE_SESSION_ID="nw")
+subprocess.run([sys.executable, ENGINE, "start", "quiet", "--eta", "1h", "--no-watch"], capture_output=True, env=renv)
+hook(renv, "UserPromptSubmit", "nw", prompt="hi")
+ck("a prompt does not revive a watcher for a --no-watch job",
+   [j.get("watcher_pid") for j in records(home) if j.get("id") == "quiet"] == [None])
+subprocess.run([sys.executable, ENGINE, "config", "--set", "report_style=context"], capture_output=True, env=renv)
+subprocess.run([sys.executable, ENGINE, "run", "--name", "ctx", "--eta", "1h", "--", "sh", "-c", "sleep 1; exit 5"],
+               capture_output=True, env=renv)
+time.sleep(2.5)
+_rc, beside = hook(renv, "Stop", "nw")
+r = subprocess.run([sys.executable, os.path.join(HOOKS, "inject_status.py"), "UserPromptSubmit"],
+                   input=json.dumps({"session_id": "nw", "prompt": "hi"}), capture_output=True, text=True, env=renv)
+ck("in context mode the Stop hook leaves the report for the prompt", beside == "", repr(beside[:80]))
+ck("and the prompt hook hands it to Claude", "ctx" in r.stdout and "additionalContext" in r.stdout, r.stdout[:160])
+sandbox.kill_watchers(cc)
+shutil.rmtree(home, ignore_errors=True)
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

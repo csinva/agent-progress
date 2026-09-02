@@ -494,19 +494,20 @@ slower says so: `est 26m (+6m)`.
    `SIGKILL`, `SIGSEGV`, `exit 1` — not left as a bare number. Crashed jobs are
    always shown, even short ones, and linger 30 minutes.
 2. **A desktop notification** fires with the reason and duration.
-3. **Claude tells you, unprompted.** The crash is queued with the last 15 lines
-   of output, and a `Stop` hook hands it over the moment Claude finishes its next
-   turn — no waiting for you to type anything. Claude reports what died,
-   summarizes the cause, and suggests a fix.
+3. **A report appears beside the conversation.** The crash is queued with the
+   last 15 lines of output, and a `Stop` hook shows it the moment Claude
+   finishes its turn — next to the transcript, not in it, so it interrupts
+   nobody and takes up no room in Claude's context. With
+   `report_style=context` it goes to Claude with your next message instead,
+   and Claude reports what died and suggests a fix.
 
 Nothing can push a message into a running Claude session from outside, so
 delivery is queued rather than instantaneous: the report arrives at the first of
-Claude finishing a turn, you sending a message, or a new session starting. It is
-delivered exactly once and never lost. The interrupt is one-shot per crash and
-guarded against stop-hook loops.
+Claude finishing a turn or you sending a message. It is delivered exactly once
+and never lost.
 
 `agent-progress config --set crash_alert=false` keeps the skull and the notification
-but drops the interruption. A job you `cancel` isn't a crash — it gets `■` and
+but drops the report. A job you `cancel` isn't a crash — it gets `■` and
 stays silent.
 
 ---
@@ -530,7 +531,7 @@ rather than staying invisible.
 
 ## Configuration
 
-48 settings, each with a default, a type, a valid range and a one-line
+61 settings, each with a default, a type, a valid range and a one-line
 explanation:
 
 ```bash

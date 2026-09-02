@@ -664,6 +664,26 @@ ck("and nothing was cancelled",
 reset()
 
 print()
+print("=== a finished job's id is reused only by its own session ===")
+reset()
+as_session("agent-A", "start", "train", "--eta", "3h", "--monitor", "time", "--no-watch")
+as_session("agent-A", "fail", "train", "--exit-code", "9")
+as_session("agent-B", "start", "train", "--eta", "3h", "--monitor", "time", "--no-watch")
+raw = json.loads(open(sandbox.STATE).read())["jobs"]
+ck("another session's finished record is not replaced",
+   raw.get("train", {}).get("session_id") == "agent-A" and raw["train"]["state"] == "failed",
+   str({k: (v.get("session_id"), v.get("state")) for k, v in raw.items()}))
+ck("the newcomer gets its own id", raw.get("train-2", {}).get("session_id") == "agent-B",
+   str(sorted(raw)))
+ck("so A still sees its crash on the bar", "train" in bars("agent-A"), str(bars("agent-A")))
+as_session("agent-A", "start", "train", "--eta", "3h", "--monitor", "time", "--no-watch")
+raw = json.loads(open(sandbox.STATE).read())["jobs"]
+ck("while a session re-running its own finished job reuses the id",
+   raw["train"]["session_id"] == "agent-A" and raw["train"]["state"] == "running",
+   str((raw["train"].get("session_id"), raw["train"]["state"])))
+reset()
+
+print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

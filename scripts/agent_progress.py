@@ -28,6 +28,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 import unicodedata
 
 # --------------------------------------------------------------------------- paths
@@ -163,7 +164,8 @@ CONFIG_SPEC = {
         "tell the session when a tracked job finishes, with the tail of its output",
         "bool"),
     "crash_alert": _spec("behavior", True,
-                         "interrupt Claude when a job crashes, so it tells you right away", "bool"),
+                         "show a job's ending beside the conversation when Claude finishes a turn",
+                         "bool"),
     "context_min_interval_seconds": _spec(
         "behavior", 300,
         "least time between unchanged job summaries sent to Claude", lo=0),
@@ -329,6 +331,13 @@ def _sanitize(st):
                 if key in job and not isinstance(job[key], (int, float)):
                     job[key] = None
                 if isinstance(job.get(key), bool):
+                    job[key] = None
+                # inf and nan are floats too, and every renderer chokes on them;
+                # so does an integer too big to become a float
+                v = job.get(key)
+                if isinstance(v, float) and not math.isfinite(v):
+                    job[key] = None
+                elif isinstance(v, int) and abs(v) > 10 ** 15:
                     job[key] = None
             for key in ("id", "state", "unit", "note", "desc", "cmd", "log", "pattern",
                         "state_probe", "queue_reason", "nodes", "partition",
@@ -530,8 +539,9 @@ def _prune_finished(st):
     if len(done) <= FINISHED_CAP:
         return
     done.sort(key=lambda kv: kv[1].get("ended") or kv[1].get("updated") or 0, reverse=True)
-    for key, _ in done[FINISHED_CAP:]:
+    for key, job in done[FINISHED_CAP:]:
         del jobs[key]
+        _discard_auto_files(job)
 
 
 def _prune_sessions(st):
@@ -673,8 +683,15 @@ def new_id(st, name):
     base = slug(name)
     if base not in st["jobs"]:
         return base
-    # reuse the slot if the previous job of this name is finished
-    if st["jobs"][base].get("state") not in ACTIVE_STATES:
+    # Reuse the slot if the previous job of this name is finished - one of our
+    # own, and one nobody is still watching. Another session's finished record
+    # is its history and, for a while, its bar; taking the id replaced both
+    # with a job that session never started. And a watcher still running for
+    # the old job - marked done by hand while its process ran on - would go on
+    # writing its readings into the new job's record.
+    prev = st["jobs"][base]
+    if (prev.get("state") not in ACTIVE_STATES and job_belongs_here(prev)
+            and not alive(prev.get("watcher_pid"))):
         return base
     n = 2
     while "%s-%d" % (base, n) in st["jobs"]:
@@ -740,9 +757,15 @@ def resolve(st, ref, mutating=False, any_session=False):
 
 
 def alive(pid):
+    """Is there a process with this pid? Never true for 0 or a negative number:
+    kill(0) and kill(-1) address process groups, and answering "alive" for
+    them let `start --pid -1` in, whose cancel would have signalled every
+    process the user owns."""
     if not pid:
         return False
     try:
+        if int(pid) <= 1:
+            return False
         os.kill(int(pid), 0)
     except OSError as e:
         return e.errno == errno.EPERM
@@ -775,7 +798,8 @@ BUILTIN_PATTERNS = [
         r"(?i)\b(?:progress|trial|fold|shard|chunk|file)\b[:\s]*"
         r"(?P<step>\d+)\s*(?:/|of)\s*(?P<total>\d+)")),
     # "45% complete", "done: 45.0%"
-    ("percent", re.compile(r"(?P<pct>\d{1,3}(?:\.\d+)?)\s*%")),
+    # a left boundary, or "GPU util 1234%" reads as 234% and the bar hits 100
+    ("percent", re.compile(r"(?<![\d.])(?P<pct>\d{1,3}(?:\.\d+)?)\s*%")),
     # last resort: a bare "45/100" not part of a path, date or version
     ("bare", re.compile(r"(?<![\w./-])(?P<step>\d+)\s*/\s*(?P<total>\d+)(?![\w./-])")),
 ]
@@ -1017,7 +1041,7 @@ def fmt_dur(s):
 
 def fmt_short(s):
     """Compact human duration: 2h14m / 45m / 38s."""
-    if s is None:
+    if s is None or not math.isfinite(s):
         return "?"
     s = int(max(0, s))
     if s < 60:
@@ -1041,30 +1065,67 @@ def fmt_clock(ts, cfg=None):
     if ts is None:
         return "?"
     fmt = (cfg or load_config())["clock_format"]
-    return time.strftime(fmt, time.localtime(ts))
+    try:
+        return time.strftime(fmt, time.localtime(ts))
+    except (OverflowError, ValueError, OSError):
+        return "?"                        # a timestamp beyond what the platform can hold
+
+
+MAX_DURATION = 100 * 365 * 86400      # a century; anything longer is a typo
+
+_UNIT_SECONDS = {"ms": 0.001, "s": 1, "m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}
+
+
+def _unit_seconds(word):
+    """'h', 'hr', 'hours', 'min', 'd', 'days', 'ms', ... -> seconds, or None."""
+    if not word:
+        return 1.0                       # a bare number is seconds
+    if word == "ms" or word.startswith("milli"):
+        return 0.001
+    for letter in "smhdw":
+        if word.startswith(letter):
+            return float(_UNIT_SECONDS[letter])
+    return None
 
 
 def parse_duration(text):
-    """'90', '90s', '5m', '2h30m', '1h', '1:30:00' -> seconds."""
+    """'90', '90s', '5m', '2h30m', '2d', '1:30:00', '2 hours' -> seconds.
+
+    The whole string has to be a duration. Matching only the parts that looked
+    like one read `2d` as 2 seconds, `-5m` as 5 minutes and `1e3` as 4 seconds,
+    all silently: a two-day estimate became a two-second one, and the job was
+    hidden as short and overdue before it had begun."""
     if text is None:
         return None
     text = str(text).strip().lower()
     if not text:
         return None
-    if ":" in text:
-        parts = [float(p) for p in text.split(":")]
-        while len(parts) < 3:
-            parts.insert(0, 0.0)
-        return parts[0] * 3600 + parts[1] * 60 + parts[2]
-    total, found = 0.0, False
-    for val, unit in re.findall(r"(\d+(?:\.\d+)?)\s*([hms]?)", text):
-        if not val:
-            continue
-        found = True
-        mult = {"h": 3600, "m": 60, "s": 1, "": 1}[unit]
-        total += float(val) * mult
-    if not found:
-        raise SystemExit("could not parse duration: %r (try 45m, 2h30m, 90s)" % text)
+    total = None
+    try:
+        if ":" in text:
+            parts = [float(p) for p in text.split(":")]
+            if len(parts) > 3 or any(p < 0 for p in parts):
+                raise ValueError(text)
+            while len(parts) < 3:
+                parts.insert(0, 0.0)
+            total = parts[0] * 3600 + parts[1] * 60 + parts[2]
+        else:
+            total, pos = 0.0, 0
+            for m in re.finditer(r"\s*(\d+(?:\.\d+)?)\s*([a-z]*)\s*", text):
+                if m.start() != pos:
+                    raise ValueError(text)
+                pos = m.end()
+                mult = _unit_seconds(m.group(2))
+                if mult is None:
+                    raise ValueError(text)
+                total += float(m.group(1)) * mult
+            if pos != len(text) or pos == 0:
+                raise ValueError(text)
+    except ValueError:
+        raise SystemExit("could not parse duration: %r (try 45m, 2h30m, 90s, 2d, 1:30:00)"
+                         % text)
+    if not math.isfinite(total) or total > MAX_DURATION:
+        raise SystemExit("%r is not a sensible length of time" % text)
     return total
 
 
@@ -1272,7 +1333,9 @@ def one_line(text, limit=None):
         return text
     text = _ESCAPES.sub("", str(text))
     text = re.sub(r"\s+", " ", text).strip()
-    return text[:limit] if limit else text
+    # a note is a line; 200 KB of one was being written into the state file
+    # on every tick
+    return text[:limit or 1000]
 
 
 def visible_len(s):
@@ -1299,7 +1362,9 @@ def clip(s, width):
         out.append(s[i])
         seen += w
         i += 1
-    return "".join(out) + "…\033[0m"
+    # the reset only belongs where colour was used; with colour off it was the
+    # one escape sequence on the line
+    return "".join(out) + "…" + ("\033[0m" if "\033" in s else "")
 
 
 def render_block(job, cfg, width):
@@ -1482,8 +1547,11 @@ AUTO_TRACK_IGNORE = [
     # never re-wrap ourselves. The path prefix matters: the wrapper emits an
     # absolute path, so a rule anchored on the bare name would not match the
     # very command it exists to recognise.
-    r"^\s*(?:sudo\s+)?(?:\S*/)?agent[-_]progress\b",
+    r"(?:^|[;&|]\s*)(?:sudo\s+)?(?:\S*/)?agent[-_]progress\b",
     r"\bagent_progress\.py\b",
+    # the documented way to say "not this one": the hook cannot see a variable
+    # set for the command, but it can see it written in front of the command
+    r"(?:^|[;&|]\s*)AGENT_PROGRESS_NO_AUTO=",
     r"(?:^|\s)(?:--help|-h|--version|-V)(?:\s|$)",
     # note: \b before a dash never matches - a space and a dash are both
     # non-word characters, so there is no boundary between them
@@ -1554,6 +1622,39 @@ def command_segments(command, cap=400, most=40):
     return parts[:half] + parts[-half:]
 
 
+_SHELL_STATE = re.compile(
+    r"\s*(?:cd|pushd|popd|export|source|\.|alias|unalias|unset|nohup|disown)(?:\s|$)"
+    r"|\s*[A-Za-z_][A-Za-z0-9_]*=\S*\s*$")
+_LEADING_STATE = re.compile(
+    r"\A(\s*(?:cd|pushd|export|source|\.)(?:\s[^;&|\n\'\"`$()]*)?(?:&&|;|\n)\s*)")
+
+
+def split_shell_prefix(command):
+    """(prefix, body): the leading `cd`s and `export`s that have to stay in the
+    caller's shell, and the command left to wrap. `body` is None when a command
+    that acts on the shell sits anywhere else, or backgrounds itself: those
+    cannot be wrapped at all.
+
+    A prefix segment with a quote, a variable or a substitution in it is not
+    taken - splitting on separators cannot see inside those, and a `cd` cut in
+    half would break the command instead of tracking it."""
+    text = command or ""
+    prefix = ""
+    while True:
+        m = _LEADING_STATE.match(text)
+        if not m:
+            break
+        prefix += m.group(1)
+        text = text[m.end():]
+    body = text
+    if not body.strip():
+        return prefix, None
+    for seg in command_segments(body) or [body]:
+        if _SHELL_STATE.match(seg):
+            return prefix, None
+    return prefix, body
+
+
 def command_for_display(command):
     """A command with any heredoc body taken out, for showing to a person.
 
@@ -1602,6 +1703,24 @@ def classify_command(command, tool_input=None, cfg=None):
     if trivial and all(any(_safe_search(rx, seg) for rx in trivial) for seg in segments):
         result["why"] = "every part of it is a trivial command"
         return result
+
+    # Some commands act on the shell they run in - `cd`, `export`, `source`, a
+    # bare assignment - and wrapping them in a shell of their own throws that
+    # away: `cd repo && pytest` left the session in the old directory. When
+    # they lead, they stay outside and only the work is wrapped; anywhere
+    # else, the command runs untouched. And a command that backgrounds itself
+    # with `&` returns at once, before the wrapper has anything to watch,
+    # while its output goes to a log the wrapper then deletes.
+    prefix, body = split_shell_prefix(command)
+    if body is None:
+        result["why"] = "part of it changes the shell it runs in, or leaves it"
+        return result
+    if re.search(r"(?<![&|>])&\s*(?:#[^\n]*)?$", head):
+        result["why"] = "it puts itself in the background"
+        return result
+    result["prefix"], result["body"] = prefix, body
+    result["name"] = suggest_job_name(body[:2000])
+    segments = command_segments(body) or [body[:2000]]
 
     background = bool(tool_input.get("run_in_background"))
     if background and not cfg["auto_track_background"]:
@@ -1737,14 +1856,20 @@ SUBMIT_PATTERNS = [
 DONE_STATES = {"COMPLETED", "COMPLETE", "DONE", "SUCCESS", "SUCCEEDED", "FINISHED", "OK"}
 FAILED_STATES = {"FAILED", "FAIL", "TIMEOUT", "CANCELLED", "CANCELED", "OUT_OF_MEMORY",
                  "OOM", "NODE_FAIL", "BOOT_FAIL", "DEADLINE", "PREEMPTED", "ERROR",
-                 "SPECIAL_EXIT", "REVOKED"}
+                 "SPECIAL_EXIT", "REVOKED",
+                 "EXIT"}                # LSF: exited with a non-zero status
 
 SLURM_STATE_CMD = (
     's=$(sacct -j %(id)s -n -o State -X 2>/dev/null | head -1); '
     '[ -z "$s" ] && s=$(squeue -j %(id)s -h -o %%T 2>/dev/null | head -1); '
     'echo "$s"')
 LSF_STATE_CMD = "bjobs -noheader -o stat %(id)s 2>/dev/null | head -1"
-PBS_STATE_CMD = "qstat -x -f %(id)s 2>/dev/null | grep -o 'job_state = .' | head -1"
+# PBS answers with a letter - R, Q, H, E, F - and F says only that the job is
+# finished, not how. Its exit status is on another line, so print that instead
+# once the job is finished: a bare number reads as an exit code below.
+PBS_STATE_CMD = ("qstat -x -f %(id)s 2>/dev/null | awk '/job_state =/{s=$3} "
+                 "/Exit_status =/{e=$3} END{if(s==\"F\") print (e==\"\" ? 0 : e); "
+                 "else if (s!=\"\") print s}'")
 
 STATE_CMDS = {"slurm": SLURM_STATE_CMD, "lsf": LSF_STATE_CMD, "pbs": PBS_STATE_CMD}
 CANCEL_CMDS = {"slurm": "scancel %(id)s", "lsf": "bkill %(id)s", "pbs": "qdel %(id)s"}
@@ -2125,6 +2250,7 @@ def read_state_probe(job):
     except Exception:
         return None
     word = (out or "").strip().split("\n")[-1].strip().upper()
+    word = word.split("=")[-1].strip()       # "job_state = F" -> "F"
     word = re.sub(r"[^A-Z_0-9]", "", word.replace(" ", "_"))
     if not word:
         return None
@@ -2403,7 +2529,7 @@ def parse_size(text):
     """'12GB', '500 MB', '1.5t', '4096' -> bytes."""
     if text is None:
         return None
-    m = re.match(r"^\s*([\d.]+)\s*([kmgtp]?)i?b?\s*$", str(text).strip().lower())
+    m = re.match(r"^\s*(\d+(?:\.\d+)?|\.\d+)\s*([kmgtp]?)i?b?\s*$", str(text).strip().lower())
     if not m:
         raise SystemExit("could not parse size: %r (try 500MB, 12GB)" % text)
     mult = {"": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3,
@@ -2468,6 +2594,13 @@ def tail_job_log(job, max_bytes=262144):
     text, new_off = read_tail(log, job.get("log_offset") or 0, max_bytes)
     job["log_offset"] = new_off
     return text
+
+
+def _size_of(path):
+    try:
+        return os.path.getsize(path) if path else None
+    except OSError:
+        return None
 
 
 def _milestone_hit(name, text):
@@ -2638,6 +2771,15 @@ def record_sample(job, units, now):
 def apply_reading(job, reading, now):
     """Fold one parsed log reading into the job's counters."""
     if not reading:
+        return False
+    # An array's bar is its task count, from the scheduler. A reading from one
+    # task's log said "epoch 3 of 50" and was written over "7 of 8 tasks" every
+    # tick, so the bar flip-flopped between the two.
+    if job.get("unit") == "task" and job.get("total_locked"):
+        return False
+    # A 300-digit "step" is not progress, and turning it into a float raises
+    if any(isinstance(reading.get(k), int) and abs(reading[k]) > 10 ** 15
+           for k in ("step", "total")):
         return False
     changed = False
     total = reading.get("total")
@@ -2822,10 +2964,20 @@ def cmd_watch_daemon(args):
     leave a live job with a frozen bar until some session happened to start and
     revive it. Waiting and trying again costs nothing - the loop is asleep
     almost all of the time - and the only thing lost is one probe's timing."""
+    strikes = 0
     while True:
         try:
             return _watch_loop(args)
         except StateBusy:
+            time.sleep(5.0)
+        except Exception:
+            # One bad line must not end the watching. The traceback goes to
+            # watcher.log, where `doctor` can find it; the loop goes on, and
+            # only gives up when the same thing keeps happening.
+            strikes += 1
+            traceback.print_exc()
+            if strikes >= 20:
+                return 1
             time.sleep(5.0)
 
 
@@ -2846,6 +2998,7 @@ def _watch_loop(args):
     idle_since = time.time()
     last_probe = 0.0
     last_state = 0.0
+    last_size = None
     interval = float(load_config().get("min_interval_seconds", 120))
 
     while True:
@@ -2923,6 +3076,14 @@ def _watch_loop(args):
                     idle_since = now      # it has only just begun; give it time
             if reading is not None and apply_reading(job, reading, now):
                 idle_since = now
+            # Output is life, whether or not any of it parsed as progress. A
+            # job watched by time alone, or one printing nothing the patterns
+            # know, was being called stalled while its log grew by the second.
+            size = _size_of(job.get("log"))
+            if size is not None and size != last_size:
+                if last_size is not None:
+                    idle_since = now
+                last_size = size
             if due_progress:
                 # a fresh observation means a fresh total estimate
                 e = estimate(job, now)
@@ -3132,6 +3293,8 @@ def _announce(job):
 
 
 def cmd_start(args):
+    if args.pid is not None and args.pid <= 1:
+        raise SystemExit("pid %s is not a process of yours" % args.pid)
     if args.pid and not alive(args.pid):
         raise SystemExit("pid %s is not running, so there is nothing to track"
                          % args.pid)
@@ -3141,6 +3304,9 @@ def cmd_start(args):
         job["id"] = new_id(st, args.name)
         st["jobs"][job["id"]] = job
         jid = job["id"]
+    if args.no_watch:
+        with state_rw() as st:
+            st["jobs"][jid]["no_watch"] = True      # and nothing revives one later
     if (log or args.pid) and not args.no_watch:
         with state_rw() as st:
             st["jobs"][jid]["watcher_pid"] = spawn_watcher(jid)
@@ -3161,11 +3327,13 @@ def cmd_run(args):
     # A single argument is passed through raw, so `run -- "a && b"` still works.
     cmd = (" ".join(shlex.quote(p) for p in cmd_parts)
            if len(cmd_parts) > 1 else cmd_parts[0])
-    check_cwd(args.cwd)
+    args.cwd = check_cwd(args.cwd)
 
     ensure_dirs()
     with state_rw() as st:
-        jid = new_id(st, args.name or slug(cmd_parts[0] if len(cmd_parts) == 1 else cmd_parts[-1]))
+        # the same name the wrapper would choose: `python train.py --epochs 10`
+        # is `train`, not `10`
+        jid = new_id(st, args.name or suggest_job_name(cmd))
         # reserve the id; "running" so a concurrent prune cannot reclaim it
         st["jobs"][jid] = {"id": jid, "state": "running", "started": time.time()}
 
@@ -3179,14 +3347,25 @@ def cmd_run(args):
 
     # the command must be grouped: without the parentheses, `a && b` redirects
     # only b, and everything a printed is lost instead of captured
-    wrapper = "( %s ) > %s 2>&1; echo $? > %s" % (
+    # The newline before the close matters: `pytest  # quick` or a heredoc
+    # ending in `EOF` would otherwise take the `)` onto the comment or the
+    # terminator line, and the command fails with a syntax error and no output
+    wrapper = "( %s\n) > %s 2>&1; echo $? > %s" % (
         cmd, shlex.quote(log), shlex.quote(exitf))
-    proc = subprocess.Popen(
-        [USER_SHELL, "-c", wrapper],
-        cwd=args.cwd or os.getcwd(),
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    try:
+        proc = subprocess.Popen(
+            [USER_SHELL, "-c", wrapper],
+            cwd=args.cwd or os.getcwd(),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as ex:
+        # nothing started, so nothing is running: the reserved record would
+        # otherwise sit there as a job that runs forever with no process
+        with state_rw() as st:
+            if st["jobs"].get(jid, {}).get("pid") is None:
+                st["jobs"].pop(jid, None)
+        raise SystemExit("could not start the command: %s" % os_error_message(ex))
 
     with state_rw() as st:
         job = _new_job(args, cmd=cmd, log=log, exit_file=exitf, pid=proc.pid)
@@ -3300,10 +3479,14 @@ def _interrupted(proc, log, sent):
 
 
 def check_cwd(path):
-    """A missing working directory is a typo, not a crash."""
-    if path and not os.path.isdir(os.path.expanduser(path)):
+    """A missing working directory is a typo, not a crash. Returns the path
+    with `~` expanded, which is the form the process has to be started in."""
+    if not path:
+        return path
+    full = os.path.expanduser(path)
+    if not os.path.isdir(full):
         raise SystemExit("no such directory: %s" % path)
-    return path
+    return full
 
 
 def attach_batch_job(kind, job_id, cwd, eta=None, name=None, desc=None,
@@ -3369,7 +3552,7 @@ def cmd_exec(args):
     machinery - the bar, the estimate, the reminders - come into existence.
     """
     cfg = load_config()
-    check_cwd(args.cwd)
+    args.cwd = check_cwd(args.cwd)
     if args.shell is not None and not args.shell.strip():
         # `( ) > log` is a shell syntax error, which is a puzzling way to
         # report that there was nothing to run
@@ -3414,7 +3597,7 @@ def cmd_exec(args):
     _forward_signals(None)
     started = time.time()
     proc = subprocess.Popen(
-        [USER_SHELL, "-c", "( %s ) > %s 2>&1; echo $? > %s"
+        [USER_SHELL, "-c", "( %s\n) > %s 2>&1; echo $? > %s"
          % (command, shlex.quote(log), shlex.quote(exitf))],
         # No stdin, deliberately. This command may outlive the call that started
         # it, and a detached job holding the session's stdin gets stopped by the
@@ -3619,9 +3802,13 @@ def cmd_update(args):
             job["total"] = args.total
             job["total_locked"] = True
         if args.pct is not None:
+            if not math.isfinite(args.pct):
+                raise SystemExit("--pct wants a number between 0 and 100, not %r" % args.pct)
             job["pct"] = max(0.0, min(1.0, args.pct / 100.0))
         if args.eta is not None:
             secs = parse_duration(args.eta)
+            if secs is None:
+                raise SystemExit("--eta wants a duration, e.g. 45m or 2h30m")
             job["eta_end"] = now + secs
             job["eta_prior_s"] = secs
             # a fresh human/model estimate outranks a stale measured rate
@@ -3659,6 +3846,13 @@ def cmd_finish(args, state):
         jid = resolve(st, args.job, mutating=True,
                       any_session=getattr(args, "any_session", False))
         snapshot = dict(st["jobs"][jid])
+    if snapshot.get("state") not in ACTIVE_STATES:
+        if snapshot.get("state") == state:
+            _announce(snapshot)          # saying it twice is harmless
+            return 0
+        # but `cancel` on a job that finished must not rewrite how it ended
+        raise SystemExit("%s already ended (%s); nothing to mark"
+                         % (jid, snapshot.get("state")))
     said = None
     if state == "cancelled":
         # Outside the lock: a cluster can take its time answering, and nothing
@@ -3672,7 +3866,7 @@ def cmd_finish(args, state):
         finalize(job, 0 if state == "done" else (code if code is not None else 1), time.time())
         job["state"] = state
         if getattr(args, "note", None):
-            job["note"] = args.note
+            job["note"] = one_line(args.note)
         elif said:
             job["note"] = said
         out = dict(job)
@@ -3696,7 +3890,17 @@ def _stop_job(job):
     told a job stopped that did not."""
     if job.get("pid") and alive(job["pid"]):
         try:
-            os.killpg(os.getpgid(job["pid"]), signal.SIGTERM)
+            pgid = os.getpgid(job["pid"])
+        except OSError:
+            pgid = None
+        try:
+            # A job started by `run` has a group of its own; a pid merely
+            # attached with `start --pid` may share ours, and signalling that
+            # group would take this command - and its caller - down with it.
+            if pgid is not None and pgid != os.getpgrp():
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                os.kill(job["pid"], signal.SIGTERM)
         except Exception:
             try:
                 os.kill(job["pid"], signal.SIGTERM)
@@ -3828,7 +4032,7 @@ def cmd_rm(args):
         whose process is already gone, are ordinary rubbish and go freely."""
         pid = job.get("pid")
         return (job.get("state") in ACTIVE_STATES and pid and alive(pid)) or (
-            job.get("state") == "queued" and job.get("scheduler"))
+            job.get("state") in ACTIVE_STATES and batch_of(job)[0])
 
     def removable(job):
         return ours(job) and (args.force or not live(job))
@@ -3855,7 +4059,7 @@ def cmd_rm(args):
             kept = sum(1 for k, v in st["jobs"].items() if ours(v) and k not in gone)
             others = elsewhere(st["jobs"].values())
             for k in gone:
-                del st["jobs"][k]
+                _discard_auto_files(st["jobs"].pop(k))
             print("removed %d job(s)%s%s"
                   % (len(gone), " from this session" if scoped else "",
                      note(kept, others)))
@@ -3867,21 +4071,37 @@ def cmd_rm(args):
                     if v.get("state") not in ACTIVE_STATES and ours(v)]
             others = elsewhere(done_jobs)
             for k in gone:
-                del st["jobs"][k]
+                _discard_auto_files(st["jobs"].pop(k))
             print("removed %d finished job(s)%s" % (len(gone), note(0, others)))
             return 0
+        # Every name is looked at before anything is printed. Raising on the
+        # second name after printing "removed" for the first left the state
+        # unwritten - the first was not removed at all - with output saying it
+        # was.
+        removed, refused = [], []
         for ref in args.job:
-            jid = resolve(st, ref, mutating=True, any_session=args.everywhere)
+            try:
+                jid = resolve(st, ref, mutating=True, any_session=args.everywhere)
+            except SystemExit as ex:
+                refused.append(str(ex))
+                continue
+            if jid in removed:
+                continue
             if live(st["jobs"][jid]) and not args.force:
-                raise SystemExit(
+                refused.append(
                     "%s is still running (pid %s). Forgetting it now would leave it "
                     "running with nothing watching it.\n"
                     "  agent-progress cancel %s     stop it\n"
                     "  agent-progress rm %s --force  forget it and let it run on"
                     % (jid, st["jobs"][jid].get("pid"), jid, jid))
-            del st["jobs"][jid]
-            print("removed %s" % jid)
-    return 0
+                continue
+            _discard_auto_files(st["jobs"].pop(jid))
+            removed.append(jid)
+    for jid in removed:
+        print("removed %s" % jid)
+    for why in refused:
+        print(why, file=sys.stderr)
+    return 1 if refused else 0
 
 
 def term_width(default=100):

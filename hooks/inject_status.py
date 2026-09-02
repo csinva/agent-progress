@@ -245,13 +245,13 @@ def revive_watchers(cc):
     probe command once each."""
     try:
         st = cc.state_ro()
-        if not any(j.get("state") in cc.ACTIVE_STATES
+        if not any(j.get("state") in cc.ACTIVE_STATES and not j.get("no_watch")
                    and not cc.alive(j.get("watcher_pid"))
                    for j in st["jobs"].values()):
             return                      # nothing to do, and no need to take the lock
         with cc.state_rw() as w:
             for jid, job in w["jobs"].items():
-                if job.get("state") not in cc.ACTIVE_STATES:
+                if job.get("state") not in cc.ACTIVE_STATES or job.get("no_watch"):
                     continue
                 if cc.alive(job.get("watcher_pid")):
                     continue            # re-checked under the lock, so only one wins
@@ -297,7 +297,10 @@ def main():
         # beside the transcript instead, where it interrupts nobody.
         if payload.get("stop_hook_active") or not cfg["crash_alert"]:
             return 0
-        if cfg["report_style"] == "off":
+        if cfg["report_style"] != "side":
+            # "off" says nothing; "context" hands the report to Claude with
+            # the next prompt. Taking it here as well marked it delivered, so
+            # in context mode Claude never saw a job end.
             return 0
         # Every crash this session is owed, in one block. Taking them one at a
         # time meant a machine that killed four jobs at once - an OOM, a GPU

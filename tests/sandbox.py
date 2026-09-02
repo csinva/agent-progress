@@ -21,6 +21,10 @@ import os
 import shutil
 import tempfile
 
+# Every suite imports this before the engine, so AGENT_PROGRESS_HOME points at
+# a fresh directory of this run's own before the engine ever reads it. The
+# suites call `rm --all` and `config --reset` freely; none of it can reach a
+# real state directory, whatever the shell's environment says.
 HOME = tempfile.mkdtemp(prefix="agent-progress-tests-")
 os.environ["AGENT_PROGRESS_HOME"] = HOME
 atexit.register(shutil.rmtree, HOME, ignore_errors=True)

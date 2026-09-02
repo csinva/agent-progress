@@ -549,6 +549,81 @@ ck("and nothing at all leaves it to work it out", _mon() is None, str(_mon()))
 ck("while asking for auto says so explicitly", _mon(monitor="auto") == {"kind": "auto"},
    str(_mon(monitor="auto")))
 
+print()
+print("=== a duration is the whole string, with real units ===")
+for text, want in (("90", 90), ("90s", 90), ("5m", 300), ("2h30m", 9000), ("2d", 172800),
+                   ("1w", 7 * 86400), ("1:30:00", 5400), ("2 hours", 7200), ("45 min", 2700),
+                   ("1.5h", 5400), ("500ms", 0.5)):
+    got = cc.parse_duration(text)
+    ck("%-8r -> %s" % (text, want), abs(got - want) < 1e-6, str(got))
+for text in ("-5m", "1e3", "2x", "1:x", "::", "nan:0", "inf:0", "99999999999999999999h", "5m junk", "1y"):
+    try:
+        cc.parse_duration(text)
+        ck("%r is refused" % text, False, "accepted")
+    except SystemExit:
+        ck("%r is refused" % text, True)
+ck("an empty duration is None, not an error", cc.parse_duration("  ") is None)
+
+print()
+print("=== sizes, percents, huge numbers ===")
+for bad in ("1.2.3GB", ".", "GB", "1..5"):
+    try:
+        cc.parse_size(bad)
+        ck("size %r is refused cleanly" % bad, False, "accepted")
+    except SystemExit:
+        ck("size %r is refused cleanly" % bad, True)
+    except ValueError as ex:
+        ck("size %r is refused cleanly" % bad, False, "traceback: %s" % ex)
+got = cc.parse_progress("GPU util 1234%")
+ck("'GPU util 1234%' is not 34%% done", got is None or got.get("pct") is None, str(got))
+ck("'done 45%' still reads", (cc.parse_progress("done 45%") or {}).get("pct") == 0.45)
+job = {"state": "running", "units": None, "total": None, "samples": []}
+ck("a 320-digit step is ignored rather than raised",
+   cc.apply_reading(job, {"step": int("1" * 320), "total": int("2" * 320)}, time.time()) is False
+   and job.get("units") is None, str(job.get("units")))
+arr = {"state": "running", "unit": "task", "total": 8, "total_locked": True, "units": 7.0, "samples": []}
+ck("an array's task count is not overwritten by one task's log",
+   cc.apply_reading(arr, {"step": 3, "total": 50}, time.time()) is False and arr["units"] == 7.0,
+   str(arr["units"]))
+st = {"jobs": {"a": {"id": "a", "state": "running", "eta_end": float("inf"), "total": 10 ** 20,
+                     "pct": float("nan"), "started": time.time()}}}
+cc._sanitize(st)
+ck("inf, nan and a number too big to be a count are dropped on read",
+   all(st["jobs"]["a"].get(k) is None for k in ("eta_end", "total", "pct")), str(st["jobs"]["a"]))
+ck("a timestamp beyond the platform's clock renders as ?", cc.fmt_clock(1e20) == "?")
+ck("an infinite duration renders as ?", cc.fmt_short(float("inf")) == "?")
+ck("a pid of 0 or -1 is never alive", not cc.alive(0) and not cc.alive(-1))
+
+print()
+print("=== scheduler words ===")
+ck("LSF EXIT is a failure", "EXIT" in cc.FAILED_STATES)
+ck("PBS asks for the exit status once the job is finished",
+   "Exit_status" in cc.PBS_STATE_CMD and "job_state" in cc.PBS_STATE_CMD)
+
+print()
+print("=== what stays outside the wrapper ===")
+cfg = cc.load_config()
+def verdict(c):
+    return cc.classify_command(c, {}, cfg)
+v = verdict("cd /tmp && python train.py")
+ck("a leading cd stays in the caller's shell", v["track"] and v.get("prefix") == "cd /tmp && "
+   and v.get("body") == "python train.py", str(v))
+v = verdict("export X=1 && make check")
+ck("so does a leading export", v["track"] and v.get("prefix") == "export X=1 && ", str(v))
+ck("set -e is fine inside the wrapper", verdict("set -euo pipefail && python train.py")["track"])
+ck("a cd after the work leaves the command alone", not verdict("python train.py && cd out")["track"])
+ck("a quoted cd is not split", not verdict("cd 'a b' && python train.py")["track"])
+ck("a self-backgrounded command is left alone", not verdict("python train.py &")["track"])
+ck("nohup is left alone", not verdict("nohup python train.py &")["track"])
+ck("AGENT_PROGRESS_NO_AUTO=1 in front of the command works",
+   not verdict("AGENT_PROGRESS_NO_AUTO=1 python train.py")["track"])
+ck("an inline assignment before the command is fine", verdict("FOO=1 python train.py")["track"])
+ck("agent-progress after a cd is not re-wrapped",
+   not verdict("cd repo && agent-progress run -- python train.py")["track"])
+ck("the name comes from the work, not the cd", verdict("cd /tmp && python train.py")["name"] == "train")
+ck("clip adds no escape code to a plain line", "\033" not in cc.clip("a" * 50, 20))
+ck("but keeps colour balanced when there was some", cc.clip("\033[31m" + "a" * 50, 20).endswith("\033[0m"))
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

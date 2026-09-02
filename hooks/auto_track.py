@@ -106,8 +106,12 @@ def main():
         # foreground so the plugin could detach it itself - the caller's
         # decision overruled twice over. The wrapper waits for the command
         # either way; where that waiting happens is not this plugin's business.
-        wrapped = cc.wrap_command(command, verdict["name"],
-                                  after=cfg["auto_track_after_seconds"])
+        # A leading `cd repo &&` or `export X=1 &&` stays in front, in the
+        # caller's own shell, where its effect belongs; the work after it is
+        # what gets the bar.
+        wrapped = verdict.get("prefix", "") + cc.wrap_command(
+            verdict.get("body") or command, verdict["name"],
+            after=cfg["auto_track_after_seconds"])
         updated = dict(tool_input, command=wrapped)
         emit({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",

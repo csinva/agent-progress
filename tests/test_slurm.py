@@ -345,6 +345,35 @@ ck("with no scancel to run, cancel fails rather than pretending",
 run("rm", "--all", "--force")
 
 print()
+print()
+print("=== PBS and LSF jobs end on their scheduler's word ===")
+QSTAT_OUT = os.path.join(sandbox.HOME, "qstat.txt")
+BJOBS_OUT = os.path.join(sandbox.HOME, "bjobs.txt")
+for name, src in (("qstat", QSTAT_OUT), ("bjobs", BJOBS_OUT)):
+    path = os.path.join(BIN, name)
+    with open(path, "w") as f:
+        f.write(FAKE % (src, src))
+    os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+open(QSTAT_OUT, "w").write("Job Id: 4242.head\n    job_state = R\n")
+open(BJOBS_OUT, "w").write("RUN\n")
+run("slurm", "4242.head", "--scheduler", "pbs", "--name", "pbsjob", "--interval", "1s")
+run("slurm", "991", "--scheduler", "lsf", "--name", "lsfjob", "--interval", "1s")
+time.sleep(3)
+ck("a running PBS job reads as running", job("pbsjob").get("state") == "running", str(job("pbsjob").get("state")))
+ck("a running LSF job reads as running", job("lsfjob").get("state") == "running", str(job("lsfjob").get("state")))
+open(QSTAT_OUT, "w").write("Job Id: 4242.head\n    job_state = F\n    Exit_status = 0\n")
+open(BJOBS_OUT, "w").write("EXIT\n")
+until(lambda: job("pbsjob").get("state") != "running" and job("lsfjob").get("state") != "running", 60)
+ck("a finished PBS job is done", job("pbsjob").get("state") == "done", str(job("pbsjob").get("state")))
+ck("an LSF job that exited non-zero is failed", job("lsfjob").get("state") == "failed", str(job("lsfjob").get("state")))
+run("rm", "--all", "--force")
+open(QSTAT_OUT, "w").write("Job Id: 4243.head\n    job_state = F\n    Exit_status = 2\n")
+run("slurm", "4243.head", "--scheduler", "pbs", "--name", "pbsfail", "--interval", "1s")
+until(lambda: job("pbsfail").get("state") not in ("running", "queued"), 60)
+ck("a PBS job that finished with a non-zero status is failed", job("pbsfail").get("state") == "failed",
+   str(job("pbsfail").get("state")))
+run("rm", "--all", "--force")
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

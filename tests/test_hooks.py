@@ -129,6 +129,7 @@ print("=== SessionStart brings back a lost watcher ===")
 cli("start", "orphan", "--eta", "2h", "--monitor", "time", "--no-watch")
 with cc.state_rw() as st:
     st["jobs"]["orphan"]["watcher_pid"] = 999999      # a pid that cannot exist
+    st["jobs"]["orphan"]["no_watch"] = False          # it had one; the flag only skipped the spawn above
 hook(STATUS, "SessionStart", {"session_id": "s"})
 time.sleep(2)
 pid = json.loads(open(cc.STATE).read())["jobs"]["orphan"].get("watcher_pid")

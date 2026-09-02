@@ -176,6 +176,24 @@ records the real exit code.
 
 ---
 
+## When a finished bar goes away
+
+A completed bar is there to be noticed, not to be lived with. It retires after
+**two of your messages** (`keep_done_prompts`), or after five minutes
+(`keep_done_seconds`), whichever comes first — time alone measured this badly,
+since five minutes is many messages if you are working and none at all if you
+stepped away. Only your own messages count, so another session being busy does
+not take your bar down before you have seen it.
+
+A job that **crashed** keeps its full half hour (`keep_failed_seconds`) and is
+not retired by messages at all: it is asking for something, not reporting that
+it is done.
+
+```bash
+agent-progress config --set keep_done_prompts=5   # linger longer
+agent-progress config --set keep_done_prompts=0   # go by time alone
+```
+
 ## Several agents at once
 
 `claude agents` runs many sessions on one machine and they share one state file,
@@ -539,7 +557,7 @@ AGENT_PROGRESS_BAR_WIDTH=40 AGENT_PROGRESS_STYLE=bars agent-progress ls
 
 | group | settings |
 | --- | --- |
-| **visibility** | `min_duration_seconds`, `max_jobs`, `keep_done_seconds`, `keep_failed_seconds`, `prune_after_hours`, `show_context_line` |
+| **visibility** | `min_duration_seconds`, `max_jobs`, `keep_done_seconds`, `keep_done_prompts`, `keep_failed_seconds`, `prune_after_hours`, `show_context_line`, `scope` |
 | **cadence** | `min_interval_seconds`, `interval_fraction` |
 | **bar shape** | `style`, `bar_width`, `name_width`, `fill_char`, `track_char`, `left_cap`, `right_cap`, `spinner`, `spinner_fps`, `glyph_done`, `glyph_failed`, `glyph_cancelled`, `glyph_stalled`, `glyph_queued` |
 | **fields** | `show_spinner`, `show_name`, `show_percent`, `show_counts`, `show_clock`, `show_rate`, `show_eta_clock`, `show_drift`, `show_note`, `note_width`, `clock_format` |

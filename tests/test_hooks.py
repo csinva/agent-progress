@@ -338,6 +338,70 @@ sandbox.kill_watchers(cc)
 subprocess.run(["pkill", "-f", "_watch " + orphan], capture_output=True)
 cli("rm", "--all", "--force")
 
+print()
+print("=== a finished bar retires after a couple of messages ===")
+# A completed bar is there to be noticed, not to be lived with, and time alone
+# measured that badly: five minutes is many messages if you are working and none
+# at all if you stepped away.
+cli("rm", "--all", "--force")
+
+
+# the jobs below are made by cli(), which runs with whatever session this test
+# process is in, so the bar has to be drawn for that same session
+_ME = cc.current_session()
+
+
+def _bar():
+    out = subprocess.run([sys.executable, ENGINE, "statusline"],
+                         input=json.dumps({"session_id": _ME}),
+                         capture_output=True, text=True, env=os.environ).stdout
+    return re.sub(r"\033\[[0-9;]*m", "", out)
+
+
+def _prompt(sid=None):
+    env = dict(os.environ)
+    if sid:
+        env["CLAUDE_CODE_SESSION_ID"] = sid
+    subprocess.run([sys.executable, STATUS, "UserPromptSubmit"],
+                   input=json.dumps({"session_id": sid or _ME}),
+                   capture_output=True, text=True, env=env)
+
+
+cli("start", "finished", "--eta", "2h", "--monitor", "time", "--no-watch")
+cli("done", "finished")
+ck("it is shown the moment it finishes", "finished" in _bar())
+_prompt()
+ck("and still after one message", "finished" in _bar())
+_prompt()
+ck("but not after two", "finished" not in _bar(), _bar()[:60])
+
+cli("rm", "--all", "--force")
+cli("start", "crashed", "--eta", "2h", "--monitor", "time", "--no-watch")
+cli("fail", "crashed", "--note", "exploded")
+for _ in range(4):
+    _prompt()
+ck("a crash is not retired that quickly", "crashed" in _bar(), _bar()[:60])
+
+cli("rm", "--all", "--force")
+cli("start", "running-still", "--eta", "2h", "--monitor", "time", "--no-watch")
+for _ in range(4):
+    _prompt()
+ck("and a running job is untouched", "running-still" in _bar(), _bar()[:60])
+
+cli("rm", "--all", "--force")
+# a name of its own: an earlier test leaves a job called "mine" behind, owned by
+# another session, so reusing the name here got this one called "mine-2" and the
+# `done` refused - correctly - as reaching into somebody else's session
+cli("start", "my-own-job", "--eta", "2h", "--monitor", "time", "--no-watch")
+cli("done", "my-own-job")
+for _ in range(5):
+    _prompt("a-different-session")
+ck("another session's messages do not retire yours", "my-own-job" in _bar(), _bar()[:60])
+_prompt()
+_prompt()
+ck("your own two do", "my-own-job" not in _bar(), _bar()[:60])
+cli("rm", "--all", "--force")
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

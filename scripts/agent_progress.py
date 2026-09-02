@@ -68,6 +68,10 @@ CONFIG_SPEC = {
         "hide jobs expected to take less than this many seconds (0 = show all)", lo=0),
     "max_jobs": _spec("visibility", 3, "bars shown in the statusline at once", lo=1),
     "keep_done_seconds": _spec("visibility", 300, "how long a finished job lingers", lo=0),
+    "keep_done_prompts": _spec(
+        "visibility", 2,
+        "how many of your messages a finished bar survives (0 to go by time alone)",
+        lo=0),
     "scope": _spec("visibility", "session",
                    "whose jobs a statusline shows: this session's, or every session's",
                    "str", choices=["session", "all"]),
@@ -1311,9 +1315,17 @@ def pick_jobs(st, cfg, session_id=None, apply_visibility=True, scoped=True):
         if j.get("state") in ACTIVE_STATES:
             pass
         else:
-            linger = (cfg["keep_failed_seconds"] if j.get("state") in ("failed", "stalled")
-                      else cfg["keep_done_seconds"])
+            failed = j.get("state") in ("failed", "stalled")
+            linger = cfg["keep_failed_seconds"] if failed else cfg["keep_done_seconds"]
             if now - (j.get("ended") or 0) >= linger:
+                continue
+            # A finished bar has one job left: to be seen. Time alone did that
+            # badly - five minutes is many messages if you are working, and none
+            # at all if you stepped away - so a completed bar also retires after
+            # a couple of your messages, whichever comes first. A crash keeps
+            # its full time, since it is asking for something.
+            if not failed and cfg["keep_done_prompts"] \
+                    and (j.get("prompts_since_done") or 0) >= cfg["keep_done_prompts"]:
                 continue
         if apply_visibility and not job_visible(j, cfg, now):
             continue

@@ -192,6 +192,38 @@ def should_send(cc, cfg, session_id, signature):
         return True
 
 
+def count_prompt(cc, cfg, session_id):
+    """Tick the "messages since it finished" counter on this session's finished jobs.
+
+    A completed bar is there to be noticed, not to be lived with, and time is a
+    poor measure of that: five minutes is many messages if you are working and
+    none at all if you stepped away. Counting your messages instead retires it
+    when it has actually been seen. Only the session's own jobs, and only while
+    they are still on screen - otherwise this would take the lock on every
+    prompt for nothing."""
+    keep = cfg["keep_done_prompts"]
+    if not keep:
+        return
+    try:
+        jobs = cc.state_ro()["jobs"]
+        due = [k for k, j in jobs.items()
+               if j.get("state") not in cc.ACTIVE_STATES
+               and j.get("state") not in ("failed", "stalled")
+               and (j.get("prompts_since_done") or 0) < keep
+               and (cfg["scope"] == "all"
+                    or not cc.know_who_we_are(session_id)
+                    or cc.job_belongs_here(j, session_id))]
+        if not due:
+            return                      # the usual case, and it took no lock
+        with cc.state_rw(timeout=1.0) as st:
+            for k in due:
+                job = st["jobs"].get(k)
+                if job is not None:
+                    job["prompts_since_done"] = (job.get("prompts_since_done") or 0) + 1
+    except Exception:
+        pass
+
+
 def remember_session(cc, session_id):
     """Note that this session began with the plugin already loaded.
 
@@ -277,6 +309,9 @@ def main():
     # The check in front of this is a lock-free read that answers "no" in
     # microseconds when every watcher is alive, which is almost always.
     revive_watchers(cc)
+
+    if event == "UserPromptSubmit":
+        count_prompt(cc, cfg, session_id)
 
     blocks = collect_crashes(cc, cfg, session_id)
     lines, hidden, signature = job_lines(cc, cfg, session_id)

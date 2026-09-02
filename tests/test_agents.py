@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import tempfile
 import subprocess
 import sys
@@ -644,6 +645,22 @@ ck("three were crashes and three were finishes",
    _kinds.get("crash") == 3 and _kinds.get("done") == 3, str(_kinds))
 sandbox.kill_watchers(cc)
 shutil.rmtree(work, ignore_errors=True)
+reset()
+
+print()
+print("=== two agents, one name: the refusal points at your own job ===")
+reset()
+as_session("agent-A", "start", "train", "--eta", "3h", "--monitor", "time", "--no-watch")
+as_session("agent-B", "start", "train", "--eta", "3h", "--monitor", "time", "--no-watch")
+r = as_session("agent-B", "cancel", "train")
+ck("agent B saying `cancel train` is still refused", r.returncode != 0, str(r.returncode))
+ck("but the refusal names B's own job first", "train-2" in r.stderr
+   and r.stderr.index("train-2") < r.stderr.index("--any-session"), r.stderr[-240:])
+r = as_session("agent-C", "cancel", "train")
+ck("an agent with no job of that name gets no such hint", "did you mean" not in r.stderr,
+   r.stderr[-240:])
+ck("and nothing was cancelled",
+   all(j["state"] == "running" for j in json.loads(open(sandbox.STATE).read())["jobs"].values()))
 reset()
 
 print()

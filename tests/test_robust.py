@@ -302,8 +302,8 @@ print()
 print("=== nothing watching a job may end it ===")
 # Only three places in the engine may signal a process: the liveness probe
 # (signal 0, which does nothing), forwarding an interrupt the wrapper itself
-# received, and `cancel`, which somebody asked for. A watcher deciding a job has
-# stalled must mark it, never kill it.
+# received, and `cancel` - _stop_job - which somebody asked for. A watcher
+# deciding a job has stalled must mark it, never kill it.
 _src = open(os.path.join(ROOT, "scripts", "agent_progress.py")).read().splitlines()
 _fn, _sites = "?", []
 for _line in _src:
@@ -313,7 +313,7 @@ for _line in _src:
     if re.search(r"killpg|os\.kill\(|\.kill\(\)|send_signal", _line) and "int(pid), 0" not in _line:
         _sites.append(_fn)
 ck("only the interrupt forwarder and cancel can signal anything",
-   set(_sites) <= {"_signal_child", "cmd_finish"}, str(sorted(set(_sites))))
+   set(_sites) <= {"_signal_child", "_stop_job"}, str(sorted(set(_sites))))
 
 # and in practice: a job declared stalled keeps running
 run("rm", "--all", "--force")

@@ -706,10 +706,21 @@ def resolve(st, ref, mutating=False, any_session=False):
         # the lot, and refusing there would just make the CLI unusable
         if (mutating and here and not any_session
                 and not job_belongs_here(jobs[jid], here)):
+            # Ids are unique but names are not chosen, so when agent A has
+            # `train`, agent B's is `train-2` - and B saying `cancel train`
+            # almost always means its own. The refusal used to answer only
+            # "pass --any-session", which pointed B straight at killing A's
+            # run; it now names B's own job first.
+            own = sorted(k for k in jobs if k != jid and k.startswith(jid)
+                         and job_belongs_here(jobs[k], here)
+                         and jobs[k].get("state") in ACTIVE_STATES)
+            hint = ("\nYour own job by that name is %s - did you mean that one?"
+                    % ", ".join(own)) if own else ""
             raise SystemExit(
                 "%s belongs to another session (%s), so this would reach outside "
-                "this one.\nPass --any-session if that is really what you want."
-                % (jid, (jobs[jid].get("session_id") or "unknown")[:12]))
+                "this one.%s\nPass --any-session only if that session's job is "
+                "really the one you want."
+                % (jid, (jobs[jid].get("session_id") or "unknown")[:12], hint))
         return jid
 
     if ref in jobs:

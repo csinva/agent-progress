@@ -499,6 +499,30 @@ def state_ro():
 
 SESSION_TTL = 30 * 86400
 SESSION_CAP = 500       # more than anyone has open; the rest are history
+FINISHED_CAP = 300      # finished jobs kept, however recent they are
+
+
+def _prune_finished(st):
+    """Keep the history of finished jobs from growing without limit.
+
+    Age alone was the only bound, and a machine running many agents makes jobs
+    far faster than two days retires them - a minute of eight agents made four
+    hundred. The whole file is rewritten on every job update, every watcher tick
+    and every hook, so six thousand old records cost ninety-five milliseconds a
+    write and two and a half megabytes of disk, for history nobody reads.
+
+    Only finished ones, and only the oldest: a job that is still running is
+    never forgotten, whatever else is going on."""
+    jobs = st.get("jobs")
+    if not isinstance(jobs, dict) or len(jobs) <= FINISHED_CAP:
+        return
+    done = [(k, v) for k, v in jobs.items()
+            if isinstance(v, dict) and v.get("state") not in ACTIVE_STATES]
+    if len(done) <= FINISHED_CAP:
+        return
+    done.sort(key=lambda kv: kv[1].get("ended") or kv[1].get("updated") or 0, reverse=True)
+    for key, _ in done[FINISHED_CAP:]:
+        del jobs[key]
 
 
 def _prune_sessions(st):
@@ -525,6 +549,7 @@ def _prune_sessions(st):
 def _prune(st):
     _sweep_temp_files()
     _prune_sessions(st)
+    _prune_finished(st)
     cfg = load_config()
     cutoff = time.time() - cfg["prune_after_hours"] * 3600
     for jid in list(st["jobs"]):

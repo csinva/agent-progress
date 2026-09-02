@@ -75,6 +75,41 @@ for label, doc in shapes.items():
        (r.stderr + r2.stderr).strip().splitlines()[-1][:70] if (r.stderr or r2.stderr) else "")
 
 print()
+print("=== a long history of finished jobs is not kept forever ===")
+# Age was the only bound, and a machine running several agents makes jobs far
+# faster than two days retires them - eight agents made four hundred in a
+# minute. The whole file is rewritten on every job update, every watcher tick
+# and every hook, so the history is paid for constantly by everything else.
+run("rm", "--all", "--force")
+_now = time.time()
+with cc.state_rw() as st:
+    st["jobs"] = {}
+    for _i in range(cc.FINISHED_CAP + 400):
+        st["jobs"]["old%04d" % _i] = {
+            "id": "old%04d" % _i, "state": "done", "started": _now - 600,
+            "ended": _now - 500 + _i, "updated": _now - 500 + _i, "unit": "it",
+            "samples": [], "session_id": "s1"}
+    # two that are still going, and one waiting in a queue
+    for _name, _state in (("still-running", "running"), ("also-running", "running"),
+                          ("in-a-queue", "queued")):
+        st["jobs"][_name] = {"id": _name, "state": _state, "started": _now - 60,
+                             "updated": _now, "unit": "it", "samples": [],
+                             "session_id": "s1", "pid": os.getpid(),
+                             "batch": {"scheduler": "slurm", "job_id": "1"}}
+_jobs = json.loads(open(cc.STATE).read())["jobs"]
+ck("the finished history is capped", len([j for j in _jobs.values()
+                                          if j["state"] == "done"]) == cc.FINISHED_CAP,
+   str(len([j for j in _jobs.values() if j["state"] == "done"])))
+ck("and the newest are the ones kept", "old%04d" % (cc.FINISHED_CAP + 399) in _jobs,
+   str(sorted(_jobs)[:2]))
+ck("a running job is never dropped for being old",
+   all(n in _jobs for n in ("still-running", "also-running")), str(sorted(_jobs)[:3]))
+ck("nor is one waiting in a queue", "in-a-queue" in _jobs)
+ck("and the file stays small", os.path.getsize(cc.STATE) < 400 * 1024,
+   "%d bytes" % os.path.getsize(cc.STATE))
+run("rm", "--all", "--force", "--everywhere")
+
+print()
 print("=== a death is not pushed out by a crowd of successes ===")
 # The queue carries both endings now. A machine that finishes hundreds of small
 # jobs must not evict the one report saying something died.

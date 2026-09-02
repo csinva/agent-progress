@@ -9,6 +9,7 @@ the installer.
 import importlib.util
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -215,6 +216,43 @@ ck("and then it is gone", "alive" not in json.loads(open(cc.STATE).read())["jobs
 sandbox.kill_watchers(cc)
 subprocess.run(["pkill", "-f", _marker], capture_output=True)
 cli("rm", "--all", "--force")
+
+print()
+print("=== a command cut short is not called done ===")
+# The wrapper waits for its command now, so a caller with a timeout - which is
+# every tool call - kills both when the time runs out. The command never gets to
+# write its exit status, and reading that silence as success put a tick against
+# a job that had been cut off mid-run.
+cli("rm", "--all", "--force")
+with cc.state_rw() as st:
+    st["inbox"] = []
+_p = subprocess.Popen([sys.executable, ENGINE, "exec", "--name", "cut", "--after", "1",
+                       "--shell", "sleep 30"],
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                      start_new_session=True)
+time.sleep(3)
+_p.send_signal(signal.SIGTERM)           # what a tool timeout sends
+try:
+    _p.wait(timeout=20)
+except subprocess.TimeoutExpired:
+    _p.kill()
+_j = {}
+for _ in range(50):
+    time.sleep(1)
+    _j = json.loads(open(cc.STATE).read())["jobs"].get("cut", {})
+    if _j.get("state") not in ("running", None):
+        break
+ck("a job whose command was killed is not called done", _j.get("state") == "failed",
+   "%s (exit %s)" % (_j.get("state"), _j.get("exit_code")))
+ck("and it says what happened to it", "killed" in (_j.get("note") or ""),
+   repr(_j.get("note")))
+_inbox = json.loads(open(cc.STATE).read()).get("inbox", [])
+ck("and it is reported as a death, not a finish",
+   [e.get("kind") for e in _inbox] == ["crash"], str([e.get("kind") for e in _inbox]))
+sandbox.kill_watchers(cc)
+cli("rm", "--all", "--force")
+with cc.state_rw() as st:
+    st["inbox"] = []
 
 print()
 print("=== a pid that has been handed to something else ===")

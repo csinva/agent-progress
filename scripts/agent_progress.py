@@ -2813,11 +2813,20 @@ def _watch_loop(args):
 
             if not finished and gone:
                 code = job.get("exit_code")
+                wrote_status = False
                 try:
                     with open((job.get("log") or "") + ".exit") as f:
                         code = int(f.read().strip())
+                    wrote_status = True
                 except Exception:
                     pass
+                if not wrote_status and job.get("exit_file"):
+                    # We started this one, so it should have written its status.
+                    # It did not, which means it was killed before it could - a
+                    # tool timeout, a reboot, the OOM killer. Calling that "done"
+                    # puts a tick against a job that was cut short.
+                    code = code if code not in (None, 0) else 137
+                    job["note"] = job.get("note") or "killed before it finished"
                 finalize(job, code, now, st)
                 finished = dict(job)
 

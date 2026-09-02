@@ -203,8 +203,11 @@ ck("it ends as failed", job("doomed").get("state") == "failed",
 ck("with slurm's own word kept",
    job("doomed").get("scheduler_state") == "OUT_OF_MEMORY",
    str(job("doomed").get("scheduler_state")))
-inbox = run("inbox", "--drain").stdout
-ck("and a crash report waiting for Claude", "doomed" in inbox, repr(inbox[:160]))
+# the listing, not a single drain: successful jobs queue a report too now, so
+# whichever one drain happens to hand back is not the question being asked
+inbox = run("inbox").stdout
+ck("and a crash report waiting for Claude",
+   "doomed" in inbox and "OUT_OF_MEMORY" in inbox, repr(inbox[:200]))
 run("rm", "--all", "--force")
 
 print()

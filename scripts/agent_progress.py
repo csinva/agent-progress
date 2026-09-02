@@ -9,7 +9,6 @@ blends the two, so the bar is useful from second one and accurate by the end.
 No third-party dependencies. Python 3.8+.
 """
 
-from __future__ import print_function
 
 import argparse
 import contextlib
@@ -216,18 +215,14 @@ def coerce(key, value):
                 value = False
             else:
                 raise ValueError("expected true or false")
-        elif t == "int":
-            value = int(_finite(float(s), key))
-        elif t == "float":
-            value = _finite(float(s), key)
+        elif t in ("int", "float"):
+            value = _number(s, key, t)
         else:
             value = s
     elif t == "bool":
         value = bool(value)
-    elif t == "int":
-        value = int(_finite(float(value), key))
-    elif t == "float":
-        value = _finite(float(value), key)
+    elif t in ("int", "float"):
+        value = _number(value, key, t)
     else:
         value = str(value)
     if key == "auto_track" and value == "wrap":
@@ -484,37 +479,11 @@ def state_rw(timeout=None):
     not fail - the hooks, the deferral wrapper - already treat any exception
     here as "skip the bookkeeping and get on with it", which is the right
     answer: the bar is worth less than the command."""
-    ensure_dirs()
-    if timeout is None:
-        try:
-            timeout = float(os.environ.get("AGENT_PROGRESS_LOCK_TIMEOUT")
-                            or LOCK_TIMEOUT)
-        except (TypeError, ValueError):
-            timeout = LOCK_TIMEOUT
-    lf = open(LOCK, "a+")
-    held = False
-    try:
-        deadline = time.time() + max(0.0, timeout)
-        while True:
-            try:
-                fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                held = True
-                break
-            except (IOError, OSError):
-                if time.time() >= deadline:
-                    raise StateBusy(
-                        "the agent-progress state file stayed locked for %gs" % timeout)
-                time.sleep(0.05)
+    with hold_lock(timeout):
         st = _read_state()
         yield st
         _prune(st)
         _write_state(st)
-    finally:
-        try:
-            if held:
-                fcntl.flock(lf, fcntl.LOCK_UN)
-        finally:
-            lf.close()
 
 
 def state_ro():
@@ -800,10 +769,16 @@ def _int(v):
         return None
 
 
-def _finite(x, key):
-    if not math.isfinite(x):
-        raise ValueError("%s must be a real number, not %s" % (key, x))
-    return x
+def _number(value, key, kind):
+    """A finite int or float, or a complaint naming the setting and what it wants."""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("expected %s, got %r" % ("a whole number" if kind == "int"
+                                                  else "a number", value))
+    if not math.isfinite(out):
+        raise ValueError("%s must be a real number, not %s" % (key, out))
+    return int(out) if kind == "int" else out
 
 
 def _float(v):
@@ -2129,16 +2104,32 @@ def trim_inbox(st):
     Dropping the oldest entries is wrong when several agents share the queue: a
     session that crashes sixty times evicts the one report a quieter session had
     not yet collected, and that session then never learns its job died. Reports
-    already handed over have done their work and go first."""
+    already handed over have done their work and go first.
+
+    Since the queue also carries jobs that merely finished, the order matters
+    once more: news of a death outranks news of a success, so a machine that
+    completes hundreds of small jobs cannot push out the one report saying
+    something died."""
     inbox = st.get("inbox") or []
     if len(inbox) <= CRASH_KEEP:
         return
+
+    def rank(e):
+        if e.get("delivered"):
+            return 0                    # said its piece already
+        return 1 if e.get("kind") == "done" else 2
+
     pending = [e for e in inbox if not e.get("delivered")]
     delivered = [e for e in inbox if e.get("delivered")]
     room = max(0, CRASH_KEEP - len(pending))
     kept = pending + (delivered[-room:] if room else [])
     kept.sort(key=lambda e: e.get("ts") or 0)
-    st["inbox"] = kept[-CRASH_CEILING:]
+    if len(kept) > CRASH_CEILING:
+        # keep the most important, then the most recent among equals
+        kept.sort(key=lambda e: (rank(e), e.get("ts") or 0))
+        kept = kept[-CRASH_CEILING:]
+        kept.sort(key=lambda e: e.get("ts") or 0)
+    st["inbox"] = kept
 
 
 def orphan_grace(cfg=None):
@@ -2189,60 +2180,34 @@ def pending_crashes():
     return [e for e in state_ro().get("inbox", []) if not e.get("delivered")]
 
 
-def format_done(ev, cfg=None):
-    """The message a session is handed when a job it started finishes.
-
-    The point is the last part: the output. A command that was handed off wrote
-    its result to a log the session never reads, so the answer has to come back
-    here or the work may as well not have finished."""
-    cfg = cfg or load_config()
-    lines = []
-    if ev.get("handover"):
-        lines.append(
-            "%s A job from ANOTHER session finished, and that session never "
-            "collected the news - it has probably exited. This was not your job."
-            % cfg["glyph_done"])
-    lines.append("%s A tracked job FINISHED while you were working: '%s'"
-                 % (cfg["glyph_done"], ev.get("job")))
-    if ev.get("duration") is not None:
-        lines.append("  it ran for %s" % fmt_dur(ev["duration"]))
-    if ev.get("cmd"):
-        lines.append("  command: %s" % one_line(ev["cmd"])[:200])
-    if ev.get("log"):
-        lines.append("  log: %s" % ev["log"])
-    if ev.get("log_tail"):
-        lines.append("  last output:")
-        for ln in ev["log_tail"].splitlines()[-15:]:
-            lines.append("    " + ln[:200])
-    lines.append("Tell the user it finished and what it produced, reading the result out of "
-                 "the output above. `agent-progress log %s -n 60` if you need more of it. "
-                 "Do not re-run it." % (ev.get("job") or "<id>"))
-    return "\n".join(lines)
-
-
 def format_report(ev, cfg=None):
-    """Whichever of the two this is."""
-    if (ev or {}).get("kind") == "done":
-        return format_done(ev, cfg)
-    return format_crash(ev, cfg)
+    """What a session is handed when a job it started ends.
 
-
-def format_crash(ev, cfg=None):
-    """The message a Claude session is handed when a job dies."""
+    Both endings say the same things - what it was, how long it ran, the command,
+    the log, and the tail of what it printed - and differ only in the word for
+    what happened and what to do about it. A job that finished is reported for
+    the sake of that tail: the command was handed off long ago, and this is the
+    only way its result comes back to the conversation.
+    """
     cfg = cfg or load_config()
+    ev = ev or {}
+    ended_well = ev.get("kind") == "done"
+    glyph = cfg["glyph_done"] if ended_well else cfg["glyph_failed"]
+    word = "FINISHED" if ended_well else "CRASHED"
     lines = []
     if ev.get("handover"):
         lines.append(
-            "%s A job from ANOTHER session crashed, and that session never "
-            "collected the report - it has probably exited. This was not your "
-            "job: say so if you mention it, and do not re-run it." % cfg["glyph_failed"])
-    lines += [
-        "%s A tracked job CRASHED while you were working: '%s'" % (
-            cfg["glyph_failed"], ev.get("job")),
-        "  %s after %s" % (ev.get("reason"), fmt_dur(ev.get("duration"))),
-    ]
+            "%s A job from ANOTHER session %s, and that session never collected the "
+            "report - it has probably exited. This was not your job: say so if you "
+            "mention it, and do not re-run it." % (glyph, word.lower()))
+    lines.append("%s A tracked job %s while you were working: '%s'"
+                 % (glyph, word, ev.get("job")))
+    if ended_well:
+        lines.append("  it ran for %s" % fmt_dur(ev.get("duration")))
+    else:
+        lines.append("  %s after %s" % (ev.get("reason"), fmt_dur(ev.get("duration"))))
     if ev.get("cmd"):
-        cmd = " ".join(ev["cmd"].split())          # collapse multi-line commands
+        cmd = one_line(ev["cmd"])
         lines.append("  command: %s" % (cmd[:200] + ("..." if len(cmd) > 200 else "")))
     if ev.get("log"):
         lines.append("  log: %s" % ev["log"])
@@ -2250,8 +2215,14 @@ def format_crash(ev, cfg=None):
         lines.append("  last output:")
         for ln in ev["log_tail"].splitlines()[-15:]:
             lines.append("    " + ln[:200])
-    lines.append("Tell the user this job crashed, summarize why from the output above, "
-                 "and suggest a fix if the cause is clear. Do not re-run it without asking.")
+    if ended_well:
+        lines.append("Tell the user it finished and what it produced, reading the result "
+                     "out of the output above. `agent-progress log %s -n 60` if you need "
+                     "more of it. Do not re-run it." % (ev.get("job") or "<id>"))
+    else:
+        lines.append("Tell the user this job crashed, summarize why from the output above, "
+                     "and suggest a fix if the cause is clear. Do not re-run it without "
+                     "asking.")
     return "\n".join(lines)
 
 
@@ -3732,7 +3703,7 @@ def cmd_inbox(args):
         if not ev:
             print("no undelivered crash reports")
             return 0
-        print(format_crash(ev))
+        print(format_report(ev))
         return 0
     evs = state_ro().get("inbox", [])
     if args.json:
@@ -3810,6 +3781,28 @@ def _fmt_val(v):
     return str(v)
 
 
+def apply_settings(pairs, into, with_help=True):
+    """Parse KEY=VALUE arguments into a dict, or explain what was wrong.
+
+    Both `config --set` and `preview --set` take the same arguments and reject
+    them the same way; the only difference was whether the complaint quoted the
+    setting's help text."""
+    for pair in (pairs or []):
+        if "=" not in pair:
+            raise SystemExit("--set expects KEY=VALUE, got %r" % pair)
+        key, value = pair.split("=", 1)
+        key = key.strip()
+        if key not in CONFIG_SPEC:
+            raise SystemExit(_unknown_key(key))
+        try:
+            into[key] = coerce(key, value)
+        except ValueError as ex:
+            raise SystemExit("bad value for %s: %s%s"
+                             % (key, ex, "\n  " + CONFIG_SPEC[key]["help"]
+                                if with_help else ""))
+    return bool(pairs)
+
+
 def cmd_config(args):
     ensure_dirs()
     if args.path:
@@ -3852,19 +3845,7 @@ def cmd_config(args):
                 raise SystemExit(_unknown_key(k))
             user.pop(k, None)
             changed = True
-        for pair in (args.set or []):
-            if "=" not in pair:
-                raise SystemExit("--set expects KEY=VALUE, got %r" % pair)
-            k, v = pair.split("=", 1)
-            k = k.strip()
-            if k not in CONFIG_SPEC:
-                raise SystemExit(_unknown_key(k))
-            try:
-                user[k] = coerce(k, v)
-            except ValueError as ex:
-                raise SystemExit("bad value for %s: %s\n  %s"
-                                 % (k, ex, CONFIG_SPEC[k]["help"]))
-            changed = True
+        changed = apply_settings(args.set, user) or changed
 
         if changed:
             # written the way the state file is: a reader must never catch this
@@ -3914,17 +3895,7 @@ def cmd_preview(args):
     """Render sample bars with the current settings, so they can be tuned
     without waiting on a real job."""
     cfg = load_config(force=True)
-    for pair in (args.set or []):
-        if "=" not in pair:
-            raise SystemExit("--set expects KEY=VALUE, got %r" % pair)
-        k, v = pair.split("=", 1)
-        k = k.strip()
-        if k not in CONFIG_SPEC:
-            raise SystemExit(_unknown_key(k))
-        try:
-            cfg[k] = coerce(k, v)
-        except ValueError as ex:
-            raise SystemExit("bad value for %s: %s" % (k, ex))
+    apply_settings(args.set, cfg, with_help=False)
     apply_theme(cfg)
     now = time.time()
     samples = [[now - 600 + i * 12, i] for i in range(51)]

@@ -21,16 +21,11 @@ import json
 import os
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ENGINE = os.path.join(os.path.dirname(HERE), "scripts", "agent_progress.py")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _shared import load_engine, read_payload  # noqa: E402
 
 
-def load_engine():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("agent_progress", ENGINE)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+
 
 
 INSTRUCTIONS = """\
@@ -61,47 +56,6 @@ def emit(payload):
     print(json.dumps(payload))
 
 
-def read_payload(timeout=3.0):
-    """The JSON Claude Code sends on stdin.
-
-    Guarded with select(): a hook is handed its payload on a pipe that is then
-    closed, but if it is ever run with stdin left open - by hand, or by a
-    harness that forgets - a bare read() would block until the hook is killed.
-    Returning an empty payload instead makes the hook a no-op, which is the
-    right failure for something that sits in front of every command."""
-    try:
-        if sys.stdin.isatty():
-            return {}
-        import os as _os
-        import select
-        import time as _time
-        # select() alone only proves something arrived; read() then waits for
-        # end-of-file, so a writer that sends the payload and holds the pipe
-        # open still blocks here. Read what is there and stop at the deadline.
-        deadline = _time.time() + timeout
-        chunks = []
-        fd = sys.stdin.fileno()
-        while True:
-            left = deadline - _time.time()
-            if left <= 0:
-                break
-            ready, _w, _e = select.select([fd], [], [], left)
-            if not ready:
-                break
-            chunk = _os.read(fd, 65536)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            try:                        # a complete object is all that was wanted
-                got = json.loads(b"".join(chunks).decode("utf-8", "replace").strip())
-                return got if isinstance(got, dict) else {}
-            except Exception:
-                pass
-        raw = b"".join(chunks).decode("utf-8", "replace").strip()
-        payload = json.loads(raw or "{}")
-        return payload if isinstance(payload, dict) else {}
-    except Exception:
-        return {}
 
 
 def main():

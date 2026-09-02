@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -72,6 +73,73 @@ for label, doc in shapes.items():
        r.returncode == 0 and "Traceback" not in r.stderr
        and r2.returncode == 0 and "Traceback" not in r2.stderr,
        (r.stderr + r2.stderr).strip().splitlines()[-1][:70] if (r.stderr or r2.stderr) else "")
+
+print()
+print("=== a death is not pushed out by a crowd of successes ===")
+# The queue carries both endings now. A machine that finishes hundreds of small
+# jobs must not evict the one report saying something died.
+with cc.state_rw() as st:
+    st["inbox"] = [{"kind": "crash", "job": "the-one-that-died", "ts": time.time() - 999,
+                    "session_id": "quiet", "delivered": None}]
+for _i in range(400):
+    with cc.state_rw() as st:
+        cc.enqueue_crash(st, {"id": "ok-%d" % _i, "exit_code": 0, "started": 1, "ended": 2,
+                              "session_id": "busy"}, time.time(), kind="done")
+_inbox = json.loads(open(cc.STATE).read())["inbox"]
+ck("the queue is still bounded", len(_inbox) <= cc.CRASH_CEILING, "%d" % len(_inbox))
+ck("and the crash outlived four hundred successes",
+   any(e.get("job") == "the-one-that-died" for e in _inbox),
+   str(sorted({e.get("kind") for e in _inbox})))
+with cc.state_rw() as st:
+    st["inbox"] = []
+
+print()
+print("=== the plugin breaking mid-handoff must not take the job with it ===")
+# The sweep above breaks the plugin before the command starts. This breaks it at
+# the moment it tries to write the job down - after the command is running, when
+# there is something to lose.
+def _handoff_survives(break_it):
+    home = tempfile.mkdtemp(prefix="agent-progress-handoff-")
+    work = tempfile.mkdtemp()
+    marker = os.path.join(work, "finished")
+    env = dict(os.environ, AGENT_PROGRESS_HOME=home)
+    subprocess.run([sys.executable, ENGINE, "start", "seed", "--eta", "1h",
+                    "--monitor", "time", "--no-watch"], capture_output=True, env=env)
+    proc = subprocess.Popen(
+        [sys.executable, ENGINE, "exec", "--name", "work", "--after", "2", "--shell",
+         "sleep 5; echo done > %s" % marker],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    time.sleep(1)
+    try:
+        break_it(home)
+    except OSError:
+        pass
+    try:
+        _out, _err = proc.communicate(timeout=40)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        _out, _err = "", "timed out"
+    time.sleep(7)
+    finished = os.path.exists(marker)
+    try:
+        os.chmod(home, 0o700)
+    except OSError:
+        pass
+    shutil.rmtree(home, ignore_errors=True)
+    shutil.rmtree(work, ignore_errors=True)
+    return finished, "Traceback" not in (_err or "")
+
+
+for _label, _break in (
+        ("nothing wrong", lambda h: None),
+        ("the state directory turns read-only", lambda h: os.chmod(h, 0o500)),
+        ("the state file becomes rubbish",
+         lambda h: open(os.path.join(h, "state.json"), "w").write("{not json")),
+        ("the logs directory disappears",
+         lambda h: shutil.rmtree(os.path.join(h, "logs"), ignore_errors=True))):
+    _finished, _clean = _handoff_survives(_break)
+    ck("%s: the work still finishes" % _label, _finished)
+    ck("%s: and nothing is thrown at the user" % _label, _clean)
 
 print()
 print("=== nothing watching a job may end it ===")

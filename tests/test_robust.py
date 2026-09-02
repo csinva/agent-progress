@@ -72,6 +72,78 @@ for label, doc in shapes.items():
        (r.stderr + r2.stderr).strip().splitlines()[-1][:70] if (r.stderr or r2.stderr) else "")
 
 print()
+print("=== stdin that is never closed ===")
+# read() waits for end-of-file, not for the data. A caller that writes nothing,
+# or writes and then keeps the pipe open, would otherwise block the statusline
+# for every render and every hook in front of every command, for as long as it
+# liked.
+_targets = [("statusline", [sys.executable, ENGINE, "statusline"]),
+            ("prompt hook", [sys.executable, os.path.join(ROOT, "hooks", "inject_status.py"),
+                             "UserPromptSubmit"]),
+            ("command hook", [sys.executable, os.path.join(ROOT, "hooks", "auto_track.py")])]
+_payload = json.dumps({"session_id": "s", "tool_name": "Bash",
+                       "tool_input": {"command": "echo hi"}}).encode()
+
+
+def _timed(cmd, write, close):
+    rfd, wfd = os.pipe()
+    t0 = time.time()
+    proc = subprocess.Popen(cmd, stdin=rfd, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env=os.environ)
+    if write:
+        os.write(wfd, _payload)
+    if close:
+        os.close(wfd)
+    try:
+        proc.communicate(timeout=20)
+        took = time.time() - t0
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        took = None
+    os.close(rfd)
+    if not close:
+        os.close(wfd)
+    return took
+
+
+for _name, _cmd in _targets:
+    ck("%s answers at once when the payload is closed" % _name,
+       (_timed(_cmd, True, True) or 99) < 3, "took too long")
+    ck("%s does not wait out the deadline once the payload has arrived" % _name,
+       (_timed(_cmd, True, False) or 99) < 3, "waited for a writer that had finished")
+    ck("%s gives up rather than hanging on silence" % _name,
+       (_timed(_cmd, False, False) or 99) < 12, "never returned")
+
+print()
+print("=== one bad value must not stop a map being cleaned ===")
+# Each of these maps is tidied by a loop that reads inside its values, and every
+# caller swallows exceptions - so a single value of the wrong shape does not
+# crash anything, it quietly stops the cleaning for good and the map grows for
+# the life of the installation.
+run("rm", "--all", "--force")
+old = time.time() - 40 * 3600
+with cc.state_rw() as st:
+    st["sessions"] = dict({"stale-%d" % i: old for i in range(20)}, weird={"not": "a time"})
+    st["auto_track_seen"] = dict({"stale-%d" % i: old for i in range(20)}, weird=["nope"])
+    st["context_sent"] = dict({"stale-%d" % i: {"sig": "x", "ts": old} for i in range(20)},
+                              weird="not a dict", alsobad={"sig": "x", "ts": "yesterday"})
+try:
+    hit = cc.auto_seen("echo hello", "s")
+    raised = None
+except Exception as ex:
+    hit, raised = None, repr(ex)
+ck("the command-dedup survives a bad value", raised is None, str(raised))
+st = json.loads(open(cc.STATE).read())
+ck("bad values are dropped from every map",
+   all("weird" not in (st.get(k) or {}) for k in ("sessions", "auto_track_seen", "context_sent")),
+   str([k for k in ("sessions", "auto_track_seen", "context_sent") if "weird" in (st.get(k) or {})]))
+ck("and a wrongly-shaped timestamp too", "alsobad" not in (st.get("context_sent") or {}))
+ck("stale entries are then actually cleaned",
+   not any(k.startswith("stale-") for k in (st.get("auto_track_seen") or {})),
+   str(sorted(st.get("auto_track_seen") or {})[:3]))
+run("rm", "--all", "--force")
+
+print()
 print("=== temp files left by a killed writer ===")
 # The write is create-then-rename, so a killed writer cannot tear the state
 # file - but it does leave its temp file, and nothing used to come back for it.

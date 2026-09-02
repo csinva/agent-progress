@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import re
+import select
 import shlex
 import signal
 import subprocess
@@ -335,17 +336,23 @@ def _sanitize(st):
     if not isinstance(st.get("inbox"), list):
         st["inbox"] = []
     st["inbox"] = [e for e in st["inbox"] if isinstance(e, dict)]
-    for key in ("auto_track_seen", "context_sent"):
-        if not isinstance(st.get(key), dict):
-            st[key] = {}
-    if not isinstance(st.get("sessions"), dict):
-        st["sessions"] = {}
-    else:
-        # values are timestamps; one that is not a number used to abort the
-        # prune loop, and since the caller swallows the error, cleaning up then
-        # stopped for good and the map grew without limit
-        st["sessions"] = {k: v for k, v in st["sessions"].items()
-                          if isinstance(v, (int, float)) and not isinstance(v, bool)}
+    # Every one of these maps is cleaned by a loop that reads inside its values.
+    # A single value of the wrong shape makes that loop raise, and every caller
+    # of these swallows exceptions, so the effect is not a crash but something
+    # quieter and worse: cleaning up stops for good and the map grows without
+    # limit for the life of the installation. Values are checked here, once, so
+    # nothing malformed ever reaches a prune loop.
+    def _timestamp(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    for key in ("sessions", "auto_track_seen"):
+        seen = st.get(key)
+        st[key] = ({k: v for k, v in seen.items() if _timestamp(v)}
+                   if isinstance(seen, dict) else {})
+    sent = st.get("context_sent")
+    st["context_sent"] = (
+        {k: v for k, v in sent.items() if isinstance(v, dict) and _timestamp(v.get("ts"))}
+        if isinstance(sent, dict) else {})
     st.setdefault("version", STATE_VERSION)
     return st
 
@@ -3422,14 +3429,56 @@ def term_width(default=100):
         return default
 
 
+def _complete_json(chunks):
+    """The parsed object once the bytes so far form one, else None."""
+    try:
+        payload = json.loads(b"".join(chunks).decode("utf-8", "replace").strip())
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else {}
+
+
+def read_stdin_payload(timeout=3.0):
+    """The JSON a host sends on stdin, or {} if it does not arrive in time.
+
+    A bare read() waits for end-of-file, not for the data, so a caller that
+    writes nothing - or writes and then holds the pipe open - blocks this
+    process for as long as it likes. For the statusline that means no bar and a
+    stuck process for every render; for a hook it means every command waiting
+    behind it. Read what is there, stop at end-of-file or at the deadline,
+    whichever comes first, and treat silence as an empty payload."""
+    try:
+        if sys.stdin.isatty():
+            return {}
+        fd = sys.stdin.fileno()
+        deadline = time.time() + timeout
+        chunks = []
+        while True:
+            left = deadline - time.time()
+            if left <= 0:
+                break
+            ready, _w, _e = select.select([fd], [], [], left)
+            if not ready:
+                break
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break                   # end of file: the writer has finished
+            chunks.append(chunk)
+            # A complete object is all that was wanted; a writer that keeps the
+            # pipe open afterwards should not cost the caller the whole deadline
+            done = _complete_json(chunks)
+            if done is not None:
+                return done
+        raw = b"".join(chunks).decode("utf-8", "replace").strip()
+        payload = json.loads(raw or "{}")
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
 def cmd_statusline(args):
     """Entry point wired into settings.json `statusLine`. Reads Claude's JSON on stdin."""
-    payload = {}
-    try:
-        if not sys.stdin.isatty():
-            payload = json.loads(sys.stdin.read() or "{}")
-    except Exception:
-        payload = {}
+    payload = read_stdin_payload()
     if not isinstance(payload, dict):
         payload = {}          # valid json, wrong shape; the bar still has to draw
     cfg = load_config()

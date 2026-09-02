@@ -39,11 +39,33 @@ def read_payload(timeout=3.0):
     try:
         if sys.stdin.isatty():
             return {}
+        import os as _os
         import select
-        ready, _w, _e = select.select([sys.stdin], [], [], timeout)
-        if not ready:
-            return {}
-        payload = json.loads(sys.stdin.read() or "{}")
+        import time as _time
+        # select() alone only proves something arrived; read() then waits for
+        # end-of-file, so a writer that sends the payload and holds the pipe
+        # open still blocks here. Read what is there and stop at the deadline.
+        deadline = _time.time() + timeout
+        chunks = []
+        fd = sys.stdin.fileno()
+        while True:
+            left = deadline - _time.time()
+            if left <= 0:
+                break
+            ready, _w, _e = select.select([fd], [], [], left)
+            if not ready:
+                break
+            chunk = _os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            try:                        # a complete object is all that was wanted
+                got = json.loads(b"".join(chunks).decode("utf-8", "replace").strip())
+                return got if isinstance(got, dict) else {}
+            except Exception:
+                pass
+        raw = b"".join(chunks).decode("utf-8", "replace").strip()
+        payload = json.loads(raw or "{}")
         return payload if isinstance(payload, dict) else {}
     except Exception:
         return {}

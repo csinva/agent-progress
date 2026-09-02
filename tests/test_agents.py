@@ -500,15 +500,19 @@ AUTO = os.path.join(HOOKS, "auto_track.py")
 
 
 def launch(i):
+    """Start job i, detached, as session i.
+
+    `run` rather than the wrapper: a report is only made for work that outlives
+    the call that started it. A command the caller waits for hands back its own
+    output and exit code, so there is nothing left to route - and routing is
+    what this checks."""
     sid = "stress-%d" % i
-    cmd = "python3 %s/train.py 12 %s" % (work, "die" if i % 2 else "live")
     env = dict(os.environ, CLAUDE_CODE_SESSION_ID=sid)
-    out = subprocess.run([sys.executable, AUTO], env=env, capture_output=True, text=True,
-                         input=json.dumps({"tool_name": "Bash", "session_id": sid,
-                                           "tool_input": {"command": cmd}})).stdout
-    wrapped = json.loads(out)["hookSpecificOutput"]["updatedInput"]["command"]
-    wrapped = wrapped.replace("--after 20", "--after 1").replace("--name train", "--name job-%d" % i)
-    subprocess.run(["/bin/sh", "-c", wrapped], capture_output=True, cwd=work, env=env)
+    subprocess.run([sys.executable, ENGINE, "run", "--name", "job-%d" % i,
+                    "--eta", "1h", "--interval", "1s", "--cwd", work, "--",
+                    sys.executable, os.path.join(work, "train.py"), "12",
+                    "die" if i % 2 else "live"],
+                   capture_output=True, env=env)
 
 
 th = [threading.Thread(target=launch, args=(i,)) for i in range(N)]

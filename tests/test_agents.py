@@ -241,6 +241,10 @@ for a in ("agent-A", "agent-B"):
 as_session("agent-A", "rm", "--finished")
 left = sorted(json.loads(open(sandbox.STATE).read())["jobs"])
 ck("rm --finished is scoped the same way", left == ["done-agent-B"], str(left))
+out = as_session("agent-A", "rm", "--finished").stdout
+ck("and says what it left for another session", "other sessions" in out, out.strip()[:80])
+out = as_session("agent-A", "rm", "--all").stdout
+ck("rm --all says so too", "other sessions" in out, out.strip()[:80])
 ck("agent B can still see its finished job", bars("agent-B") == ["done-agent-B"],
    str(bars("agent-B")))
 

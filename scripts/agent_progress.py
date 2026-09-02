@@ -3438,22 +3438,41 @@ def cmd_rm(args):
         return ours(job) and (args.force or not live(job))
 
     with state_rw() as st:
+        def elsewhere(candidates):
+            """How many of these belong to other sessions, and so were left alone.
+
+            Without saying so, `rm` reports "removed 0" and the bars stay on
+            screen with no hint of why - which is indistinguishable from the
+            command not working."""
+            return sum(1 for v in candidates if not ours(v))
+
+        def note(kept_running, kept_others):
+            bits = []
+            if kept_running:
+                bits.append("kept %d still running (--force)" % kept_running)
+            if kept_others:
+                bits.append("left %d belonging to other sessions (--everywhere)" % kept_others)
+            return ("; " + ", ".join(bits)) if bits else ""
+
         if args.all:
             gone = [k for k, v in st["jobs"].items() if removable(v)]
             kept = sum(1 for k, v in st["jobs"].items() if ours(v) and k not in gone)
+            others = elsewhere(st["jobs"].values())
             for k in gone:
                 del st["jobs"][k]
             print("removed %d job(s)%s%s"
                   % (len(gone), " from this session" if scoped else "",
-                     "; kept %d still running (--force to forget those too)" % kept
-                     if kept else ""))
+                     note(kept, others)))
             return 0
         if args.finished:
+            done_jobs = [v for v in st["jobs"].values()
+                         if v.get("state") not in ACTIVE_STATES]
             gone = [k for k, v in st["jobs"].items()
                     if v.get("state") not in ACTIVE_STATES and ours(v)]
+            others = elsewhere(done_jobs)
             for k in gone:
                 del st["jobs"][k]
-            print("removed %d finished job(s)" % len(gone))
+            print("removed %d finished job(s)%s" % (len(gone), note(0, others)))
             return 0
         for ref in args.job:
             jid = resolve(st, ref, mutating=True, any_session=args.everywhere)

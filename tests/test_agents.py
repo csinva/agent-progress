@@ -17,6 +17,8 @@ import importlib.util
 import json
 import os
 import re
+import shutil
+import tempfile
 import subprocess
 import sys
 import threading
@@ -382,6 +384,71 @@ ck("payload and environment both know it", draw({"session_id": "sess-A"}, True))
 ck("only the payload knows it", draw({"session_id": "sess-A"}, False))
 ck("only the environment knows it", draw({}, True))
 ck("neither knows it - the bar is still drawn", draw({}, False))
+reset()
+
+print()
+print("=== both kinds of job, from several agents, at once ===")
+# The two kinds behave differently on purpose now: a command the caller waits
+# for hands back its own output and is not reported, while a detached one is
+# reported to the session that started it. Running both together is where a
+# rule about one could quietly be applied to the other.
+reset()
+_work = tempfile.mkdtemp(prefix="agent-progress-mixed-")
+open(os.path.join(_work, "t.py"), "w").write(
+    "import sys, time\n"
+    "die = sys.argv[1] == 'die'\n"
+    "for i in range(1, 5):\n"
+    "    print('Epoch %d/4' % i, flush=True); time.sleep(0.3)\n"
+    "if die: raise SystemExit(7)\n")
+_waited, _detached, _lock = {}, {}, threading.Lock()
+
+
+def _wait_for(a):
+    sid, name, die = "mix-%d" % a, "waited-%d" % a, a % 2 == 0
+    r = as_session(sid, "exec", "--name", name, "--after", "1", "--shell",
+                   "%s %s/t.py %s" % (sys.executable, _work, "die" if die else "live"))
+    with _lock:
+        _waited[name] = (sid, die, r.returncode, "Epoch 4/4" in r.stdout)
+
+
+def _detach(a):
+    sid, name, die = "mix-%d" % a, "detached-%d" % a, a % 2 == 1
+    as_session(sid, "run", "--name", name, "--eta", "1h", "--",
+               sys.executable, os.path.join(_work, "t.py"), "die" if die else "live")
+    with _lock:
+        _detached[name] = sid
+
+
+_th = [threading.Thread(target=_wait_for, args=(a,)) for a in range(4)]
+_th += [threading.Thread(target=_detach, args=(a,)) for a in range(4)]
+[t.start() for t in _th]
+[t.join() for t in _th]
+ck("every caller that waited got its own exit code",
+   all(rc == (7 if die else 0) for _, die, rc, _ in _waited.values()),
+   str({k: v[2] for k, v in _waited.items()}))
+ck("and its own output", all(saw for _, _, _, saw in _waited.values()),
+   str({k: v[3] for k, v in _waited.items()}))
+_deadline = time.time() + 120
+while time.time() < _deadline:
+    _st = json.loads(open(sandbox.STATE).read())
+    if len(_st["jobs"]) == 8 and all(j.get("state") not in ("running", "queued", None)
+                                     for j in _st["jobs"].values()):
+        break
+    time.sleep(1)
+_st = json.loads(open(sandbox.STATE).read())
+ck("all eight jobs are recorded and finished", len(_st["jobs"]) == 8
+   and all(j.get("state") not in ("running", "queued", None) for j in _st["jobs"].values()),
+   str({k: v.get("state") for k, v in _st["jobs"].items()}))
+_inbox = _st.get("inbox", [])
+ck("nothing is reported about the jobs their callers watched",
+   not [e for e in _inbox if (e.get("job") or "").startswith("waited-")],
+   str([e.get("job") for e in _inbox]))
+_reported = {e.get("job"): e.get("session_id") for e in _inbox
+             if (e.get("job") or "").startswith("detached-")}
+ck("and every detached job is reported once", len(_reported) == 4, str(sorted(_reported)))
+ck("to the agent that started it", _reported == _detached, str(_reported))
+sandbox.kill_watchers(cc)
+shutil.rmtree(_work, ignore_errors=True)
 reset()
 
 print()

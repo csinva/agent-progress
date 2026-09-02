@@ -12,6 +12,7 @@ with the recording's own stub scheduler on a compressed clock.
 
 import importlib.util
 import os
+import subprocess
 import sys
 import time
 
@@ -130,7 +131,26 @@ ck("and the clock is slurm's runtime, not time since submission",
    "%.0fs of run time out of %.0fs since submitting, %ds of it queued"
    % (elapsed, since_submit, QUEUED))
 
-deadline = time.time() + 360
+# Two separate things, and conflating them made this fail under load: first the
+# stub scheduler has to reach the end of its own wall-clock script, then the
+# plugin has to notice. Wait for the stub on its own terms - ask it, as the
+# plugin does - and only then hold the plugin to a deadline.
+def scheduler_says():
+    out = subprocess.run(["sacct", "-j", "81734", "-n", "-o", "State"],
+                         capture_output=True, text=True).stdout
+    if not out.strip():
+        out = subprocess.run(["scontrol", "show", "job", "81734"],
+                             capture_output=True, text=True).stdout
+    return out
+
+
+stub_deadline = time.time() + 600
+while time.time() < stub_deadline and "OUT_OF_MEMORY" not in scheduler_says():
+    time.sleep(0.5)
+ck("the stub scheduler reached the end of its script",
+   "OUT_OF_MEMORY" in scheduler_says(), scheduler_says()[:60])
+
+deadline = time.time() + 180
 while time.time() < deadline and (by_key["benchmark"].job() or {}).get("state") == "running":
     time.sleep(0.5)
 j = by_key["benchmark"].job() or {}

@@ -94,6 +94,52 @@ with cc.state_rw() as st:
     st["inbox"] = []
 
 print()
+print("=== the last resort: hand the command to the shell and get out of the way ===")
+# When the plugin cannot even make its log file it gives up on tracking and
+# execs the command directly. That is the code the whole "never stop the work"
+# promise rests on, and until now nothing had ever run it - the other failure
+# tests all reach the plugin's ordinary paths.
+_home = tempfile.mkdtemp(prefix="agent-progress-passthru-")
+_env = dict(os.environ, AGENT_PROGRESS_HOME=_home)
+subprocess.run([sys.executable, ENGINE, "ls"], capture_output=True, env=_env)
+os.makedirs(os.path.join(_home, "logs"), exist_ok=True)
+os.chmod(os.path.join(_home, "logs"), 0o500)          # no new log files here
+_r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "1", "--shell",
+                     "echo straight-through; exit 5"],
+                    capture_output=True, text=True, env=_env)
+ck("the command still runs when no log can be made", "straight-through" in _r.stdout,
+   repr(_r.stdout[:60]) + repr(_r.stderr[-60:]))
+ck("and still returns its own exit code", _r.returncode == 5, str(_r.returncode))
+ck("and nothing is printed about the plugin", "agent-progress" not in _r.stdout,
+   _r.stdout[:70])
+_work = tempfile.mkdtemp()
+_r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "1", "--cwd", _work,
+                     "--shell", "pwd"], capture_output=True, text=True, env=_env)
+ck("and it runs where it was told to", os.path.realpath(_r.stdout.strip()) ==
+   os.path.realpath(_work), _r.stdout.strip()[:60])
+# The one case where refusing is right: asked to run somewhere that does not
+# exist, running it somewhere else instead would be worse than not running it.
+_r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "1", "--cwd",
+                     "/definitely/not/here", "--shell", "echo ran-anyway"],
+                    capture_output=True, text=True, env=_env)
+ck("a working directory that does not exist is refused, not guessed at",
+   "ran-anyway" not in _r.stdout and _r.returncode != 0,
+   "exit=%d %r" % (_r.returncode, _r.stdout[:40]))
+ck("and it says which directory", "/definitely/not/here" in (_r.stdout + _r.stderr),
+   (_r.stdout + _r.stderr)[:70])
+os.chmod(os.path.join(_home, "logs"), 0o700)
+_r2 = subprocess.run([sys.executable, ENGINE, "exec", "--after", "1", "--cwd",
+                      "/definitely/not/here", "--shell", "echo ran-anyway"],
+                     capture_output=True, text=True, env=_env)
+ck("and it refuses the same way whether or not tracking is possible",
+   (_r.returncode, "ran-anyway" in _r.stdout) == (_r2.returncode, "ran-anyway" in _r2.stdout),
+   "%s vs %s" % (_r.returncode, _r2.returncode))
+os.chmod(os.path.join(_home, "logs"), 0o500)
+os.chmod(os.path.join(_home, "logs"), 0o700)
+shutil.rmtree(_home, ignore_errors=True)
+shutil.rmtree(_work, ignore_errors=True)
+
+print()
 print("=== the plugin breaking mid-handoff must not take the job with it ===")
 # The sweep above breaks the plugin before the command starts. This breaks it at
 # the moment it tries to write the job down - after the command is running, when

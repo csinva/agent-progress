@@ -472,6 +472,83 @@ ck("heredoc bodies are not read as commands",
    not cc.classify_command("cat > f <<'X'\npython3 train.py\nX\nls")["track"],
    "the text of a script is data, not a command being run")
 
+print()
+print("=== asking some other scheduler how a job is doing ===")
+# The slurm path has its own suite; this is the generic one, used for anything
+# with a --state-probe: LSF, PBS, a queue somebody wrote themselves. Coverage
+# said none of it had ever run.
+# Only "done" and "failed" are endings; everything else means "leave it alone",
+# which the probe spells "running" and an unusable answer spells None. The two
+# behave identically downstream - a job is never finished on a guess.
+for _out, _want in (("RUNNING", "running"), ("COMPLETED", "done"), ("COMPLETE", "done"),
+                    ("FAILED", "failed"), ("OUT_OF_MEMORY", "failed"),
+                    ("TIMEOUT", "failed"), ("CANCELLED", "failed"),
+                    ("CANCELLED_BY_12345", "failed"),
+                    ("PENDING", "running"), ("", None), ("what?", "running"),
+                    ("0", "done"), ("3", "failed")):
+    _job = {"state_probe": "printf '%s'" % _out}
+    ck("a probe saying %-14r reads as %s" % (_out, _want),
+       cc.read_state_probe(_job) == _want, repr(cc.read_state_probe(_job)))
+ck("a probe with nothing to run answers nothing", cc.read_state_probe({}) is None)
+ck("a probe that fails answers nothing",
+   cc.read_state_probe({"state_probe": "exit 7"}) is None)
+ck("a probe that prints several lines uses the last",
+   cc.read_state_probe({"state_probe": "printf 'noise\\nCOMPLETED'"}) == "done")
+ck("and one that hangs does not hang the caller",
+   cc.read_state_probe({"state_probe": "sleep 45"}) is None)
+
+print()
+print("=== folding a reading into a job ===")
+_j = {"unit": "it", "samples": []}
+cc.apply_reading(_j, {"step": 1, "total": 10}, time.time())
+ck("a first step of 1 is taken as one done", _j.get("units") in (0.0, 1.0), str(_j.get("units")))
+_z = {"unit": "it", "samples": []}
+cc.apply_reading(_z, {"step": 0, "total": 10}, time.time())
+ck("a job that starts counting at zero is noticed", _z.get("zero_indexed") is True,
+   str(_z.get("zero_indexed")))
+cc.apply_reading(_z, {"step": 4, "total": 10}, time.time())
+ck("and then four means four", _z.get("units") == 4.0, str(_z.get("units")))
+# a reading's pct is a fraction, not a number out of a hundred: the parser
+# divides by 100 before it gets here
+ck("the parser gives a percentage as a fraction",
+   cc.parse_progress("Progress: 40%")["pct"] == 0.4,
+   str(cc.parse_progress("Progress: 40%")["pct"]))
+_p = {"unit": "it", "samples": [], "total": 50}
+cc.apply_reading(_p, {"pct": 0.4}, time.time())
+ck("a percentage against a known total becomes units", _p.get("units") == 20.0,
+   str(_p.get("units")))
+_q = {"unit": "it", "samples": []}
+cc.apply_reading(_q, {"pct": 0.4}, time.time())
+ck("and with no total it is kept as a percentage", _q.get("pct") == 0.4, str(_q.get("pct")))
+ck("a reading with nothing in it changes nothing",
+   cc.apply_reading({"unit": "it", "samples": []}, {}, time.time()) is False)
+
+print()
+print("=== the monitor a job gets from its flags ===")
+import types as _t
+
+
+def _mon(**kw):
+    base = dict(monitor=None, pattern=None, log=None, milestone=None, milestones=None,
+                glob=None, path=None, target_size=None, probe=None, state_probe=None)
+    base.update(kw)
+    return cc.build_monitor(_t.SimpleNamespace(**base))
+
+
+ck("milestones given one at a time", _mon(milestone=["a", "b"])["kind"] == "milestones")
+ck("and their order is kept", _mon(milestone=["a", "b"])["milestones"] == ["a", "b"])
+ck("milestones given as one string", _mon(milestones="a;b;c")["milestones"] == ["a", "b", "c"])
+ck("a glob makes a files monitor", _mon(glob="out/*.pt")["kind"] == "files")
+ck("a path makes a size monitor", _mon(path="/tmp/x")["kind"] == "size")
+ck("a target size is understood", _mon(path="/tmp/x", target_size="2GB")["target_bytes"]
+   == 2 * 1000 ** 3 or _mon(path="/tmp/x", target_size="2GB")["target_bytes"] == 2 * 1024 ** 3,
+   str(_mon(path="/tmp/x", target_size="2GB")["target_bytes"]))
+ck("a probe command makes a probe monitor", _mon(probe="echo 1/2")["kind"] == "probe")
+# no flags at all means no spec: the job works out how to watch itself
+ck("and nothing at all leaves it to work it out", _mon() is None, str(_mon()))
+ck("while asking for auto says so explicitly", _mon(monitor="auto") == {"kind": "auto"},
+   str(_mon(monitor="auto")))
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

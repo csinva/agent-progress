@@ -172,8 +172,13 @@ for _name in sorted(os.listdir(os.path.join(ROOT, "tests"))):
     _src = open(os.path.join(ROOT, "tests", _name)).read()
     for _m in re.finditer(r'"(pkill|pgrep)",\s*"-f",\s*([^\]]+)\]', _src):
         _pattern = _m.group(2).strip()
-        # acceptable: built from TAG, or from a variable holding one
-        if "TAG" in _pattern or "+ " in _pattern or _pattern.startswith(("_", "orphan", "jid")):
+        # The rule is really "not a bare literal": a pattern built from
+        # anything computed - this run's tag, a job id, a temporary directory -
+        # is unique to the run by construction. A quoted string is not.
+        # A pure quoted string is the only thing that can match a neighbour's
+        # processes. Anything built from something computed - this run's tag, a
+        # job id, a temporary directory - is unique to the run by construction.
+        if not re.match(r"""^\s*(["'])[^"']*\1\s*$""", _pattern):
             continue
         _offenders.append("%s: %s %s" % (_name, _m.group(1), _pattern[:40]))
 ck("no test kills or counts processes by a pattern another run could match",

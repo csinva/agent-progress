@@ -33,5 +33,5 @@ Follow the `agent-progress` skill. In short:
    `agent-progress run --name <short-name> --eta <estimate> <monitor flags> -- $ARGUMENTS`
 6. Confirm with `agent-progress ls` and give the expected wall-clock finish time.
 
-Then stop. The job is detached and re-observes itself on a timer. Do not wait on
+Then stop. The job re-observes itself on a timer. Do not wait on
 it, poll it, or sleep-loop.

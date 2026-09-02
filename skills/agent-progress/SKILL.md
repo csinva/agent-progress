@@ -86,7 +86,7 @@ plugin's.
   Judge whether it is worth doing. A job that will be over in a minute never
   reaches the statusline anyway, so leave it alone and carry on. Spend the
   estimate on things that will actually run for a while.
-- **Check what it is watching.** The handoff picks no monitor, so progress comes
+- **Check what it is watching.** Nothing picks a monitor for it, so progress comes
   from reading markers in the log. If the job instead writes files, grows one
   file, or prints stage names, say so:
 

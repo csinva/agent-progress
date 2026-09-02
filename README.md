@@ -178,8 +178,8 @@ records the real exit code.
 
 ## Getting the answer back
 
-A command that outlives the threshold is handed off, and its output goes to a log
-rather than to the session. When it ends, **you are shown what it produced —
+A command that outlives the threshold gets a bar and nothing else; its output
+keeps coming to the session as it always would. When it ends, **you are shown what it produced —
 beside the conversation, not inside it**:
 
 ```
@@ -414,7 +414,7 @@ short. `defer` pays nothing up front and fills the estimate in afterwards.
 
 Two more things kept cheap:
 
-- A job handed off below the two-minute statusline floor is tracked but never
+- A job tracked below the two-minute statusline floor is recorded but never
   shown, and Claude is told not to bother estimating it.
 - Job status used to be re-sent to Claude on every prompt. It now goes out only
   when the picture changes — a job appears, finishes, or gains an estimate — and

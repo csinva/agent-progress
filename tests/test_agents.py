@@ -54,12 +54,23 @@ def as_session(sid, *args, **kw):
                           capture_output=True, text=True, env=env, **kw)
 
 
+LAST_DRAW = {}
+
+
 def bars(sid):
-    """The job names on that session's statusline."""
+    """The job names on that session's statusline.
+
+    Records why a draw came back empty. This check failed once on a machine
+    running two whole suites at the same time and could not be reproduced in
+    288 tries afterwards; a bare list of names tells you nothing about which of
+    the many possible reasons it was."""
     env = dict(os.environ, CLAUDE_CODE_SESSION_ID=sid)
-    out = subprocess.run([sys.executable, ENGINE, "statusline"],
-                         input=json.dumps({"session_id": sid}),
-                         capture_output=True, text=True, env=env).stdout
+    proc = subprocess.run([sys.executable, ENGINE, "statusline"],
+                          input=json.dumps({"session_id": sid}),
+                          capture_output=True, text=True, env=env)
+    out = proc.stdout
+    LAST_DRAW[sid] = "exit=%d stdout=%r stderr=%r" % (
+        proc.returncode, out[:120], proc.stderr[-160:])
     names = []
     for line in out.splitlines():
         plain = re.sub(r"\033\[[0-9;]*m", "", line).strip()
@@ -187,7 +198,9 @@ for trial in range(4):
     bad_bars = {a: v[0] for a, v in seen.items() if v[0] != ["job-" + a]}
     bad_crash = {a: v[1] for a, v in seen.items() if v[1] != ["crash-" + a]}
     ck("trial %d: 12 agents concurrently, bars stay put" % (trial + 1),
-       not bad_bars, str(dict(list(bad_bars.items())[:3])))
+       not bad_bars,
+       "%s | last draw: %s" % (dict(list(bad_bars.items())[:2]),
+                               "; ".join(LAST_DRAW.get(a, "?") for a in list(bad_bars)[:1])))
     ck("trial %d: 12 agents concurrently, crashes stay put" % (trial + 1),
        not bad_crash, str(dict(list(bad_crash.items())[:3])))
 
@@ -497,8 +510,15 @@ def collect(i):
 th = [threading.Thread(target=collect, args=(i,)) for i in range(N)]
 [t.start() for t in th]
 [t.join() for t in th]
-ck("and every crash went to the agent whose job died",
-   all(got["stress-%d" % i] == (["job-%d" % i] if i % 2 else []) for i in range(N)), str(got))
+# Both endings are reported now, so every agent hears about its own job and
+# only its own - three of them that it crashed, three that it finished.
+ck("and every ending went to the agent whose job it was",
+   all(got["stress-%d" % i] == ["job-%d" % i] for i in range(N)), str(got))
+_kinds = {}
+for _e in json.loads(open(sandbox.STATE).read())["inbox"]:
+    _kinds[_e.get("kind")] = _kinds.get(_e.get("kind"), 0) + 1
+ck("three were crashes and three were finishes",
+   _kinds.get("crash") == 3 and _kinds.get("done") == 3, str(_kinds))
 sandbox.kill_watchers(cc)
 shutil.rmtree(work, ignore_errors=True)
 reset()

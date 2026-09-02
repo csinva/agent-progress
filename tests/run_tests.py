@@ -120,22 +120,29 @@ print()
 print("=== the threshold ===")
 t = time.time(); r = ex("sleep 1", after="10s"); dt = time.time() - t
 ck("under threshold: waits for the command", 0.8 < dt < 4 and r.returncode == 0, "%.1fs" % dt)
-t = time.time(); r = ex("sleep 30", after="2s"); dt = time.time() - t
-ck("over threshold: hands off promptly", 1.5 < dt < 5, "%.1fs" % dt)
-ck("handoff message present", "agent-progress" in r.stdout and "tracked" in r.stdout, repr(r.stdout[:80]))
+# Past the threshold the command gets a bar and nothing else: it is not taken
+# away, its output is not rerouted, and this call still ends when it ends.
+t = time.time(); r = ex("sleep 4; echo THE-END", after="2s"); dt = time.time() - t
+ck("over threshold: still waits for the command", 3.5 < dt < 12, "%.1fs" % dt)
+ck("and its output still comes back", "THE-END" in r.stdout, repr(r.stdout[-60:]))
+ck("and nothing is said about tracking", "agent-progress" not in r.stdout,
+   repr(r.stdout[:90]))
 jobs = json.loads(cli("ls", "--json").stdout or "[]")
-ck("handoff created exactly one job", len(jobs) == 1, "%d jobs" % len(jobs))
+ck("but it did get a job, so a bar could show", len(jobs) == 1, "%d jobs" % len(jobs))
+ck("and the job is closed with the command's own result",
+   jobs and jobs[0]["state"] == "done", str([j["state"] for j in jobs]))
 cli("rm", "--all", "--force")
 
 print()
 print("=== --after 0 means track immediately, not never ===")
-t = time.time(); r = ex("sleep 20", after="0"); dt = time.time() - t
+t = time.time(); r = ex("sleep 3", after="0"); dt = time.time() - t
 jobs = json.loads(cli("ls", "--json").stdout or "[]")
-ck("--after 0 hands off at once", dt < 3 and len(jobs) == 1, "%.1fs, %d jobs" % (dt, len(jobs)))
+ck("--after 0 gives it a bar at once", len(jobs) == 1, "%d jobs" % len(jobs))
+ck("and still waits for the command", 2.5 < dt < 10, "%.1fs" % dt)
 cli("rm", "--all", "--force")
 
 print()
-print("=== a job that crashes after handoff is reported ===")
+print("=== a job that crashes in front of the caller ===")
 subprocess.run([sys.executable, ENGINE, "exec", "--after", "1s", "--name", "crasher",
                 "--shell", "sleep 2; echo 'boom: out of memory' >&2; exit 137"],
                capture_output=True, text=True)
@@ -146,11 +153,12 @@ while time.time() < deadline:
         break
     time.sleep(1)
 ck("crashed job recorded", any(j["state"] == "failed" for j in jobs), str([j["state"] for j in jobs]))
+# Nothing is queued about it: the caller watched it fail and has its output and
+# its exit code. A report is for work that outlived the call, not for this.
 inbox = json.loads(cli("inbox", "--json").stdout or "[]")
 pending = [e for e in inbox if not e.get("delivered")]
-ck("crash queued for Claude", len(pending) >= 1, "%d pending" % len(pending))
-ck("crash names the signal", any("SIGKILL" in (e.get("reason") or "") for e in pending),
-   str([e.get("reason") for e in pending]))
+ck("nothing is queued about a job the caller watched fail",
+   not pending, "%d pending" % len(pending))
 cli("rm", "--all", "--force")
 
 print()
@@ -227,26 +235,44 @@ p = {"tool_name":"Bash","session_id":"bg","tool_input":{
 out = subprocess.run([sys.executable, HOOK], input=json.dumps(p),
                      capture_output=True, text=True).stdout
 h = json.loads(out)["hookSpecificOutput"]["updatedInput"]
-ck("background uses run, not exec", " run " in h["command"], h["command"][:70])
-ck("background flag cleared", h["run_in_background"] is False, str(h))
+# One wrapper shape for everything. Detaching a command the caller had already
+# backgrounded made this call return at once, so their background job looked
+# finished the moment it started.
+ck("a backgrounded command is wrapped the same way as any other",
+   " exec " in h["command"], h["command"][:70])
+ck("the caller's backgrounding is left as it was",
+   h["run_in_background"] is True, str(h))
 ck("compound command kept whole", h["command"].rstrip().endswith("'"), h["command"][-40:])
 r = subprocess.run(["/bin/sh","-c", h["command"].replace("python train.py --epochs 5","echo ran")],
                    capture_output=True, text=True)
-time.sleep(2)
-log = json.loads(cli("ls","--json").stdout or "[]")
-ck("backgrounded job was created", len(log) == 1, str(log))
-out = cli("log", log[0]["id"], "-n", "5").stdout if log else ""
-ck("both halves of the command ran", "ran" in out and "done" in out, repr(out))
+ck("both halves of the command ran, and came back to the caller",
+   "ran" in r.stdout and "done" in r.stdout, repr(r.stdout[:60]))
+ck("a command this quick still gets no job",
+   not json.loads(cli("ls", "--json").stdout or "[]"),
+   cli("ls", "--json").stdout[:60])
 cli("rm", "--all", "--force")
 
 print()
 print("=== duration units on --after ===")
+# The threshold decides when a bar appears, not when the call returns: the
+# command is waited for either way.
 for spec, lo, hi in (("1s", 0.5, 3.5), ("2s", 1.5, 4.5)):
+    cli("rm", "--all", "--force")
+    proc = subprocess.Popen([sys.executable, ENGINE, "exec", "--after", spec,
+                             "--shell", "sleep 12"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     t = time.time()
-    subprocess.run([sys.executable, ENGINE, "exec", "--after", spec, "--shell", "sleep 20"],
-                   capture_output=True)
+    while time.time() - t < hi + 4:
+        if json.loads(cli("ls", "--json").stdout or "[]"):
+            break
+        time.sleep(0.2)
     dt = time.time() - t
-    ck("--after %s" % spec, lo < dt < hi, "%.1fs" % dt)
+    ck("--after %s gives it a bar at about the right moment" % spec, lo < dt < hi + 4,
+       "%.1fs" % dt)
+    ck("--after %s: and the call is still running the command" % spec,
+       proc.poll() is None, "already returned")
+    proc.kill()
+    proc.wait()
     cli("rm", "--all", "--force")
 
 print()
@@ -292,8 +318,10 @@ print("=== a crash reaches exactly one session ===")
 reset()
 with cc.state_rw() as st:
     st["inbox"] = []                     # start from a known-empty queue
-subprocess.run([sys.executable, ENGINE, "exec", "--after", "1s", "--name", "boom",
-                "--shell", "sleep 2; exit 9"], capture_output=True)
+# `run`, not `exec`: a report is for work that outlived the call. A command the
+# caller waited for has already handed them its output and its exit code.
+subprocess.run([sys.executable, ENGINE, "run", "--name", "boom", "--eta", "1h",
+                "--", "sh", "-c", "sleep 2; exit 9"], capture_output=True)
 deadline = time.time() + 90
 while time.time() < deadline:
     jj = json.loads(cli("ls", "--json").stdout or "[]")

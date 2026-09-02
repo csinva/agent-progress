@@ -36,7 +36,7 @@ the run will take.
 
 `agent-progress` puts a model in the loop for exactly the part that needs judgement —
 deciding *what to watch* and *roughly how long this will take* — then gets out of
-the way. Claude sets it up once. After that a detached watcher does the
+the way. Claude sets it up once. After that a watcher does the
 observing, and the ETA corrects itself from measured throughput.
 
 | signal | where it comes from | when it dominates |
@@ -269,9 +269,9 @@ The ordinary way to use this is not to type a command at all:
 
 > **run training on the new dataset**
 
-Claude picks the command, starts it through agent-progress, and carries on. The
-job is detached within seconds, so the conversation is never blocked waiting for
-it, and a bar appears on your statusline.
+Claude picks the command and runs it. Once it has been going twenty seconds a
+bar appears on your statusline; nothing else about the command changes - its
+output arrives as it always would, and it ends when it ends.
 
 **It stays quiet.** You asked for a job, not for a report about how it is being
 watched — so there is no announcement that tracking started, no job id, no
@@ -298,10 +298,10 @@ seconds**, that is the end of it. No job is created, no file is written, nothing
 is said to Claude, and no tokens are spent. The overwhelming majority of
 commands land here.
 
-Only a command still running after the threshold is handed off: it keeps going
-in the background, a bar appears, and Claude is told once — at which point it
-can spend a moment on an estimate, because now there is something worth
-estimating.
+Only a command still running after the threshold gets a bar, and getting one
+changes nothing else about it. The plugin never takes a command away from the
+caller, never reroutes its output, and never decides on its behalf that
+something belongs in the background.
 
 ```bash
 agent-progress config --set auto_track_after_seconds=60   # more patient

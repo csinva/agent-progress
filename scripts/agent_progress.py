@@ -1592,17 +1592,19 @@ def launcher_prefix():
     return "%s %s" % (shlex.quote(sys.executable), shlex.quote(os.path.abspath(__file__)))
 
 
-def wrap_command(command, name, launcher=None, after=None, background=False):
+def wrap_command(command, name, launcher=None, after=None):
     """The tracked form of a command.
 
     The original is passed as a single quoted string, never interpolated raw:
     a command containing `&&`, `|` or a redirect would otherwise be cut in half,
     with the tail applying to the wrapper instead of to the command."""
     launcher = launcher or launcher_prefix()
-    if background:
-        # already detached by the caller, so there is nothing to wait and see
-        return "%s run --name %s --auto-launched -- %s" % (
-            launcher, shlex.quote(name), shlex.quote(command))
+    # One shape for everything, including a command the caller has already put in
+    # the background. Detaching that one a second time made this call return at
+    # once, so the caller's own background job looked finished the instant it
+    # started - the plugin overruling a decision that was not its to make. The
+    # wrapper runs the command and waits for it either way; whether that happens
+    # in the foreground is the caller's business.
     opts = "" if after is None else " --after %s" % shlex.quote(str(after))
     return "%s exec --name %s%s --shell %s" % (
         launcher, shlex.quote(name), opts, shlex.quote(command))
@@ -3269,6 +3271,7 @@ def cmd_exec(args):
         return _interrupted(proc, log, 0)
 
     sent = 0
+    bar_jid = None          # the job registered for this command's own bar
     while True:
         sent = _pump(log, sent, sys.stdout)
         if proc.poll() is not None:
@@ -3283,15 +3286,16 @@ def cmd_exec(args):
                         pass
             return code
         if after is not None and (time.time() - started) >= after:
+            # Long enough to be worth a bar. Register it and keep going: the
+            # command is not taken away from the caller, its output is not
+            # rerouted, and this call still ends when the command does. Whether
+            # to put something in the background is the caller's decision.
             try:
-                rc = _handoff(command, name, log, exitf, proc.pid, started, sent, cfg, args)
+                bar_jid = _register(command, name, log, exitf, proc.pid, started,
+                                    cfg, args)
             except Exception:
-                # could not register the job; the command is still running, so
-                # keep forwarding it rather than abandoning it
-                after = None
-            else:
-                _release_signals()   # it is a tracked job now, not our child
-                return rc
+                pass                 # no bar, then; the command is what matters
+            after = None             # once only, whether or not it worked
         time.sleep(0.08)
 
     _release_signals()
@@ -3329,6 +3333,22 @@ def cmd_exec(args):
             code = 128 - code
     if code is not None and code < 0:
         code = 128 - code
+
+    if bar_jid:
+        # It ran to the end in front of the caller, who now has its output and
+        # its exit code. Close that record so the bar stops - with the command's
+        # own code, which lives in the exit file rather than in the wrapper
+        # shell's status - and queue no report: there is nothing to tell them
+        # that they have not just read. Deliberately not the scheduler job the
+        # block below may have attached: that one is only beginning.
+        try:
+            with state_rw(timeout=2.0) as st:
+                job = st["jobs"].get(bar_jid)
+                if job is not None and job.get("state") in ACTIVE_STATES:
+                    finalize(job, code, time.time())
+        except Exception:
+            pass
+
     if not args.keep_log:
         for f in (log, exitf):
             try:
@@ -3338,8 +3358,14 @@ def cmd_exec(args):
     return code
 
 
-def _handoff(command, name, log, exitf, pid, started, sent, cfg, args):
-    """The command outlived the threshold: register it and let go of it."""
+def _register(command, name, log, exitf, pid, started, cfg, args):
+    """The command has been going a while: give it a bar, and carry on.
+
+    It is not taken away from the caller. Its output keeps streaming exactly as
+    it would have without any of this, and the call ends when the command ends,
+    with the command's own exit code. All this adds is a job record and a
+    watcher, so a bar can appear in the statusline. Deciding to put something in
+    the background is the caller's business, not this plugin's."""
     with state_rw() as st:
         jid = new_id(st, name)
         st["jobs"][jid] = {
@@ -3359,17 +3385,7 @@ def _handoff(command, name, log, exitf, pid, started, sent, cfg, args):
     wpid = spawn_watcher(jid)
     with state_rw() as st:
         st["jobs"][jid]["watcher_pid"] = wpid
-
-    floor = fmt_short(cfg["min_duration_seconds"])
-    print("\n[agent-progress] Still going after %s, so it is now tracked as '%s' and left\n"
-          "running in the background. Its remaining output goes to the log, not here.\n"
-          "  agent-progress log %s -n 40      what it has printed\n"
-          "  agent-progress ls --json            progress and state\n"
-          "If you expect it to run for more than about %s, give it an estimate so the\n"
-          "bar can say when it will finish. If not, just carry on - it needs nothing.\n"
-          "  agent-progress update %s --eta <duration>"
-          % (fmt_short(time.time() - started), jid, jid, floor, jid))
-    return 0
+    return jid
 
 
 def cmd_slurm(args):

@@ -101,14 +101,14 @@ def main():
             pass
 
     if cfg["auto_track"] == "defer":
-        background = bool(tool_input.get("run_in_background"))
-        wrapped = cc.wrap_command(
-            command, verdict["name"],
-            after=None if background else cfg["auto_track_after_seconds"],
-            background=background)
+        # Whatever the caller asked for is left exactly as it was. Clearing
+        # run_in_background used to pull a backgrounded command into the
+        # foreground so the plugin could detach it itself - the caller's
+        # decision overruled twice over. The wrapper waits for the command
+        # either way; where that waiting happens is not this plugin's business.
+        wrapped = cc.wrap_command(command, verdict["name"],
+                                  after=cfg["auto_track_after_seconds"])
         updated = dict(tool_input, command=wrapped)
-        if background:
-            updated["run_in_background"] = False   # agent-progress detaches it itself
         emit({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             # deliberately no permissionDecision: the rewritten command still

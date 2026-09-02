@@ -69,15 +69,13 @@ earned it**. A command you run through Bash is wrapped so that it runs exactly
 as it would have; if it finishes within 20 seconds nothing happens at all - no
 job, no bar, no message, no tokens. You will not even know it was wrapped.
 
-Only when a command is *still running* after that threshold is it tracked. At
-that point it is handed off: it keeps running in the background, and the tool
-result ends with a note telling you so.
-
-When you get that note:
-
-- **The command is still running.** Do not re-run it. Its remaining output goes
-  to the job's log: `agent-progress log <id> -n 40`, and `agent-progress ls --json` for
-  progress and state.
+Only when a command is *still running* after that threshold does it get a bar.
+Nothing else changes: the command keeps running in front of you, its output
+keeps arriving exactly as it would have, and the call ends when the command
+ends, with the command's own exit code. There is no note, because there is
+nothing to tell you - you are watching the same command you would have been
+watching anyway. Putting something in the background is your decision, not the
+plugin's.
 - **Give it an estimate if it is worth one.** The hook cannot guess a duration -
   that is the one thing only you can supply:
 
@@ -228,7 +226,7 @@ For something already running:
 agent-progress start reindex --pid 45123 --log /var/log/reindex.log --eta 3h
 ```
 
-Then stop. The job is detached, and the statusline and the completion
+Then stop. The statusline carries it from there, and anything worth
 notification are how they follow it - you do not need to narrate any of it.
 
 ## Other sessions

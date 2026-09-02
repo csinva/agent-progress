@@ -90,8 +90,10 @@ cli("rm", "--all", "--force")
 print()
 print("=== the Stop hook ===")
 cli("config", "--reset")
-subprocess.run([sys.executable, ENGINE, "exec", "--after", "1s", "--name", "dies",
-                "--shell", "sleep 2; exit 4"], capture_output=True)
+# `run`, so the job genuinely outlives the call. A command the caller waited
+# for needs no report - they watched it fail and have its exit code.
+subprocess.run([sys.executable, ENGINE, "run", "--name", "dies", "--eta", "1h",
+                "--", "sh", "-c", "sleep 2; exit 4"], capture_output=True)
 deadline = time.time() + 120
 while time.time() < deadline:
     jobs = json.loads(cli("ls", "--json").stdout or "[]")
@@ -143,11 +145,14 @@ r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "1s", "--shell",
 ck("a fast command works from a path with spaces",
    r.returncode == 0 and "hello from a spacey path" in r.stdout, repr(r.stdout[:80]))
 r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "1s", "--name", "spacey",
-                    "--shell", "echo a; sleep 3; echo b"], capture_output=True, text=True, env=env)
-ck("a handoff works from a path with spaces", "tracked as" in r.stdout, repr(r.stdout[:120]))
+                    "--keep-log", "--shell", "echo a; sleep 3; echo b"],
+                   capture_output=True, text=True, env=env)
+ck("a tracked command works from a path with spaces too",
+   r.returncode == 0 and "a" in r.stdout and "b" in r.stdout, repr(r.stdout[:80]))
 jobs = json.loads(subprocess.run([sys.executable, ENGINE, "ls", "--json"],
                                  capture_output=True, text=True, env=env).stdout or "[]")
-ck("the job's log is readable there", jobs and os.path.exists(jobs[0]["log"] or ""), str(jobs))
+ck("and it got a job there, with a readable log",
+   jobs and os.path.exists(jobs[0]["log"] or ""), str(jobs)[:90])
 time.sleep(3)
 shutil.rmtree(os.path.dirname(spacey), ignore_errors=True)
 
@@ -243,16 +248,25 @@ out = hook(AUTO, "PreToolUse", {"tool_name": "Bash", "session_id": "words",
                                 "tool_input": {"command": real}})
 wrapped = json.loads(out)["hookSpecificOutput"]["updatedInput"]["command"]
 wrapped = wrapped.replace("--after 20", "--after 2")
+# The threshold gives it a bar; it does not take the command away. The call
+# runs the command to the end, as it would have without any of this.
+proc = subprocess.Popen(["/bin/sh", "-c", wrapped],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 t = time.time()
-r = subprocess.run(["/bin/sh", "-c", wrapped], capture_output=True, text=True)
-elapsed = time.time() - t
-ck("a 40s job returns in about the threshold, not 40s", elapsed < 8,
-   "%.1fs" % elapsed)
-ck("and it is still running afterwards",
-   any(j["state"] == "running" for j in json.loads(cli("ls", "--json").stdout or "[]")),
-   cli("ls", "--json").stdout[:80])
-ck("the caller is told in a few lines, not a wall of text",
-   len(r.stdout.strip().splitlines()) <= 12, "%d lines" % len(r.stdout.strip().splitlines()))
+appeared = None
+while time.time() - t < 20:
+    if json.loads(cli("ls", "--json").stdout or "[]"):
+        appeared = time.time() - t
+        break
+    time.sleep(0.2)
+ck("a bar appears at about the threshold", appeared is not None and appeared < 12,
+   str(appeared))
+ck("and the command is still the caller's, still running", proc.poll() is None,
+   "the call had already returned")
+proc.kill()
+_out, _ = proc.communicate()
+ck("and nothing was said to the caller about tracking",
+   "agent-progress" not in _out, repr(_out[:90]))
 cli("rm", "--all", "--force")
 
 # the explicit route a model should prefer when it knows the job is long

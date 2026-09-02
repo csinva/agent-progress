@@ -298,7 +298,7 @@ _NUMERIC_FIELDS = ("started", "updated", "ended", "eta_end", "eta_prior_s",
                    "est_total_s", "initial_est_total_s", "next_probe", "interval_s",
                    "interval_override", "units", "total", "pct", "step", "exit_code",
                    "pid", "watcher_pid", "log_offset", "size_bytes",
-                   "submitted", "queued_seconds", "prompts_since_done")
+                   "submitted", "queued_seconds", "prompts_since_done", "waiter_pid")
 
 
 def _sanitize(st):
@@ -2626,7 +2626,14 @@ def finalize(job, exit_code, now, st=None):
     if job["state"] == "done" and job.get("total") and job.get("units"):
         job["units"] = job["total"]
         job["step"] = job["total"]
-    if st is not None:
+    # A job whose caller waited for it needs no report: they watched it happen
+    # and have its output and its exit code. Whether the wrapper or the watcher
+    # gets here first should not decide whether they are told twice. But if that
+    # caller was killed outright, nobody read the output, and the report becomes
+    # the only way the result comes back.
+    waited_for = job.get("caller_waits") and (
+        not job.get("waiter_pid") or alive(job.get("waiter_pid")))
+    if st is not None and not waited_for:
         if job["state"] == "failed":
             enqueue_crash(st, job, now)
         elif job["state"] == "done" and load_config()["announce_done"]:
@@ -3378,6 +3385,13 @@ def _register(command, name, log, exitf, pid, started, cfg, args):
             "monitor": {"kind": "auto"}, "interval_override": None,
             "est_total_s": None, "initial_est_total_s": None,
             "log_offset": 0, "force_show": False, "auto_launched": True,
+            # The caller is sitting in front of this command and will be handed
+            # its output and its exit code, so nothing is reported about it
+            # later - see finalize. Their pid comes too: if they are killed
+            # outright the output goes nowhere, and then a report is the only
+            # way the result comes back at all.
+            "caller_waits": True,
+            "waiter_pid": os.getpid(),
             "samples": [], "session_id": current_session(),
             "bridge_id": current_bridge(),
             "cwd": args.cwd or os.getcwd(),

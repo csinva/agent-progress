@@ -216,6 +216,54 @@ ck("with nothing thrown at the user", "Traceback" not in _err, _err[-70:])
 shutil.rmtree(_home, ignore_errors=True)
 
 print()
+print("=== a result comes back by one route or the other, never both ===")
+# A command the caller waited for hands back its own output and exit code, so
+# reporting it again would say the same thing twice. But if that caller is
+# killed outright nobody read anything, and then the report is the only way the
+# result comes back at all.
+_home = tempfile.mkdtemp(prefix="agent-progress-routes-")
+_env = dict(os.environ, AGENT_PROGRESS_HOME=_home)
+for _i in range(4):
+    subprocess.run([sys.executable, ENGINE, "exec", "--name", "watched%d" % _i,
+                    "--after", "1", "--shell", "sleep 2; exit %d" % (_i % 2)],
+                   capture_output=True, env=_env)
+time.sleep(2)
+_st = json.loads(open(os.path.join(_home, "state.json")).read())
+ck("four commands the caller waited for all ended",
+   len(_st["jobs"]) == 4 and all(j["state"] in ("done", "failed")
+                                 for j in _st["jobs"].values()),
+   str(sorted(j["state"] for j in _st["jobs"].values())))
+ck("and none of them was reported as well",
+   not _st.get("inbox"), str([e.get("job") for e in _st.get("inbox", [])]))
+
+_p = subprocess.Popen([sys.executable, ENGINE, "exec", "--name", "lost", "--after", "1",
+                       "--shell", "sleep 6; echo THE-RESULT"],
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_env)
+time.sleep(3)
+_p.kill()                       # SIGKILL cannot be forwarded; the command runs on
+_p.wait()
+_st = {}
+for _ in range(60):
+    time.sleep(1)
+    try:
+        _st = json.loads(open(os.path.join(_home, "state.json")).read())
+    except ValueError:
+        continue
+    if _st["jobs"].get("lost", {}).get("state") not in ("running", None):
+        break
+ck("a job whose caller was killed still ends",
+   _st["jobs"].get("lost", {}).get("state") == "done",
+   str(_st["jobs"].get("lost", {}).get("state")))
+_lost = [e for e in _st.get("inbox", []) if e.get("job") == "lost"]
+ck("and is reported, because nobody read its output", len(_lost) == 1,
+   str([e.get("job") for e in _st.get("inbox", [])]))
+ck("with the output nobody saw", _lost and "THE-RESULT" in (_lost[0].get("log_tail") or ""),
+   str(_lost[:1])[:80])
+sandbox.kill_watchers(cc)
+subprocess.run(["pkill", "-f", os.path.join(_home, "logs")], capture_output=True)
+shutil.rmtree(_home, ignore_errors=True)
+
+print()
 print("=== nothing watching a job may end it ===")
 # Only three places in the engine may signal a process: the liveness probe
 # (signal 0, which does nothing), forwarding an interrupt the wrapper itself

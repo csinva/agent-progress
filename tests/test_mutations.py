@@ -15,6 +15,7 @@ unnoticed.
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -38,15 +39,15 @@ MUTATIONS = [
     ("a finished job queues no report",
      '        elif job["state"] == "done" and load_config()["announce_done"]:',
      "        elif False:",
-     "test_properties.py", 180),
+     "test_properties.py", 150),
     ("reports are handed to the wrong session",
      '        "session_id": job.get("session_id"),',
      '        "session_id": "somebody-else",',
-     "test_properties.py", 180),
+     "test_properties.py", 150),
     ("the statusline stops filtering by session",
      '        if (scoped and cfg["scope"] == "session" and know_who_we_are(session_id)',
      '        if (False and cfg["scope"] == "session" and know_who_we_are(session_id)',
-     "test_agents.py", 240),
+     "test_agents.py", 200),
     ("a not-a-number reaches the bar",
      "    return out if math.isfinite(out) else None",
      "    return out",
@@ -54,11 +55,11 @@ MUTATIONS = [
     ("the plugin forgets jobs that are still running",
      "    def removable(job):\n        return ours(job) and (args.force or not live(job))",
      "    def removable(job):\n        return ours(job)",
-     "test_lifecycle.py", 240),
+     "test_lifecycle.py", 200),
     ("nothing bounds a read from stdin",
      "            done = _complete_json(chunks)\n            if done is not None:\n                return done",
      "            pass",
-     "test_robust.py", 240),
+     "test_robust.py", 260),
 ]
 
 
@@ -86,20 +87,37 @@ for label, old, new, suite, budget in MUTATIONS:
     env = dict(os.environ)
     env.pop("AGENT_PROGRESS_HOME", None)      # the copy gets its own sandbox
     env["APCHAOS_SEED"] = "5"
+    # Output to a file, never a pipe. subprocess.run(timeout=) kills the child
+    # and then waits for the pipes to close, and a grandchild - a watcher, or
+    # the command a wrapper is waiting on - holds them open indefinitely, so the
+    # timeout does not time anything out. This suite sat for thirty-five minutes
+    # on exactly that.
+    logfile = os.path.join(tmp, "suite.log")
+    argv = [sys.executable, suite] + (["1"] if "properties" in suite else [])
+    with open(logfile, "w") as out:
+        proc = subprocess.Popen(argv, cwd=os.path.join(tmp, "tests"), stdout=out,
+                                stderr=subprocess.STDOUT, env=env,
+                                start_new_session=True)
+        try:
+            rc = proc.wait(timeout=budget)
+            noticed = rc != 0
+            why = ""
+        except subprocess.TimeoutExpired:
+            noticed, why = True, "the suite hung, which is also a failure"
+    # the whole process group: a killed suite leaves watchers behind, and they
+    # belong to this mutant rather than to anything the real plugin is doing
     try:
-        r = subprocess.run([sys.executable, suite, "2"] if "properties" in suite
-                           else [sys.executable, suite],
-                           cwd=os.path.join(tmp, "tests"), capture_output=True,
-                           text=True, env=env, timeout=budget)
-        noticed = r.returncode != 0
-        why = ""
-        for line in r.stdout.splitlines():
-            if line.strip().startswith("FAIL"):
-                why = line.strip()[:66]
-                break
-    except subprocess.TimeoutExpired:
-        noticed, why = True, "the suite hung, which is also a failure"
-    subprocess.run(["pkill", "-f", os.path.join(tmp, "scripts")], capture_output=True)
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except OSError:
+        pass
+    if not why:
+        try:
+            for line in open(logfile):
+                if line.strip().startswith("FAIL"):
+                    why = line.strip()[:66]
+                    break
+        except OSError:
+            pass
     shutil.rmtree(tmp, ignore_errors=True)
     ck("%s is caught by %s" % (label, suite), noticed, "the suite passed anyway")
     if noticed and why:

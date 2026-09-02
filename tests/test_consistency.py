@@ -146,6 +146,20 @@ ck("the README's pattern count is right",
    m and int(m.group(1)) == len(cc.AUTO_TRACK_PATTERNS),
    "says %s, there are %d" % (m.group(1) if m else "-", len(cc.AUTO_TRACK_PATTERNS)))
 
+print()
+# A crash example in the skill pointed at ~/.claude/progress/logs for a long
+# time; the plugin has never written there. Paths in prose are read by people
+# and repeated by Claude, so they have to be paths that exist.
+_REAL = {os.path.basename(cc.ROOT), "skills", "settings.json", "plugins", "agent-progress"}
+_docs = ["README.md", os.path.join("skills", "agent-progress", "SKILL.md")]
+_docs += [os.path.join("commands", f) for f in sorted(os.listdir(os.path.join(ROOT, "commands")))
+          if f.endswith(".md")]
+for _doc in _docs:
+    _text = open(os.path.join(ROOT, _doc)).read()
+    _bad = sorted({m for m in re.findall(r"~/\.claude/([A-Za-z0-9_.-]+)", _text)
+                   if m not in _REAL})
+    ck("%s names only paths the plugin uses" % _doc, not _bad, str(_bad))
+
 print("  %d declarations checked" % CHECKS[0])
 print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))

@@ -282,7 +282,7 @@ was blocked, or as context on the next message. It looks like:
 💀 A tracked job CRASHED while you were working: 'trainer'
   SIGKILL - killed outright - most often the OOM killer after 04:12
   command: python train.py --epochs 50
-  log: ~/.claude/progress/logs/trainer.log
+  log: ~/.claude/agent-progress/logs/trainer.log
   last output: ...
 ```
 
@@ -298,6 +298,17 @@ were doing, and even if it is unrelated to the current task. Then:
    memory, a missing file).
 4. **Do not re-run the job without asking.** It may have burned hours, and
    re-running it blindly can repeat an expensive failure.
+
+Several jobs can die at once — an out-of-memory or a failing GPU takes
+everything on the machine — and they arrive together in one report. Say that
+several died and give the shared cause once, rather than working through them
+one at a time as though they were unrelated. If the report ends by saying more
+are still queued, tell the user that too: the number that died is the number it
+names, not the number described.
+
+A report may say the job belonged to **another session** that has since exited.
+Pass it on as that: someone else's job died, you did not start it, and it is not
+yours to re-run.
 
 Each report is delivered once, so do not wait for a repeat — act on it when you
 see it. A job the user cancelled deliberately is not a crash and is never

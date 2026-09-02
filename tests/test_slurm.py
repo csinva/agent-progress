@@ -265,6 +265,43 @@ ck("showing the wait, not a fake ETA", "queued 30h" in sl, repr(sl[:200]))
 run("rm", "--all", "--force")
 
 print()
+print("=== a quiet job is not a stuck one while the scheduler says it runs ===")
+slurm_says(scontrol="JobId=88 JobState=RUNNING Reason=None TimeLimit=3-00:00:00 "
+                    "RunTime=1-02:00:00 NodeList=gpu-1\n")
+run("slurm", "88", "--name", "quiet", "--interval", "2s")
+sandbox.kill_watchers(cc, ["quiet"])
+_w = subprocess.Popen([sys.executable, ENGINE, "_watch", "quiet", "--max-idle", "1",
+                       "--interval", "2"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+time.sleep(7)
+ck("a day of silence does not end a job the scheduler still reports running",
+   job("quiet").get("state") == "running", "%s %r" % (job("quiet").get("state"), job("quiet").get("note")))
+ck("and its watcher is still watching", _w.poll() is None)
+slurm_says(sacct="COMPLETED|1-04:00:00|2026-09-01T10:00:00|0:0|gpu-1\n")
+until(lambda: job("quiet").get("state") != "running", 60)
+ck("so its real ending is still caught", job("quiet").get("state") == "done",
+   str(job("quiet").get("state")))
+try:
+    _w.kill()
+except OSError:
+    pass
+run("rm", "--all", "--force")
+
+print()
+print("=== with nobody to ask, silence is all there is ===")
+_qlog = os.path.join(sandbox.HOME, "quiet2.log")
+open(_qlog, "w").write("started\n")
+run("start", "quiet2", "--log", _qlog, "--no-watch")
+_w = subprocess.Popen([sys.executable, ENGINE, "_watch", "quiet2", "--max-idle", "1",
+                       "--interval", "2"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+ck("a bare log-attached job that goes quiet is still called stalled",
+   until(lambda: job("quiet2").get("state") == "stalled", 30), str(job("quiet2").get("state")))
+try:
+    _w.kill()
+except OSError:
+    pass
+run("rm", "--all", "--force")
+
+print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

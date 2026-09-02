@@ -2952,8 +2952,15 @@ def _watch_loop(args):
             # started; that is the normal case, not a stall, and a job can sit
             # in a busy queue for longer than max_idle without anything at all
             # being wrong.
+            # And silence means nothing at all when there is somebody to ask.
+            # A scheduler job, or one with a state probe, is alive for as long
+            # as that authority says so - a multi-day run that checkpoints
+            # without printing is quiet, not stuck. Calling it stalled ended
+            # the record and stopped the watcher, so the ending the scheduler
+            # later reported reached nobody.
             if (not finished and not job.get("pid")
                     and job.get("state") != "queued"
+                    and not (kind or job.get("state_probe"))
                     and (now - idle_since) > args.max_idle):
                 job["note"] = ((job.get("note") or "") + " [no progress seen]").strip()
                 job["state"] = "stalled"

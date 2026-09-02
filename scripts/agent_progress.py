@@ -2053,13 +2053,22 @@ def crash_reason(code):
     return "exit %d" % code, "exited with status %d" % code
 
 
+CRASH_LINE_CHARS = 200      # what the report shows of any one line
+CRASH_TAIL_CHARS = 4000     # and of all of them together
+
+
 def enqueue_crash(st, job, now):
     """Queue a crash for delivery to whichever Claude session asks next."""
     tail = ""
     if job.get("log"):
         text, _ = read_tail(job["log"], 0, 65536)
         lines = [ln for ln in text.splitlines() if ln.strip()]
-        tail = "\n".join(lines[-15:])
+        # Store what the report will actually show. The renderer already cuts
+        # each line at 200 characters, so keeping the whole of fifteen lines put
+        # up to 64KB per crash into a file that is rewritten on every job
+        # update, every watcher tick and every hook - and the queue holds
+        # hundreds of them.
+        tail = "\n".join(ln[:CRASH_LINE_CHARS] for ln in lines[-15:])[:CRASH_TAIL_CHARS]
     short, why = crash_reason(job.get("exit_code"))
     if job.get("scheduler_state"):
         # the scheduler's own word beats an invented exit code

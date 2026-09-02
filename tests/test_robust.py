@@ -72,6 +72,44 @@ for label, doc in shapes.items():
        (r.stderr + r2.stderr).strip().splitlines()[-1][:70] if (r.stderr or r2.stderr) else "")
 
 print()
+print("=== a crash report from a job with enormous output ===")
+# The report shows the last fifteen lines, cut at 200 characters each. Storing
+# the whole of those lines put up to 64KB per crash into a file that is
+# rewritten on every job update, every watcher tick and every hook - and the
+# queue holds hundreds.
+run("rm", "--all", "--force")
+with cc.state_rw() as st:
+    st["inbox"] = []
+_wide = os.path.join(sandbox.HOME, "wide.py")
+open(_wide, "w").write(
+    "for i in range(20):\n"
+    "    print('W%d ' % i + 'y' * 100000, flush=True)\n"
+    "print('THE LAST LINE', flush=True)\n"
+    "raise SystemExit(4)\n")
+run("run", "--name", "wide", "--eta", "1h", "--", sys.executable, _wide)
+_state = None
+for _ in range(60):
+    time.sleep(1)
+    _state = json.loads(open(cc.STATE).read())
+    if _state["jobs"].get("wide", {}).get("state") not in ("running", None):
+        break
+_ev = [e for e in _state.get("inbox", []) if e.get("job") == "wide"]
+ck("the crash was queued", bool(_ev), str(_state["jobs"].get("wide", {}).get("state")))
+if _ev:
+    _tail = _ev[0].get("log_tail") or ""
+    ck("the stored tail is small", len(_tail) <= cc.CRASH_TAIL_CHARS + 50, "%d chars" % len(_tail))
+    ck("and it is the end of the log, not the start", "THE LAST LINE" in _tail, _tail[-60:])
+    ck("no single stored line is longer than the report shows",
+       all(len(ln) <= cc.CRASH_LINE_CHARS for ln in _tail.splitlines()),
+       str(max((len(ln) for ln in _tail.splitlines()), default=0)))
+ck("and the state file did not balloon",
+   os.path.getsize(cc.STATE) < 200 * 1024, "%d bytes" % os.path.getsize(cc.STATE))
+sandbox.kill_watchers(cc)
+run("rm", "--all", "--force")
+with cc.state_rw() as st:
+    st["inbox"] = []
+
+print()
 print("=== every field of a job, given the wrong kind of value ===")
 # The state file is a plain file that several processes write and anyone can
 # edit. A value of the wrong shape must make the bar know less, never make it

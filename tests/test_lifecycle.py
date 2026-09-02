@@ -651,6 +651,27 @@ ck("but leaves a run job's log alone", "users.log" in left, str(left))
 shutil.rmtree(home, ignore_errors=True)
 
 
+# ------------------------------------------------------- the same shell
+# Claude Code runs Bash commands with bash. The wrapper has to as well, or a
+# command that works unwrapped breaks wrapped - `[[ ]]`, pipefail and arrays
+# all fail under dash, which is /bin/sh on most Linux machines.
+home, renv = reap_home()
+bashism = "set -o pipefail; a=(x y); [[ ${#a[@]} == 2 ]] && false | true; echo rc=$?"
+r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "60", "--shell", bashism],
+                   capture_output=True, text=True, env=renv)
+ck("a wrapped command runs under bash", r.stdout.strip() == "rc=1", repr((r.returncode, r.stdout, r.stderr[-80:])))
+r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "60", "--shell",
+                    "ps -o comm= -p $$"], capture_output=True, text=True, env=renv)
+ck("and says so if asked", r.stdout.strip().endswith("bash"), repr(r.stdout))
+subprocess.run([sys.executable, ENGINE, "run", "--name", "bashrun", "--", "sh", "-c", "true"],
+               capture_output=True, env=renv)
+r = subprocess.run([sys.executable, ENGINE, "run", "--name", "bashy", "--eta", "1m", "--",
+                    "bash", "-c", "true"], capture_output=True, text=True, env=renv)
+ck("run launches through the same shell", cc.USER_SHELL.endswith("bash"), cc.USER_SHELL)
+sandbox.kill_watchers(cc)
+shutil.rmtree(home, ignore_errors=True)
+
+
 print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:

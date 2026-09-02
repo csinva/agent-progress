@@ -23,6 +23,7 @@ import os
 import re
 import select
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -47,6 +48,14 @@ STATE_VERSION = 1
 # time, the throughput is measured against work that has not begun, and the bar
 # claims progress on a job that has produced nothing.
 ACTIVE_STATES = ("running", "queued")
+
+# The user's command runs under the same shell the tool it came from would
+# have used. Claude Code runs Bash commands with bash; on Linux /bin/sh is
+# often dash, where `[[ ]]`, `set -o pipefail`, arrays and `<( )` all fail -
+# and a command that works unwrapped and breaks wrapped is the plugin changing
+# its output. The probes a user writes for the watcher are documented as sh
+# and stay on it.
+USER_SHELL = shutil.which("bash") or "/bin/sh"
 
 # --------------------------------------------------------------------- config
 #
@@ -3154,7 +3163,7 @@ def cmd_run(args):
     wrapper = "( %s ) > %s 2>&1; echo $? > %s" % (
         cmd, shlex.quote(log), shlex.quote(exitf))
     proc = subprocess.Popen(
-        ["/bin/sh", "-c", wrapper],
+        [USER_SHELL, "-c", wrapper],
         cwd=args.cwd or os.getcwd(),
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -3320,7 +3329,7 @@ def _passthrough(command, cwd):
             os.chdir(cwd)
     except OSError:
         pass
-    os.execv("/bin/sh", ["/bin/sh", "-c", command])
+    os.execv(USER_SHELL, [USER_SHELL, "-c", command])
 
 
 def cmd_exec(args):
@@ -3378,7 +3387,7 @@ def cmd_exec(args):
     _forward_signals(None)
     started = time.time()
     proc = subprocess.Popen(
-        ["/bin/sh", "-c", "( %s ) > %s 2>&1; echo $? > %s"
+        [USER_SHELL, "-c", "( %s ) > %s 2>&1; echo $? > %s"
          % (command, shlex.quote(log), shlex.quote(exitf))],
         # No stdin, deliberately. This command may outlive the call that started
         # it, and a detached job holding the session's stdin gets stopped by the
@@ -4295,7 +4304,7 @@ def build_parser():
     sp = sub.add_parser("exec", help="run a command, tracking it only if it proves slow")
     sp.add_argument("--after", help="start tracking after this long (default: config)")
     sp.add_argument("--name", help="job name if it does get tracked")
-    sp.add_argument("--shell", help="the command, as one string, run with /bin/sh -c")
+    sp.add_argument("--shell", help="the command, as one string, run with bash -c (sh if there is no bash)")
     sp.add_argument("--cwd", help="working directory for the command")
     sp.add_argument("--desc", help="human description of the job")
     sp.add_argument("--keep-log", action="store_true",

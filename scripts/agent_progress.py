@@ -4133,6 +4133,25 @@ def build_parser():
     return p
 
 
+def os_error_message(ex):
+    """What to say when the filesystem refuses.
+
+    A full disk, a read-only directory, a permission that changed underneath -
+    all ordinary on a machine that trains models, and none of them a bug in
+    this. Say which one, in a sentence, and say that what failed is the
+    tracking rather than the work."""
+    hint = {
+        errno.ENOSPC: "the disk holding %s is full" % ROOT,
+        errno.EROFS: "%s is on a read-only filesystem" % ROOT,
+        errno.EACCES: "no permission to write to %s" % ROOT,
+        errno.EPERM: "no permission to write to %s" % ROOT,
+        errno.EDQUOT: "the disk quota for %s is exhausted" % ROOT,
+    }.get(getattr(ex, "errno", None))
+    return ("agent-progress: %s.\nThe job itself is unaffected - this is the "
+            "progress tracking failing, not your work.\n"
+            % (hint or "could not write its state (%s)" % ex))
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     if not getattr(args, "fn", None):
@@ -4151,4 +4170,7 @@ if __name__ == "__main__":
     except StateBusy as ex:
         # a plain sentence, not a traceback: this is a busy file, not a bug
         sys.stderr.write("agent-progress: %s. Nothing was changed.\n" % ex)
+        sys.exit(1)
+    except OSError as ex:
+        sys.stderr.write(os_error_message(ex))
         sys.exit(1)

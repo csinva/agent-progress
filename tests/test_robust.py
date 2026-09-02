@@ -72,6 +72,23 @@ for label, doc in shapes.items():
        (r.stderr + r2.stderr).strip().splitlines()[-1][:70] if (r.stderr or r2.stderr) else "")
 
 print()
+print("=== when the filesystem refuses ===")
+# A full disk is an ordinary Tuesday on a machine that writes checkpoints. It
+# used to come out as a Python traceback, which reads like the plugin broke.
+import errno as _errno
+
+for _code, _expect in ((_errno.ENOSPC, "full"),
+                       (_errno.EROFS, "read-only"),
+                       (_errno.EACCES, "permission"),
+                       (_errno.EDQUOT, "quota")):
+    _msg = cc.os_error_message(OSError(_code, os.strerror(_code)))
+    ck("errno %s is explained in words" % _code, _expect in _msg, _msg.strip()[:70])
+    ck("and errno %s says the work is unaffected" % _code, "unaffected" in _msg)
+_msg = cc.os_error_message(OSError(_errno.EIO, "some other failure"))
+ck("an unrecognised one still says something", "could not write" in _msg, _msg[:60])
+ck("and none of them is a traceback", "Traceback" not in _msg)
+
+print()
 print("=== a crash report from a job with enormous output ===")
 # The report shows the last fifteen lines, cut at 200 characters each. Storing
 # the whole of those lines put up to 64KB per crash into a file that is

@@ -245,6 +245,7 @@ print()
 print("=== a job started through the hook belongs to the session that ran it ===")
 reset()
 AUTO = os.path.join(HOOKS, "auto_track.py")
+procs = []
 for sid in ("agent-X", "agent-Y"):
     env = dict(os.environ, CLAUDE_CODE_SESSION_ID=sid)
     out = subprocess.run([sys.executable, AUTO], env=env, capture_output=True, text=True,
@@ -253,8 +254,18 @@ for sid in ("agent-X", "agent-Y"):
     wrapped = json.loads(out)["hookSpecificOutput"]["updatedInput"]["command"]
     wrapped = wrapped.replace("--after 20", "--after 1").replace(
         "--name train", "--name train-" + sid)
-    subprocess.run(["/bin/sh", "-c", wrapped.replace("python3 train.py", "sleep 12")],
-                   capture_output=True, env=env)
+    # The wrapper waits for its command now, so the bar has to be looked at
+    # while the command is still running rather than after the call returns.
+    procs.append(subprocess.Popen(
+        ["/bin/sh", "-c", wrapped.replace("python3 train.py", "sleep 12")],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env))
+
+_deadline = time.time() + 30
+while time.time() < _deadline:
+    raw = json.loads(open(sandbox.STATE).read())["jobs"]
+    if {"train-agent-X", "train-agent-Y"} <= set(raw):
+        break
+    time.sleep(0.5)
 raw = json.loads(open(sandbox.STATE).read())["jobs"]
 owners = {k: v.get("session_id") for k, v in raw.items()}
 ck("the wrapped job records the session that ran it",
@@ -263,6 +274,9 @@ ck("the wrapped job records the session that ran it",
 for sid in ("agent-X", "agent-Y"):        # long enough to earn a bar
     as_session(sid, "update", "train-" + sid, "--eta", "3h", "--quiet")
 ck("and each agent sees only its own", bars("agent-X") == ["train-agent-X"], str(bars("agent-X")))
+for _p in procs:
+    _p.kill()
+    _p.wait()
 for sid in ("agent-X", "agent-Y"):
     as_session(sid, "cancel", "train-" + sid)
 

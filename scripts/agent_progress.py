@@ -559,6 +559,25 @@ def _prune(st):
         # was created - and take its watcher with it
         if j.get("state") not in ACTIVE_STATES and (j.get("ended") or 0) < cutoff:
             del st["jobs"][jid]
+            _discard_auto_files(j)
+
+
+def _discard_auto_files(job):
+    """The wrapper's own log and exit file go with the record.
+
+    A wrapped command normally removes them itself on the way out. It leaves
+    them when it cannot close its record - the state file busy, or an
+    interrupt - so the watcher can still read the true exit status. Once the
+    record is gone nothing can reach them, so they go too. Only files the
+    wrapper made: a `run` job's log is the user's, named by them, and stays."""
+    if not job.get("auto_launched"):
+        return
+    for f in (job.get("log"), job.get("exit_file")):
+        if f and os.path.dirname(os.path.abspath(f)) == os.path.abspath(LOGS):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
 
 
 def current_session():
@@ -3372,7 +3391,9 @@ def cmd_exec(args):
     )
     if _INTERRUPT:
         # it arrived while the child was being started
-        return _interrupted(proc, log, 0)
+        code = _interrupted(proc, log, 0)
+        _discard_run_files(log, exitf, keep=args.keep_log)
+        return code
 
     sent = 0
     bar_jid = None          # the job registered for this command's own bar
@@ -3382,12 +3403,14 @@ def cmd_exec(args):
             break
         if _INTERRUPT:
             code = _interrupted(proc, log, sent)
-            if not args.keep_log:
-                for f in (log, exitf):
-                    try:
-                        os.remove(f)
-                    except OSError:
-                        pass
+            # The command was cut short - a tool timeout, a ctrl-c - so the
+            # caller did not see it end. Close the record now, with the signal
+            # as its exit status, rather than leaving the bar running until the
+            # watcher finds a dead pid; and report it, since a job that was
+            # killed is exactly what they asked always to hear about.
+            closed = _close_bar(bar_jid, code, note="killed by %s" % _signame(code - 128),
+                                cut_short=True)
+            _discard_run_files(log, exitf, keep=args.keep_log or not closed)
             return code
         if after is not None and (time.time() - started) >= after:
             # Long enough to be worth a bar. Register it and keep going: the
@@ -3433,33 +3456,64 @@ def cmd_exec(args):
         # no exit file: the wrapper itself was killed. Popen reports that as a
         # negative number, which sys.exit would turn into nonsense (-15 -> 241),
         # so report it the way a shell does.
-        if code is not None and code < 0:
-            code = 128 - code
+        pass
     if code is not None and code < 0:
         code = 128 - code
 
-    if bar_jid:
-        # It ran to the end in front of the caller, who now has its output and
-        # its exit code. Close that record so the bar stops - with the command's
-        # own code, which lives in the exit file rather than in the wrapper
-        # shell's status - and queue no report: there is nothing to tell them
-        # that they have not just read. Deliberately not the scheduler job the
-        # block below may have attached: that one is only beginning.
-        try:
-            with state_rw(timeout=2.0) as st:
-                job = st["jobs"].get(bar_jid)
-                if job is not None and job.get("state") in ACTIVE_STATES:
-                    finalize(job, code, time.time())
-        except Exception:
-            pass
-
-    if not args.keep_log:
-        for f in (log, exitf):
-            try:
-                os.remove(f)
-            except OSError:
-                pass
+    # It ran to the end in front of the caller, who now has its output and its
+    # exit code. Close that record so the bar stops - with the command's own
+    # code, which lives in the exit file rather than in the wrapper shell's
+    # status - and queue no report: there is nothing to tell them that they
+    # have not just read. Deliberately not the scheduler job the block above
+    # may have attached: that one is only beginning.
+    closed = _close_bar(bar_jid, code)
+    # If the state file was too busy to take the close-out, the exit file
+    # stays: it is the only proof the command finished the way it did. Delete
+    # it and the watcher finds a dead pid with no status, which it can only
+    # read as "killed" - a false obituary for a command that succeeded, on a
+    # machine that was merely busy. With the file kept, the watcher reads the
+    # true code and the sweeper removes the file later.
+    _discard_run_files(log, exitf, keep=args.keep_log or not closed)
     return code
+
+
+def _close_bar(jid, code, note=None, cut_short=False):
+    """Close the record behind this command's own bar. True if it was closed
+    (or there was none); False if the state file was too busy to take it.
+
+    `cut_short` means the caller did not get to see the command end, so the
+    usual "they watched it, tell them nothing" rule does not apply."""
+    if not jid:
+        return True
+    try:
+        with state_rw(timeout=2.0) as st:
+            job = st["jobs"].get(jid)
+            if job is not None and job.get("state") in ACTIVE_STATES:
+                if note:
+                    job["note"] = note
+                if cut_short:
+                    job["caller_waits"] = False
+                finalize(job, code, time.time(), st if cut_short else None)
+        return True
+    except Exception:
+        return False
+
+
+def _signame(num):
+    try:
+        return signal.Signals(num).name
+    except (ValueError, AttributeError):
+        return "signal %s" % num
+
+
+def _discard_run_files(log, exitf, keep):
+    if keep:
+        return
+    for f in (log, exitf):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
 
 
 def _register(command, name, log, exitf, pid, started, cfg, args):

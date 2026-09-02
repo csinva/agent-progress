@@ -558,6 +558,99 @@ sandbox.kill_watchers(cc)
 shutil.rmtree(home, ignore_errors=True)
 
 
+# ---------------------------------------------------- the wrapper closing out
+# The wrapper closes its own record when the command ends. When the state file
+# is too busy to take that, the exit file must stay: it is the only proof of
+# how the command ended, and without it the watcher can only read a dead pid
+# as "killed" - a false obituary for a command that succeeded.
+import fcntl
+
+home, renv = reap_home()
+renv = dict(renv, CLAUDE_CODE_SESSION_ID="busy1")
+subprocess.run([sys.executable, ENGINE, "ls"], capture_output=True, env=renv)
+wr = subprocess.Popen([sys.executable, ENGINE, "exec", "--name", "fine", "--after", "1",
+                       "--shell", "sleep 2; echo ok"], stdout=subprocess.PIPE,
+                      stderr=subprocess.PIPE, text=True, env=renv)
+time.sleep(1.7)
+held = open(os.path.join(home, ".lock"), "a+")
+fcntl.flock(held, fcntl.LOCK_EX)
+out, _err = wr.communicate()
+time.sleep(4)
+fcntl.flock(held, fcntl.LOCK_UN)
+held.close()
+ck("a busy state file does not change the command's result",
+   wr.returncode == 0 and out.strip() == "ok", "%r %r" % (wr.returncode, out))
+kept = [n for n in os.listdir(os.path.join(home, "logs")) if n.endswith(".exit")]
+ck("the exit file is kept when the record could not be closed", bool(kept), str(kept))
+deadline = time.time() + 30
+while time.time() < deadline:
+    rec = [j for j in records(home) if j.get("id") == "fine"]
+    if rec and rec[0].get("state") not in cc.ACTIVE_STATES:
+        break
+    time.sleep(1)
+rec = [j for j in records(home) if j.get("id") == "fine"]
+ck("the watcher then records the true result",
+   bool(rec) and rec[0].get("state") == "done" and rec[0].get("exit_code") == 0, str(rec[:1]))
+_rc, said = hook(renv, "Stop", "busy1")
+ck("and no false obituary is written", "SIGKILL" not in said and "killed" not in said, repr(said[:100]))
+sandbox.kill_watchers(cc)
+shutil.rmtree(home, ignore_errors=True)
+
+# An interrupt is the caller's doing: the bar stops at once, the record says so,
+# and nobody is told about it afterwards.
+home, renv = reap_home()
+renv = dict(renv, CLAUDE_CODE_SESSION_ID="int1")
+wr = subprocess.Popen([sys.executable, ENGINE, "exec", "--name", "longone", "--after", "1",
+                       "--shell", "sleep 40"], stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL, env=renv)
+deadline = time.time() + 20
+while time.time() < deadline:
+    if os.path.exists(os.path.join(home, "state.json")) and any(
+            j.get("state") == "running" for j in records(home)):
+        break
+    time.sleep(0.2)
+os.kill(wr.pid, signal.SIGINT)
+rc = wr.wait(timeout=20)
+rec = [j for j in records(home) if j.get("id") == "longone"]
+ck("an interrupted wrapper exits the way a shell does", rc == 130, str(rc))
+ck("its record is closed at once and says why",
+   bool(rec) and rec[0].get("state") == "failed" and rec[0].get("exit_code") == 130
+   and "SIGINT" in (rec[0].get("note") or ""), str(rec[:1]))
+ck("its run files are gone", not os.listdir(os.path.join(home, "logs")),
+   str(os.listdir(os.path.join(home, "logs"))))
+_rc, said = hook(renv, "Stop", "int1")
+ck("the cut-short job is reported as a death", "longone" in said and "SIGINT" in said,
+   repr(said[:100]))
+time.sleep(12)                              # long enough for the watcher to have looked too
+_rc, again = hook(renv, "Stop", "int1")
+ck("and only once", "longone" not in again, repr(again[:100]))
+sandbox.kill_watchers(cc)
+shutil.rmtree(home, ignore_errors=True)
+
+# When a finished record is pruned, the wrapper's own files go with it; a
+# `run` job's log is the user's and stays.
+home, renv = reap_home()
+logs = os.path.join(home, "logs")
+os.makedirs(logs, exist_ok=True)
+for n in ("auto.log", "auto.log.exit", "users.log"):
+    open(os.path.join(logs, n), "w").write("x\n")
+old = time.time() - 10 * 86400
+json.dump({"version": 1, "jobs": {
+    "auto": {"id": "auto", "state": "done", "ended": old, "auto_launched": True,
+             "log": os.path.join(logs, "auto.log"),
+             "exit_file": os.path.join(logs, "auto.log.exit")},
+    "users": {"id": "users", "state": "done", "ended": old,
+              "log": os.path.join(logs, "users.log"), "exit_file": None}},
+    "sessions": {}, "inbox": []}, open(os.path.join(home, "state.json"), "w"))
+subprocess.run([sys.executable, ENGINE, "start", "tick", "--pid", str(os.getpid()),
+                "--no-watch"], capture_output=True, env=renv)   # a write runs the pruner
+left = sorted(os.listdir(logs))
+ck("pruning a wrapper's record removes its files", "auto.log" not in left and
+   "auto.log.exit" not in left, str(left))
+ck("but leaves a run job's log alone", "users.log" in left, str(left))
+shutil.rmtree(home, ignore_errors=True)
+
+
 print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:

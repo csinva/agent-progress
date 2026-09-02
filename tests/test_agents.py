@@ -384,6 +384,51 @@ ck("no setting is lost to a racing writer", lost_total == 0,
 as_session(None, "config", "--reset")
 
 print()
+print("=== several jobs dying together ===")
+# A machine that runs out of memory, or a GPU that falls over, takes every job
+# on it at once. Handing those over one at a time stopped the turn once per
+# death, each with a single obituary.
+reset()
+for i in range(3):
+    queue_crash("died-%d" % i, "s-batch")
+
+
+def stop(sid, active=False):
+    out = subprocess.run([sys.executable, os.path.join(HOOKS, "inject_status.py"), "Stop"],
+                         input=json.dumps({"session_id": sid, "stop_hook_active": active}),
+                         capture_output=True, text=True,
+                         env=dict(os.environ, CLAUDE_CODE_SESSION_ID=sid)).stdout
+    try:
+        return json.loads(out or "{}")
+    except ValueError:
+        return {}
+
+
+first = stop("s-batch")
+ck("three deaths stop the turn once", first.get("decision") == "block")
+ck("and the one report names all three",
+   all("'died-%d'" % i in (first.get("reason") or "") for i in range(3)),
+   (first.get("reason") or "")[:90])
+ck("a second stop has nothing left to say", stop("s-batch").get("decision") != "block")
+
+reset()
+for i in range(7):
+    queue_crash("many-%d" % i, "s-many")
+r = stop("s-many")
+named = sum(1 for i in range(7) if "'many-%d'" % i in (r.get("reason") or ""))
+ck("more deaths than fit are capped", named == 3, "named %d" % named)
+ck("but the report says how many are still queued",
+   "more tracked job" in (r.get("reason") or ""), (r.get("reason") or "")[-90:])
+reset()
+queue_crash("solo", "s-one")
+r = stop("s-one")
+ck("and a single death says nothing about others",
+   "more tracked job" not in (r.get("reason") or ""))
+ck("a stop that is already a stop hook never blocks",
+   stop("s-one", active=True).get("decision") != "block")
+reset()
+
+print()
 print("=== six agents running real jobs at once ===")
 # Everything above uses jobs that stand still. This runs six real processes
 # through the real hook, with their watchers writing to the shared state file

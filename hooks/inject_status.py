@@ -76,7 +76,24 @@ def emit(event, text):
         "hookEventName": event, "additionalContext": text}}))
 
 
+def still_waiting(cc, cfg, session_id):
+    """Crashes this session is owed that did not fit in this report."""
+    try:
+        pending = [e for e in (cc.state_ro().get("inbox") or [])
+                   if not e.get("delivered")
+                   and (cfg["scope"] == "all"
+                        or not cc.know_who_we_are(session_id)
+                        or cc.job_belongs_here(e, session_id))]
+        return len(pending)
+    except Exception:
+        return 0
+
+
 def collect_crashes(cc, cfg, session_id, limit=3):
+    """Up to `limit` crash reports, and a line about any that did not fit.
+
+    Reporting three of seven without saying so tells the user three jobs died
+    when seven did."""
     out = []
     try:
         if not cc.pending_crashes():
@@ -86,6 +103,11 @@ def collect_crashes(cc, cfg, session_id, limit=3):
             if not ev:
                 break
             out.append(cc.format_crash(ev, cfg))
+        left = still_waiting(cc, cfg, session_id)
+        if out and left:
+            out.append("%d more tracked job(s) also crashed and are still queued; "
+                       "`agent-progress inbox` lists them, and they will be reported "
+                       "as you go." % left)
     except Exception:
         pass
     return out
@@ -287,15 +309,18 @@ def main():
         # Never block twice in a row - that is how a stop hook becomes a loop.
         if payload.get("stop_hook_active") or not cfg["crash_alert"]:
             return 0
-        try:
-            if not cc.pending_crashes():
-                return 0
-            ev = cc.take_crash(session_id)
-        except Exception:
+        # Every crash this session is owed, in one block. Taking them one at a
+        # time meant a machine that killed four jobs at once - an OOM, a GPU
+        # falling over, a node going away - stopped the turn four times in a
+        # row, each with a single obituary, when what is wanted is one report
+        # saying four things died.
+        reports = collect_crashes(cc, cfg, session_id)
+        if not reports:
             return 0
-        if not ev:
-            return 0
-        print(json.dumps({"decision": "block", "reason": cc.format_crash(ev, cfg)}))
+        if len(reports) > 1:
+            reports.insert(0, "%d tracked jobs crashed. All of them, in order:"
+                           % len(reports))
+        print(json.dumps({"decision": "block", "reason": "\n\n".join(reports)}))
         return 0
 
     if event == "SessionStart":

@@ -308,10 +308,13 @@ got = []
 
 
 def grab(i):
-    r = subprocess.run([sys.executable, os.path.join(HOOKS, "inject_status.py"),
-                        "UserPromptSubmit"], input=json.dumps({"session_id": "c%d" % i}),
+    # a job's end goes beside the conversation now, so that is where delivery
+    # is counted; the property is unchanged - one session, exactly once
+    r = subprocess.run([sys.executable, os.path.join(HOOKS, "inject_status.py"), "Stop"],
+                       input=json.dumps({"session_id": "c%d" % i,
+                                         "stop_hook_active": False}),
                        capture_output=True, text=True).stdout
-    got.append("'boom'" in r)
+    got.append("boom" in r)
 
 
 th = [threading.Thread(target=grab, args=(i,)) for i in range(6)]

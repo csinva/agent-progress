@@ -98,9 +98,15 @@ while time.time() < deadline:
     if jobs and jobs[0]["state"] != "running":
         break
     time.sleep(1)
+# A turn ending is the user's turn to speak. News about a job goes beside the
+# transcript, where it interrupts nobody, and never holds the turn open.
 first = hook(STATUS, "Stop", {"session_id": "s", "stop_hook_active": False})
-ck("a crash blocks the stop once",
-   json.loads(first or "{}").get("decision") == "block", first[:100])
+_first = json.loads(first or "{}")
+ck("a crash is put in front of the user when the turn ends",
+   "systemMessage" in _first, first[:90])
+ck("and it says which job and why",
+   "dies" in _first.get("systemMessage", ""), _first.get("systemMessage", "")[:70])
+ck("without holding the turn open", _first.get("decision") != "block", first[:90])
 second = hook(STATUS, "Stop", {"session_id": "s", "stop_hook_active": False})
 ck("and only once", second == "", second[:100])
 with cc.state_rw() as st:
@@ -424,14 +430,21 @@ for _ in range(40):
     if _final not in ("running", None):
         break
 ck("it finished", _final == "done", str(_final))
+# The result comes back beside the conversation, not inside it: the user sees
+# what their job produced, and nothing is added to what they said to Claude.
+_side = json.loads(hook(STATUS, "Stop",
+                        {"session_id": cc.current_session(),
+                         "stop_hook_active": False}) or "{}").get("systemMessage", "")
+ck("the user is shown that it finished", "finished" in _side.lower(), _side[:80])
+ck("and the result it produced", "FINAL RESULT: accuracy 0.93" in _side, _side[-120:])
+ck("and where to read more of it", "agent-progress log" in _side, _side[-60:])
 _ctx = hook(STATUS, "UserPromptSubmit", {"session_id": cc.current_session()})
 _text = json.loads(_ctx or "{}").get("hookSpecificOutput", {}).get("additionalContext", "")
-ck("the session is told it finished", "FINISHED" in _text, _text[:80])
-ck("and gets the result it produced", "FINAL RESULT: accuracy 0.93" in _text, _text[-120:])
-ck("and is told not to run it again", "not re-run" in _text.lower() or "do not re-run" in _text.lower())
-_again = json.loads(hook(STATUS, "UserPromptSubmit", {"session_id": cc.current_session()}) or "{}")
-_again = _again.get("hookSpecificOutput", {}).get("additionalContext", "")
-ck("and is not told twice", "FINISHED" not in _again, _again[:60])
+ck("nothing rides along with the user's next message", not _text.strip(), _text[:60])
+_again = json.loads(hook(STATUS, "Stop", {"session_id": cc.current_session(),
+                                          "stop_hook_active": False}) or "{}")
+ck("and it is not shown twice", "finished" not in _again.get("systemMessage", "").lower(),
+   str(_again)[:60])
 
 cli("rm", "--all", "--force")
 with cc.state_rw() as st:

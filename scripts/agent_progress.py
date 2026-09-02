@@ -144,6 +144,11 @@ CONFIG_SPEC = {
         "behavior", 3600,
         "how long a crash waits for its own session before any session may take it",
         lo=0),
+    "report_style": _spec(
+        "behavior", "side",
+        "how a job's end reaches you: 'side' beside the conversation, 'context' "
+        "with your next message so Claude can act on it, 'off' not at all",
+        "str", choices=["side", "context", "off"]),
     "announce_done": _spec(
         "behavior", True,
         "tell the session when a tracked job finishes, with the tail of its output",
@@ -2233,6 +2238,29 @@ def take_crash(session_id=None):
 
 def pending_crashes():
     return [e for e in state_ro().get("inbox", []) if not e.get("delivered")]
+
+
+def format_beside(ev, cfg=None):
+    """The same news, written for the person rather than for Claude.
+
+    Shown next to the conversation, so it is read by whoever is sitting there:
+    no instructions about what to do with it, no telling them not to re-run
+    their own job, and short enough to take in at a glance."""
+    cfg = cfg or load_config()
+    ev = ev or {}
+    ended_well = ev.get("kind") == "done"
+    glyph = cfg["glyph_done"] if ended_well else cfg["glyph_failed"]
+    head = "%s %s %s" % (glyph, ev.get("job"),
+                         "finished" if ended_well else (ev.get("reason_short") or "failed"))
+    if ev.get("duration") is not None:
+        head += " after %s" % fmt_dur(ev["duration"])
+    lines = [head]
+    if ev.get("handover"):
+        lines.append("  (started by another session, which has since gone)")
+    for ln in (ev.get("log_tail") or "").splitlines()[-6:]:
+        lines.append("  " + ln[:120])
+    lines.append("  agent-progress log %s -n 60" % (ev.get("job") or "<id>"))
+    return "\n".join(lines)
 
 
 def format_report(ev, cfg=None):

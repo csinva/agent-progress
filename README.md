@@ -178,15 +178,29 @@ records the real exit code.
 
 ## Getting the answer back
 
-A command that outlives the threshold is handed off, and its output goes to a
-log rather than to the session. So when it finishes, **the session is told, and
-given the tail of what it produced** — the result comes back even though the
-command that asked for it returned long ago. Asking for a model to be trained
-and never being told it finished would make the tracking worse than useless.
+A command that outlives the threshold is handed off, and its output goes to a log
+rather than to the session. When it ends, **you are shown what it produced —
+beside the conversation, not inside it**:
 
-The same channel carries both endings: a job that fails is reported as a crash,
-a job that succeeds as a finished job with its output. Turn the second off with
-`announce_done=false` if you only want to hear about failures.
+```
+✓ train finished after 41:12
+  Epoch 40/40  loss 0.31
+  FINAL RESULT: accuracy 0.93
+  agent-progress log train -n 60
+```
+
+That is a `systemMessage`: displayed next to the transcript, not part of what
+Claude is reading. Nothing is added to your messages, nothing interrupts a turn,
+and Claude is not told a job ended unless you tell it. A job that dies is shown
+the same way, with the reason and its last output.
+
+Nothing else appears in the conversation. The statusline carries the running
+jobs; the side channel carries the endings; and that is the whole of it.
+
+```bash
+agent-progress config --set report_style=context  # hand endings to Claude instead
+agent-progress config --set report_style=off      # say nothing at all
+```
 
 ## When a finished bar goes away
 
@@ -575,7 +589,7 @@ AGENT_PROGRESS_BAR_WIDTH=40 AGENT_PROGRESS_STYLE=bars agent-progress ls
 | **fields** | `show_spinner`, `show_name`, `show_percent`, `show_counts`, `show_clock`, `show_rate`, `show_eta_clock`, `show_drift`, `show_note`, `note_width`, `clock_format` |
 | **color** | `color`, `color_running`, `color_done`, `color_failed`, `color_warn`, `color_dim`, `color_track`, `color_text` |
 | **estimation** | `blend_full_at`, `rate_window`, `rate_min_span`, `drift_threshold` |
-| **behavior** | `notify`, `notify_sound_ok`, `notify_sound_fail`, `crash_alert`, `announce_done`, `context_min_interval_seconds`, `crash_handover_seconds` |
+| **behavior** | `notify`, `notify_sound_ok`, `notify_sound_fail`, `crash_alert`, `announce_done`, `report_style`, `context_min_interval_seconds`, `crash_handover_seconds` |
 | **auto** | `auto_track`, `auto_track_after_seconds`, `auto_track_timeout_seconds`, `auto_track_background`, `auto_track_patterns`, `auto_track_ignore` |
 
 Styles are `blocks`, `tqdm`, `ascii`, `dots`, `bars`, and any of them can be

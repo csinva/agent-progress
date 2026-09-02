@@ -275,26 +275,24 @@ waiting for a job. If the user wants genuinely periodic reporting, use the
 
 ## When a job finishes
 
-A command that was handed off wrote its output to a log, not to you. When it
-ends you are handed a report saying so, with the tail of what it printed:
+**You will not be told.** A job ending is shown to the user beside the
+conversation, not handed to you: it costs the conversation nothing and
+interrupts nothing. So do not wait for it, do not poll for it, and do not
+mention it unless the user brings it up.
+
+If they do ask - "did it finish?", "what did it get?" - then look:
 
 ```
-✓ A tracked job FINISHED while you were working: 'train'
-  it ran for 41:12
-  last output:
-    Epoch 40/40  loss 0.31
-    FINAL RESULT: accuracy 0.93
+agent-progress ls               what is running, and what ended recently
+agent-progress log <id> -n 60   what it printed
 ```
 
-**Tell the user, and tell them what it produced** — read the answer out of that
-output rather than saying only that it finished. That report is the only way the
-result comes back to the conversation; the command that started it returned long
-ago. Do not re-run it.
+That is also the only reason to run those commands. A job observes itself.
 
 ## When a job crashes
 
-You will be handed a crash report unprompted — either as the reason your turn
-was blocked, or as context on the next message. It looks like:
+A job that dies is shown to the user beside the conversation, the same way a
+finished one is, and you are not interrupted for it. What they see looks like:
 
 ```
 💀 A tracked job CRASHED while you were working: 'trainer'

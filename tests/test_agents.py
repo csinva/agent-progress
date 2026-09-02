@@ -83,11 +83,42 @@ def bars(sid):
 
 
 def context(sid):
+    """What this session is told about jobs that ended, on whichever channel.
+
+    By default that is the side channel - a systemMessage shown beside the
+    conversation when a turn ends - and nothing rides along with the user's
+    messages at all. The routing being checked is the same either way: news
+    about a job goes to the session whose job it is."""
+    out = subprocess.run([sys.executable, INJECT, "Stop"],
+                         input=json.dumps({"session_id": sid, "stop_hook_active": False}),
+                         capture_output=True, text=True,
+                         env=dict(os.environ, CLAUDE_CODE_SESSION_ID=sid)).stdout
+    try:
+        got = json.loads(out or "{}")
+    except ValueError:
+        return ""
+    return got.get("systemMessage") or got.get("reason") or ""
+
+
+def named(text, candidates):
+    """Which of these job ids the report mentions.
+
+    Written this way so the check survives the report being reworded: the
+    question is which jobs were named, not how they were quoted."""
+    return sorted(c for c in candidates if re.search(r"\b%s\b" % re.escape(c), text or ""))
+
+
+def in_context(sid):
+    """What rides along with the user's message - nothing, unless asked for."""
     out = subprocess.run([sys.executable, INJECT, "UserPromptSubmit"],
                          input=json.dumps({"session_id": sid}),
                          capture_output=True, text=True,
                          env=dict(os.environ, CLAUDE_CODE_SESSION_ID=sid)).stdout
-    return json.loads(out or "{}").get("hookSpecificOutput", {}).get("additionalContext", "")
+    try:
+        return json.loads(out or "{}").get("hookSpecificOutput", {}).get(
+            "additionalContext", "")
+    except ValueError:
+        return ""
 
 
 def reset():
@@ -134,11 +165,14 @@ for a in ("agent-A", "agent-B"):
     as_session(a, "start", "job-" + a, "--eta", "3h", "--monitor", "time", "--no-watch")
 # once each: an unchanged summary is deliberately not resent, so asking twice
 # in one expression answers the second time with nothing
-ctx_a, ctx_b = context("agent-A"), context("agent-B")
-ck("agent A hears about its own job", "job-agent-A" in ctx_a, ctx_a[:90])
-ck("and not about agent B's", "job-agent-B" not in ctx_a, ctx_a[:90])
-ck("agent B hears about its own", "job-agent-B" in ctx_b, ctx_b[:90])
-ck("and not about agent A's", "job-agent-A" not in ctx_b, ctx_b[:90])
+# Running jobs are shown on the statusline, which is the side channel for
+# them; nothing about them is put into the model's context any more.
+ck("agent A sees its own job on its bar", bars("agent-A") == ["job-agent-A"],
+   str(bars("agent-A")))
+ck("agent B sees only its own", bars("agent-B") == ["job-agent-B"], str(bars("agent-B")))
+ck("and neither one's prompt carries anything to the model",
+   in_context("agent-A") == "" and in_context("agent-B") == "",
+   repr(in_context("agent-A")[:60]))
 
 print()
 print("=== a crash goes to the session whose job it was ===")
@@ -150,7 +184,7 @@ for trial in range(6):
     got = {}
     for a in agents:
         text = context(a)
-        got[a] = sorted(re.findall(r"'(job-agent-\d)'", text))
+        got[a] = named(text, ["job-" + x for x in agents])
     right = all(got[a] == ["job-" + a] for a in agents)
     ck("trial %d: four crashes, four owners" % (trial + 1), right, str(got))
 
@@ -161,7 +195,8 @@ grace = cc.orphan_grace()
 queue_crash("abandoned", "an-agent-that-exited", ts=time.time() - grace - 60)
 handed = context("someone-else")
 ck("a stale crash is eventually offered to whoever is here", "abandoned" in handed, handed[:90])
-ck("and it is labelled as another session's", "ANOTHER session" in handed, handed[:120])
+ck("and it is labelled as another session's",
+   "another session" in handed.lower(), handed[:120])
 reset()
 queue_crash("fresh", "an-agent-still-running")
 ck("but a fresh one is not taken from its owner",
@@ -175,7 +210,7 @@ ck("a report 15 minutes old is still its owner's",
    "still-owned" not in context("a-passing-agent"), context("a-passing-agent")[:80])
 ck("and the owner still receives it, unlabelled",
    "still-owned" in context("a-live-but-idle-agent")
-   and "ANOTHER session" not in context("a-live-but-idle-agent"))
+   and "another session" not in context("a-live-but-idle-agent").lower())
 
 print()
 print("=== many agents at once ===")
@@ -190,7 +225,7 @@ for trial in range(4):
     def look(a):
         rows, text = bars(a), context(a)
         with lock:
-            seen[a] = (rows, sorted(re.findall(r"'(crash-agent-\d+)'", text)))
+            seen[a] = (rows, named(text, ["crash-" + x for x in agents]))
 
     th = [threading.Thread(target=look, args=(a,)) for a in agents]
     [t.start() for t in th]
@@ -417,21 +452,24 @@ def stop(sid, active=False):
         return {}
 
 
+def side(result):
+    return result.get("systemMessage") or result.get("reason") or ""
+
+
 first = stop("s-batch")
-ck("three deaths stop the turn once", first.get("decision") == "block")
-ck("and the one report names all three",
-   all("'died-%d'" % i in (first.get("reason") or "") for i in range(3)),
-   (first.get("reason") or "")[:90])
-ck("a second stop has nothing left to say", stop("s-batch").get("decision") != "block")
+ck("three deaths are shown together, not one interruption each",
+   len(named(side(first), ["died-%d" % i for i in range(3)])) == 3, side(first)[:90])
+ck("and none of it holds the turn open", first.get("decision") != "block", str(first)[:70])
+ck("a second stop has nothing left to say", not side(stop("s-batch")))
 
 reset()
 for i in range(7):
     queue_crash("many-%d" % i, "s-many")
 r = stop("s-many")
-named = sum(1 for i in range(7) if "'many-%d'" % i in (r.get("reason") or ""))
-ck("more deaths than fit are capped", named == 3, "named %d" % named)
-ck("but the report says how many are still queued",
-   "more tracked job" in (r.get("reason") or ""), (r.get("reason") or "")[-90:])
+ck("more deaths than fit are capped",
+   len(named(side(r), ["many-%d" % i for i in range(7)])) == 3,
+   "named %d" % len(named(side(r), ["many-%d" % i for i in range(7)])))
+ck("but it says how many are still queued", "more" in side(r).lower(), side(r)[-90:])
 reset()
 queue_crash("solo", "s-one")
 r = stop("s-one")
@@ -504,7 +542,7 @@ got = {}
 
 def collect(i):
     sid = "stress-%d" % i
-    got[sid] = sorted(re.findall(r"'(job-\d)'", context(sid)))
+    got[sid] = named(context(sid), ["job-%d" % k for k in range(N)])
 
 
 th = [threading.Thread(target=collect, args=(i,)) for i in range(N)]

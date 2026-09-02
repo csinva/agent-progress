@@ -649,6 +649,9 @@ run("rm", "--all", "--force")
 
 print()
 print("=== the context throttle lets go after its interval ===")
+# The throttle only governs the context style; by default nothing rides along
+# with the user's messages at all, so this asks for that style explicitly.
+run("config", "--set", "report_style=context")
 run("config", "--set", "context_min_interval_seconds=2")
 run("start", "thr", "--eta", "2h", "--monitor", "time", "--no-watch")
 STATUS = os.path.join(ROOT, "hooks", "inject_status.py")

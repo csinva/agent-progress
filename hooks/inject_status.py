@@ -25,7 +25,21 @@ from _shared import load_engine, read_payload  # noqa: E402
 
 
 
+SIDE_LIMIT = 4000       # what Claude Code will show of a systemMessage
+
+
+def show_beside(text):
+    """Put something in front of the person without putting it in the conversation.
+
+    A systemMessage is displayed next to the transcript and is not part of what
+    the model is reading, so news about a job costs the conversation nothing and
+    interrupts nobody. This is the whole point of the side channel: a finished
+    job is the user's business first, and only Claude's if they say so."""
+    print(json.dumps({"systemMessage": text[:SIDE_LIMIT]}))
+
+
 def emit(event, text):
+    """Hand something to the model, as part of the user's turn."""
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": event, "additionalContext": text}}))
 
@@ -44,27 +58,29 @@ def still_waiting(cc, cfg, session_id):
 
 
 def collect_crashes(cc, cfg, session_id, limit=3):
-    """Up to `limit` crash reports, and a line about any that did not fit.
+    """Up to `limit` reports, written both ways.
 
-    Reporting three of seven without saying so tells the user three jobs died
-    when seven did."""
-    out = []
+    Returns (for Claude, for the person). Reporting three of seven without
+    saying so tells them three jobs ended when seven did."""
+    out, beside = [], []
     try:
         if not cc.pending_crashes():
-            return out
+            return out, beside
         while len(out) < limit:
             ev = cc.take_crash(session_id)
             if not ev:
                 break
             out.append(cc.format_report(ev, cfg))
+            beside.append(cc.format_beside(ev, cfg))
         left = still_waiting(cc, cfg, session_id)
         if out and left:
-            out.append("%d more tracked job(s) also crashed and are still queued; "
+            out.append("%d more tracked job(s) also ended and are still queued; "
                        "`agent-progress inbox` lists them, and they will be reported "
                        "as you go." % left)
+            beside.append("  and %d more - agent-progress inbox" % left)
     except Exception:
         pass
-    return out
+    return out, beside
 
 
 def job_lines(cc, cfg, session_id=None):
@@ -260,21 +276,26 @@ def main():
         return 0
 
     if event == "Stop":
-        # Never block twice in a row - that is how a stop hook becomes a loop.
+        # Nothing here ever blocks. A turn ending is the user's turn to speak,
+        # and holding it open to say something about a background job puts the
+        # plugin in the middle of a conversation it is not part of. News goes
+        # beside the transcript instead, where it interrupts nobody.
         if payload.get("stop_hook_active") or not cfg["crash_alert"]:
+            return 0
+        if cfg["report_style"] == "off":
             return 0
         # Every crash this session is owed, in one block. Taking them one at a
         # time meant a machine that killed four jobs at once - an OOM, a GPU
         # falling over, a node going away - stopped the turn four times in a
         # row, each with a single obituary, when what is wanted is one report
         # saying four things died.
-        reports = collect_crashes(cc, cfg, session_id)
+        reports, beside = collect_crashes(cc, cfg, session_id)
         if not reports:
             return 0
         if len(reports) > 1:
             reports.insert(0, "%d tracked jobs ended while you were working. "
                               "All of them, in order:" % len(reports))
-        print(json.dumps({"decision": "block", "reason": "\n\n".join(reports)}))
+        show_beside("\n".join(beside))
         return 0
 
     if event == "SessionStart":
@@ -292,7 +313,15 @@ def main():
     if event == "UserPromptSubmit":
         count_prompt(cc, cfg, session_id)
 
-    blocks = collect_crashes(cc, cfg, session_id)
+    # Beside the conversation, nothing rides along with the user's message. The
+    # statusline is already showing every running job, and anything that ended
+    # was put in front of them when it ended; repeating it into the model's
+    # context would be the plugin taking up room in a conversation it is not
+    # part of.
+    if cfg["report_style"] != "context":
+        return 0
+
+    blocks, _beside = collect_crashes(cc, cfg, session_id)
     lines, hidden, signature = job_lines(cc, cfg, session_id)
 
     # a crash is always worth sending; a routine status update is not

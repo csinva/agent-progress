@@ -322,12 +322,18 @@ with cc.state_rw() as st:
 # caller waited for has already handed them its output and its exit code.
 subprocess.run([sys.executable, ENGINE, "run", "--name", "boom", "--eta", "1h",
                 "--", "sh", "-c", "sleep 2; exit 9"], capture_output=True)
-deadline = time.time() + 90
+# Wait for the thing being delivered, not for the job to end. They happen in the
+# same write, but on a busy machine the watcher can take its time getting there,
+# and racing six sessions for a report that does not exist yet proves nothing.
+deadline = time.time() + 120
 while time.time() < deadline:
-    jj = json.loads(cli("ls", "--json").stdout or "[]")
-    if jj and jj[0]["state"] != "running":
+    if [e for e in json.loads(open(cc.STATE).read()).get("inbox", [])
+            if e.get("job") == "boom" and not e.get("delivered")]:
         break
     time.sleep(1)
+ck("the crash was queued before anyone raced for it",
+   any(e.get("job") == "boom" for e in json.loads(open(cc.STATE).read()).get("inbox", [])),
+   str([e.get("job") for e in json.loads(open(cc.STATE).read()).get("inbox", [])]))
 # Count who was handed *this* crash, not who was handed any crash. On a busy
 # machine another job can crash while these six are racing, and a second
 # session claiming that one says nothing about whether this one was claimed

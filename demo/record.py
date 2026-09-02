@@ -460,16 +460,21 @@ class Panel(object):
 # captured frame covers, so waiting can be skipped past without faking it.
 # (until real-seconds, speed, caption). Speed is how much real time each
 # captured frame covers, so the waiting can be skipped past without faking it.
+# Real time is skipped past wherever nothing is changing - a queue waiting for
+# nodes, a training run counting epochs - and runs at full speed for the three
+# moments worth watching: the bar appearing, slurm killing the benchmark, and
+# the endings arriving at the side. Nothing is faked; frames are simply taken
+# further apart.
 SCRIPT = [
     (3.0,  1,  "three things asked for in plain words. Claude picks the commands"),
-    (8.0,  1,  "sbatch returned in a tenth of a second. the job is queued, and tracked"),
-    (16.0, 1,  "queued is not running: no invented progress, and slurm's own reason"),
+    (8.0,  2,  "sbatch returned in a tenth of a second. the job is queued, and tracked"),
+    (16.0, 8,  "queued is not running: no invented progress, and slurm's own reason"),
     (24.0, 8,  "meanwhile the training run waits out the 20-second threshold"),
     (30.0, 1,  "it crossed it: a bar of its own. the output keeps coming, unchanged"),
-    (35.0, 1,  "Claude gives the training run an estimate - a hook cannot guess one"),
-    (44.0, 4,  "the queue lets the benchmark start"),
-    (54.0, 1,  "its clock starts now: the 38s of waiting was never counted as work"),
-    (60.0, 1,  "slurm kills it. the news arrives beside the conversation, not in it"),
+    (35.0, 2,  "Claude gives the training run an estimate - a hook cannot guess one"),
+    (44.0, 6,  "the queue lets the benchmark start"),
+    (54.0, 6,  "its clock starts now: the 38s of waiting was never counted as work"),
+    (60.0, 3,  "slurm kills it. the news arrives beside the conversation, not in it"),
     (78.0, 14, "the training run carries on, its output still the caller's"),
     (84.0, 1,  "and the build? four seconds, never tracked, never mentioned again"),
 ]

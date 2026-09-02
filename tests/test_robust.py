@@ -801,8 +801,10 @@ ck("and undelivered reports are the last to go",
    "%d undelivered" % sum(1 for e in inbox if not e.get("delivered")))
 with cc.state_rw() as st:
     st["inbox"] = []
-r = run("exec", "--shell", "printf 'a\\000b\\377c\\n'")
-ck("binary output does not crash exec", r.returncode == 0 and "Traceback" not in r.stderr)
+r = subprocess.run([sys.executable, ENGINE, "exec", "--shell", "printf 'a\\000b\\377c\\n'"],
+                   capture_output=True)
+ck("binary output does not crash exec", r.returncode == 0 and b"Traceback" not in r.stderr)
+ck("and comes through byte for byte", r.stdout == b"a\x00b\xffc\n", repr(r.stdout))
 r = run("exec", "--shell", "echo 'h\u00e9llo \U0001f680'")
 ck("unicode survives exec", "\U0001f680" in r.stdout, repr(r.stdout[:30]))
 import threading

@@ -3192,7 +3192,15 @@ def _pump(path, offset, stream):
         return offset
     if chunk:
         try:
-            stream.write(chunk.decode("utf-8", "replace"))
+            # Bytes, untouched. Decoding each read on its own turned any
+            # multi-byte character that straddled two reads - an accent, an
+            # ellipsis, a progress bar's block glyphs - into replacement
+            # characters, which is the wrapper changing the output.
+            raw = getattr(stream, "buffer", None)
+            if raw is not None:
+                raw.write(chunk)
+            else:
+                stream.write(chunk.decode("utf-8", "replace"))
             stream.flush()
         except Exception:
             pass

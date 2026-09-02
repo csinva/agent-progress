@@ -672,6 +672,21 @@ sandbox.kill_watchers(cc)
 shutil.rmtree(home, ignore_errors=True)
 
 
+# The wrapper forwards output as bytes. Decoding each read separately turned
+# a multi-byte character that straddled two reads into replacement characters.
+home, renv = reap_home()
+split = r"printf '\xe2\x80'; sleep 0.3; printf '\xa6 '; printf '\xe2\x96'; sleep 0.3; printf '\x88\n'"
+r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "60", "--shell", split],
+                   capture_output=True, env=renv)
+ck("a character split across two reads comes through whole",
+   r.stdout == "\u2026 \u2588\n".encode("utf-8"), repr(r.stdout))
+r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "60", "--shell",
+                    r"printf '\xff\xfe raw\n'"], capture_output=True, env=renv)
+ck("bytes that are not utf-8 are passed through untouched",
+   r.stdout == b"\xff\xfe raw\n", repr(r.stdout))
+shutil.rmtree(home, ignore_errors=True)
+
+
 print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:

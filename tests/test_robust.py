@@ -9,6 +9,7 @@ import fcntl
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -71,6 +72,46 @@ for label, doc in shapes.items():
        r.returncode == 0 and "Traceback" not in r.stderr
        and r2.returncode == 0 and "Traceback" not in r2.stderr,
        (r.stderr + r2.stderr).strip().splitlines()[-1][:70] if (r.stderr or r2.stderr) else "")
+
+print()
+print("=== nothing watching a job may end it ===")
+# Only three places in the engine may signal a process: the liveness probe
+# (signal 0, which does nothing), forwarding an interrupt the wrapper itself
+# received, and `cancel`, which somebody asked for. A watcher deciding a job has
+# stalled must mark it, never kill it.
+_src = open(os.path.join(ROOT, "scripts", "agent_progress.py")).read().splitlines()
+_fn, _sites = "?", []
+for _line in _src:
+    _m = re.match(r"def (\w+)", _line)
+    if _m:
+        _fn = _m.group(1)
+    if re.search(r"killpg|os\.kill\(|\.kill\(\)|send_signal", _line) and "int(pid), 0" not in _line:
+        _sites.append(_fn)
+ck("only the interrupt forwarder and cancel can signal anything",
+   set(_sites) <= {"_signal_child", "cmd_finish"}, str(sorted(set(_sites))))
+
+# and in practice: a job declared stalled keeps running
+run("rm", "--all", "--force")
+_marker = os.path.join(sandbox.HOME, "stall-marker-" + sandbox.TAG)
+run("run", "--name", "stalls", "--eta", "1h", "--interval", "2s", "--",
+    "sh", "-c", "sleep 20; echo done > %s" % _marker)   # long enough to still be
+                                                       # running when checked below
+time.sleep(2)
+with cc.state_rw() as st:
+    st["jobs"]["stalls"]["updated"] = time.time() - 86400   # long past any idle limit
+run("config", "--set", "max_idle_minutes=1") if "max_idle_minutes" in cc.CONFIG_SPEC else None
+time.sleep(4)
+_job = json.loads(open(cc.STATE).read())["jobs"]["stalls"]
+_pid_alive = cc.alive(_job.get("pid"))
+ck("a job the plugin thinks has stalled is still running", _pid_alive,
+   "state=%s pid=%s" % (_job.get("state"), _job.get("pid")))
+for _ in range(40):
+    time.sleep(1)
+    if os.path.exists(_marker):
+        break
+ck("and it still reaches the end of its work", os.path.exists(_marker))
+sandbox.kill_watchers(cc)
+run("rm", "--all", "--force")
 
 print()
 print("=== whatever ails the plugin, the work still runs ===")

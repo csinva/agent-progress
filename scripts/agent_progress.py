@@ -1243,7 +1243,7 @@ def render_block(job, cfg, width):
     if job.get("desc"):
         bits.append(one_line(job["desc"], 120))
     if job.get("cmd"):
-        bits.append("$ " + one_line(job["cmd"], 160))
+        bits.append("$ " + command_for_display(job["cmd"])[:160])
     bits.append(one_line("watching " + describe_monitor(job), 160))
     for label, key in (("reason", "queue_reason"), ("nodes", "nodes"),
                        ("partition", "partition"), ("slurm says", "scheduler_state")):
@@ -1483,6 +1483,16 @@ def command_segments(command, cap=400, most=40):
         return parts
     half = most // 2
     return parts[:half] + parts[-half:]
+
+
+def command_for_display(command):
+    """A command with any heredoc body taken out, for showing to a person.
+
+    A heredoc is how a script gets written, and collapsing one onto a single
+    line put its source into the middle of what claimed to be the command -
+    `cat > train.py <<PY import time for i in range(14): print(...)`. The body is
+    not a command; it is the file the command wrote."""
+    return one_line(HEREDOC.sub(" <<(script)", command or ""))
 
 
 def classify_command(command, tool_input=None, cfg=None):
@@ -2252,7 +2262,7 @@ def format_report(ev, cfg=None):
     else:
         lines.append("  %s after %s" % (ev.get("reason"), fmt_dur(ev.get("duration"))))
     if ev.get("cmd"):
-        cmd = one_line(ev["cmd"])
+        cmd = command_for_display(ev["cmd"])
         lines.append("  command: %s" % (cmd[:200] + ("..." if len(cmd) > 200 else "")))
     if ev.get("log"):
         lines.append("  log: %s" % ev["log"])

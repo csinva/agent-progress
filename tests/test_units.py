@@ -456,6 +456,18 @@ for _own in ("agent-progress run --name t --eta 1h -- python train.py",
     ck("the plugin does not wrap itself: %s" % _own[:40],
        not cc.classify_command(_own)["track"], _own[:60])
 
+# A heredoc is how a script gets written; collapsing one onto a line put the
+# script's own source into the middle of what claimed to be the command.
+_with_heredoc = ("mkdir -p out && cat > train.py <<'PY'\nimport time\n"
+                 "for i in range(14):\n    print(i)\nPY\npython3 train.py --epochs 13")
+_shown = cc.command_for_display(_with_heredoc)
+ck("a shown command does not include the script it wrote",
+   "import time" not in _shown and "range(14)" not in _shown, _shown[:70])
+ck("but it still shows what was actually run",
+   "python3 train.py --epochs 13" in _shown and "mkdir -p out" in _shown, _shown[:70])
+ck("and a command with no heredoc is untouched",
+   cc.command_for_display("python3 train.py") == "python3 train.py")
+
 ck("heredoc bodies are not read as commands",
    not cc.classify_command("cat > f <<'X'\npython3 train.py\nX\nls")["track"],
    "the text of a script is data, not a command being run")

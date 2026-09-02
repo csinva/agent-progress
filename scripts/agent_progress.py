@@ -2716,7 +2716,7 @@ def build_monitor(args, existing=None):
 UNIT_BY_MONITOR = {"milestones": "stage", "files": "file", "size": "", "time": ""}
 
 
-def _new_job(args, cmd=None, log=None, pid=None):
+def _new_job(args, cmd=None, log=None, exit_file=None, pid=None):
     now = time.time()
     eta = parse_duration(getattr(args, "eta", None))
     mon = build_monitor(args)
@@ -2726,7 +2726,7 @@ def _new_job(args, cmd=None, log=None, pid=None):
         "id": None,
         "desc": one_line(getattr(args, "desc", None)),
         "cmd": cmd,
-        "log": log,
+        "log": log, "exit_file": exit_file,
         "pid": pid,
         "unit": unit,
         "total": getattr(args, "total", None),
@@ -2851,7 +2851,7 @@ def cmd_run(args):
     )
 
     with state_rw() as st:
-        job = _new_job(args, cmd=cmd, log=log, pid=proc.pid)
+        job = _new_job(args, cmd=cmd, log=log, exit_file=exitf, pid=proc.pid)
         job["id"] = jid
         st["jobs"][jid] = job
     wpid = spawn_watcher(jid)
@@ -2978,7 +2978,9 @@ def attach_batch_job(kind, job_id, cwd, eta=None, name=None, desc=None,
         jid = new_id(st, name or "%s-%s" % (kind, job_id))
         st["jobs"][jid] = {
             "id": jid, "desc": desc or "%s job %s" % (kind, job_id), "cmd": None,
-            "log": log, "exit_file": exitf, "pid": None, "unit": "it", "total": None,
+            # a scheduler job's output is written by the scheduler; there is no
+            # exit file of ours to believe, so its end comes from the queue
+            "log": log, "exit_file": None, "pid": None, "unit": "it", "total": None,
             "total_locked": False, "step": None, "units": None, "pct": None,
             # a job that has just been accepted by a queue is, by definition,
             # in the queue; the probe below corrects it if it started at once

@@ -3747,11 +3747,11 @@ def cmd_demo(args):
 
 
 def cmd_inbox(args):
-    """Crash reports waiting to be handed to a Claude session."""
+    """Reports waiting to be handed to a session: jobs that ended, well or badly."""
     if args.drain:
         ev = take_crash(current_session())
         if not ev:
-            print("no undelivered crash reports")
+            print("nothing waiting to be reported")
             return 0
         print(format_report(ev))
         return 0
@@ -3760,14 +3760,18 @@ def cmd_inbox(args):
         print(json.dumps(evs, indent=2))
         return 0
     if not evs:
-        print("no crash reports")
+        print("nothing waiting to be reported")
         return 0
     cfg = load_config()
     for e in evs[-args.limit:]:
+        # a job that finished is not a crash, and saying "exited with status 0"
+        # under a skull is the plugin misreporting its own good news
+        finished = e.get("kind") == "done"
         print("%s %-16s %s  %-34s %s" % (
-            cfg["glyph_failed"], e.get("job"),
+            cfg["glyph_done"] if finished else cfg["glyph_failed"], e.get("job"),
             time.strftime("%m-%d %H:%M", time.localtime(e.get("ts") or 0)),
-            e.get("reason"), "PENDING" if not e.get("delivered") else "delivered"))
+            "finished" if finished else (e.get("reason") or "ended"),
+            "PENDING" if not e.get("delivered") else "delivered"))
     return 0
 
 

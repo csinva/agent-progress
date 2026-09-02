@@ -445,6 +445,17 @@ for _name, _cmd, _want in _cases:
         _slow.append((_name, round(_took, 1)))
 ck("a job is found wherever it sits in a compound command", not _wrong, str(_wrong))
 ck("and deciding stays fast on pathological commands", not _slow, str(_slow))
+# The self-reference guard is anchored, so it moved into the per-segment bucket
+# when compound commands started being read part by part. It has to keep
+# holding: the plugin wrapping its own invocation is how a wrapper recurses.
+for _own in ("agent-progress run --name t --eta 1h -- python train.py",
+             "/usr/local/bin/agent-progress exec --name train --after 20 --shell 'python train.py'",
+             "agent-progress ls",
+             "agent-progress update train --eta 2h",
+             "python3 /somewhere/scripts/agent_progress.py run -- python train.py"):
+    ck("the plugin does not wrap itself: %s" % _own[:40],
+       not cc.classify_command(_own)["track"], _own[:60])
+
 ck("heredoc bodies are not read as commands",
    not cc.classify_command("cat > f <<'X'\npython3 train.py\nX\nls")["track"],
    "the text of a script is data, not a command being run")

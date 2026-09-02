@@ -129,6 +129,33 @@ ck("a watcher notices its job was removed within ~15s", gone, "still running")
 sandbox.kill_watchers(cc)
 
 print()
+print("=== the inbox tells a finish from a death ===")
+cli("rm", "--all", "--force")
+with cc.state_rw() as st:
+    st["inbox"] = []
+cli("run", "--name", "wentwell", "--eta", "1h", "--", "sh", "-c", "echo the answer is 42")
+cli("run", "--name", "wentbadly", "--eta", "1h", "--", "sh", "-c", "exit 9")
+for _ in range(30):
+    time.sleep(1)
+    _jobs = json.loads(open(cc.STATE).read())["jobs"]
+    if all(j.get("state") not in ("running", None) for j in _jobs.values()) and len(_jobs) == 2:
+        break
+_listing = cli("inbox").stdout
+_kinds = {e.get("job"): e.get("kind") for e in json.loads(open(cc.STATE).read())["inbox"]}
+ck("the one that finished is recorded as finished", _kinds.get("wentwell") == "done", str(_kinds))
+ck("and the one that died as a crash", _kinds.get("wentbadly") == "crash", str(_kinds))
+ck("the listing does not call a success a crash",
+   "wentwell" in _listing and "status 0" not in _listing, _listing[:100])
+ck("and still calls a death a death", "wentbadly" in _listing, _listing[:100])
+_report = cli("inbox", "--drain").stdout
+ck("a drained report carries the job's own output",
+   "the answer is 42" in _report or "FINISHED" in _report, _report[:90])
+sandbox.kill_watchers(cc)
+cli("rm", "--all", "--force")
+with cc.state_rw() as st:
+    st["inbox"] = []
+
+print()
 print("=== an exit file that is not ours ===")
 # Trusting any file called <log>.exit ended live jobs: a job attached to a log
 # that already existed is not finished just because something once left a file

@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -70,6 +71,131 @@ for label, doc in shapes.items():
        r.returncode == 0 and "Traceback" not in r.stderr
        and r2.returncode == 0 and "Traceback" not in r2.stderr,
        (r.stderr + r2.stderr).strip().splitlines()[-1][:70] if (r.stderr or r2.stderr) else "")
+
+print()
+print("=== whatever ails the plugin, the work still runs ===")
+# The one promise that matters more than any bar: wrapping a command must never
+# be the reason it did not run, and must never change what it returned.
+import fcntl as _fcntl
+import shutil as _shutil
+
+_MARK = "the-work-happened"
+
+
+def _attempt(setup=None, env_extra=None, code=0):
+    home = tempfile.mkdtemp(prefix="agent-progress-never-")
+    env = dict(os.environ, AGENT_PROGRESS_HOME=home)
+    env.update(env_extra or {})
+    subprocess.run([sys.executable, ENGINE, "ls"], capture_output=True, env=env)
+    holder = setup(home) if setup else None
+    r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "1", "--shell",
+                        "echo %s; exit %d" % (_MARK, code)],
+                       capture_output=True, text=True, env=env)
+    if holder is not None:
+        try:
+            holder.close()
+        except Exception:
+            pass
+    try:
+        os.chmod(home, 0o700)
+        _shutil.rmtree(home, ignore_errors=True)
+    except Exception:
+        pass
+    return (_MARK in r.stdout), (r.returncode == code)
+
+
+def _readonly(h):
+    os.chmod(h, 0o500)
+
+
+def _corrupt(h):
+    open(os.path.join(h, "state.json"), "w").write("{ this is not json")
+
+
+def _empty(h):
+    open(os.path.join(h, "state.json"), "w").write("")
+
+
+def _locked(h):
+    lf = open(os.path.join(h, ".lock"), "a+")
+    _fcntl.flock(lf, _fcntl.LOCK_EX)
+    return lf
+
+
+def _badconfig(h):
+    open(os.path.join(h, "config.json"), "w").write("[[[not a config")
+
+
+def _home_is_a_file(h):
+    _shutil.rmtree(h)
+    open(h, "w").write("x")
+
+
+for _label, _setup, _env, _code in (
+        ("nothing wrong", None, None, 0),
+        ("the command itself fails", None, None, 7),
+        ("the state directory is read-only", _readonly, None, 0),
+        ("the state file is not json", _corrupt, None, 0),
+        ("the state file is empty", _empty, None, 0),
+        ("somebody else holds the lock", _locked, None, 0),
+        ("the lock is held and the command fails", _locked, None, 3),
+        ("the config file is rubbish", _badconfig, None, 0),
+        ("the lock timeout is zero", None, {"AGENT_PROGRESS_LOCK_TIMEOUT": "0"}, 0),
+        ("the lock timeout is nonsense", None, {"AGENT_PROGRESS_LOCK_TIMEOUT": "soon"}, 0),
+        ("its home is a file", _home_is_a_file, None, 0),
+        ("its home is somewhere it cannot write", None,
+         {"AGENT_PROGRESS_HOME": "/proc/nope/nope"}, 0)):
+    _ran, _kept = _attempt(_setup, _env, _code)
+    ck("%s: the command still runs" % _label, _ran)
+    ck("%s: and returns its own exit code" % _label, _kept)
+
+print()
+print("=== every subcommand, against a state full of rubbish ===")
+# One sweep over the whole command surface. `inbox` used to fall over on an
+# event whose timestamp was a string, which nothing else noticed because
+# nothing else did arithmetic on it.
+_now = time.time()
+with cc.state_rw() as st:
+    st["jobs"] = {
+        "ok": {"id": "ok", "state": "running", "started": _now - 100, "samples": [],
+               "unit": "it", "step": 3, "total": 10, "updated": _now,
+               "session_id": cc.current_session()},
+        "weird": {"id": "weird", "state": 123, "started": "soon", "samples": "lots",
+                  "unit": None, "step": {"a": 1}, "total": [], "updated": None,
+                  "pct": float("inf"), "note": "x" * 9000, "session_id": {"n": 1},
+                  "eta_end": "never"},
+        "empty": {},
+        "queued-ish": {"id": "queued-ish", "state": "queued", "started": _now, "samples": [],
+                       "batch": {"scheduler": "slurm", "job_id": "1"}, "submitted": _now},
+    }
+    st["inbox"] = [{"job": "x", "ts": "soon", "session_id": None, "delivered": None},
+                   "not a dict",
+                   {"job": None, "ts": _now, "delivered": "not a dict"}]
+_subs = sorted(cc.build_parser()._subparsers._group_actions[0].choices)
+_extra = {"show": ["ok"], "log": ["ok"], "cancel": ["ok"], "done": ["ok"], "fail": ["ok"],
+          "update": ["ok", "--eta", "1h", "--quiet"], "rm": ["ok", "--force"],
+          "watch": ["--once"], "slurm": ["4242"],
+          "exec": ["--after", "1", "--shell", "true"],
+          "run": ["--name", "tmp", "--eta", "1h", "--", "true"],
+          "start": ["tmpjob", "--eta", "1h", "--monitor", "time", "--no-watch"],
+          "autotrack": ["echo hi"]}
+_bad = []
+for _sub in _subs:
+    if _sub == "demo":
+        continue                    # draws frames; covered by its own suite
+    try:
+        _r = subprocess.run([sys.executable, ENGINE, _sub] + _extra.get(_sub, []),
+                            input="{}", capture_output=True, text=True,
+                            env=os.environ, timeout=30)
+        if "Traceback" in _r.stderr:
+            _bad.append((_sub, (_r.stderr.strip().splitlines() or [""])[-1][:60]))
+    except subprocess.TimeoutExpired:
+        _bad.append((_sub, "timed out"))
+ck("no subcommand tracebacks on a state full of rubbish", not _bad, str(_bad[:3]))
+sandbox.kill_watchers(cc)
+run("rm", "--all", "--force")
+with cc.state_rw() as st:
+    st["inbox"] = []
 
 print()
 print("=== when the filesystem refuses ===")

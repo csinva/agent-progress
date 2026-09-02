@@ -145,6 +145,10 @@ CONFIG_SPEC = {
         "behavior", 3600,
         "how long a crash waits for its own session before any session may take it",
         lo=0),
+    "announce_done": _spec(
+        "behavior", True,
+        "tell the session when a tracked job finishes, with the tail of its output",
+        "bool"),
     "crash_alert": _spec("behavior", True,
                          "interrupt Claude when a job crashes, so it tells you right away", "bool"),
     "context_min_interval_seconds": _spec(
@@ -340,7 +344,23 @@ def _sanitize(st):
     st["jobs"] = clean
     if not isinstance(st.get("inbox"), list):
         st["inbox"] = []
-    st["inbox"] = [e for e in st["inbox"] if isinstance(e, dict)]
+    # Events are shaped by us, but the file is on disk and every consumer -
+    # the listing, the handover grace, the report itself - does arithmetic on
+    # `ts`. A string there crashed `inbox` outright. Anything unusable becomes
+    # now, which keeps the report deliverable and gives it a full grace window
+    # rather than making it look ancient and up for grabs.
+    _now = time.time()
+    clean_inbox = []
+    for e in st["inbox"]:
+        if not isinstance(e, dict):
+            continue
+        ts = e.get("ts")
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool) or not math.isfinite(ts):
+            e["ts"] = _now
+        if e.get("delivered") is not None and not isinstance(e.get("delivered"), dict):
+            e["delivered"] = None
+        clean_inbox.append(e)
+    st["inbox"] = clean_inbox
     # Every one of these maps is cleaned by a loop that reads inside its values.
     # A single value of the wrong shape makes that loop raise, and every caller
     # of these swallows exceptions, so the effect is not a crash but something
@@ -2057,8 +2077,15 @@ CRASH_LINE_CHARS = 200      # what the report shows of any one line
 CRASH_TAIL_CHARS = 4000     # and of all of them together
 
 
-def enqueue_crash(st, job, now):
-    """Queue a crash for delivery to whichever Claude session asks next."""
+def enqueue_crash(st, job, now, kind="crash"):
+    """Queue a report about a finished job for the session that started it.
+
+    Both endings are news. A job that fails is obvious news; a job that succeeds
+    is the news the user was waiting for, and until now it was thrown away - the
+    command was handed off, its output went to the log, and when it finished
+    nothing said so and nothing gave back the result it had produced. Asking for
+    a model to be trained and never being told it finished is the plugin
+    swallowing the answer."""
     tail = ""
     if job.get("log"):
         text, _ = read_tail(job["log"], 0, 65536)
@@ -2075,6 +2102,7 @@ def enqueue_crash(st, job, now):
         short = job["scheduler_state"]
         why = "%s, as reported by the scheduler" % job["scheduler_state"]
     st.setdefault("inbox", []).append({
+        "kind": kind,
         "job": job.get("id"),
         "ts": now,
         "exit_code": job.get("exit_code"),
@@ -2159,6 +2187,44 @@ def take_crash(session_id=None):
 
 def pending_crashes():
     return [e for e in state_ro().get("inbox", []) if not e.get("delivered")]
+
+
+def format_done(ev, cfg=None):
+    """The message a session is handed when a job it started finishes.
+
+    The point is the last part: the output. A command that was handed off wrote
+    its result to a log the session never reads, so the answer has to come back
+    here or the work may as well not have finished."""
+    cfg = cfg or load_config()
+    lines = []
+    if ev.get("handover"):
+        lines.append(
+            "%s A job from ANOTHER session finished, and that session never "
+            "collected the news - it has probably exited. This was not your job."
+            % cfg["glyph_done"])
+    lines.append("%s A tracked job FINISHED while you were working: '%s'"
+                 % (cfg["glyph_done"], ev.get("job")))
+    if ev.get("duration") is not None:
+        lines.append("  it ran for %s" % fmt_dur(ev["duration"]))
+    if ev.get("cmd"):
+        lines.append("  command: %s" % one_line(ev["cmd"])[:200])
+    if ev.get("log"):
+        lines.append("  log: %s" % ev["log"])
+    if ev.get("log_tail"):
+        lines.append("  last output:")
+        for ln in ev["log_tail"].splitlines()[-15:]:
+            lines.append("    " + ln[:200])
+    lines.append("Tell the user it finished and what it produced, reading the result out of "
+                 "the output above. `agent-progress log %s -n 60` if you need more of it. "
+                 "Do not re-run it." % (ev.get("job") or "<id>"))
+    return "\n".join(lines)
+
+
+def format_report(ev, cfg=None):
+    """Whichever of the two this is."""
+    if (ev or {}).get("kind") == "done":
+        return format_done(ev, cfg)
+    return format_crash(ev, cfg)
 
 
 def format_crash(ev, cfg=None):
@@ -2504,8 +2570,11 @@ def finalize(job, exit_code, now, st=None):
     if job["state"] == "done" and job.get("total") and job.get("units"):
         job["units"] = job["total"]
         job["step"] = job["total"]
-    if job["state"] == "failed" and st is not None:
-        enqueue_crash(st, job, now)
+    if st is not None:
+        if job["state"] == "failed":
+            enqueue_crash(st, job, now)
+        elif job["state"] == "done" and load_config()["announce_done"]:
+            enqueue_crash(st, job, now, kind="done")
 
 
 OBSERVED_FIELDS = ("milestones_hit", "size_bytes", "scheduler_state")

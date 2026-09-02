@@ -273,6 +273,24 @@ Do not re-run `agent-progress ls` repeatedly in one turn, and never sleep-loop
 waiting for a job. If the user wants genuinely periodic reporting, use the
 `/loop` skill.
 
+## When a job finishes
+
+A command that was handed off wrote its output to a log, not to you. When it
+ends you are handed a report saying so, with the tail of what it printed:
+
+```
+✓ A tracked job FINISHED while you were working: 'train'
+  it ran for 41:12
+  last output:
+    Epoch 40/40  loss 0.31
+    FINAL RESULT: accuracy 0.93
+```
+
+**Tell the user, and tell them what it produced** — read the answer out of that
+output rather than saying only that it finished. That report is the only way the
+result comes back to the conversation; the command that started it returned long
+ago. Do not re-run it.
+
 ## When a job crashes
 
 You will be handed a crash report unprompted — either as the reason your turn

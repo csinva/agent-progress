@@ -402,6 +402,53 @@ _prompt()
 ck("your own two do", "my-own-job" not in _bar(), _bar()[:60])
 cli("rm", "--all", "--force")
 
+print()
+print("=== a job that finishes hands its result back ===")
+# A handed-off command writes its output to a log the session never reads. If
+# nothing says it finished, and nothing gives back what it produced, asking for
+# a model to be trained means never being told the answer.
+cli("rm", "--all", "--force")
+with cc.state_rw() as st:
+    st["inbox"] = []
+_prog = os.path.join(sandbox.HOME, "produces.py")
+open(_prog, "w").write(
+    "import time\n"
+    "for i in range(3):\n"
+    "    print('step %d/3' % (i + 1), flush=True); time.sleep(1)\n"
+    "print('FINAL RESULT: accuracy 0.93')\n")
+cli("run", "--name", "produces", "--eta", "1h", "--", sys.executable, _prog)
+_final = None
+for _ in range(40):
+    time.sleep(1)
+    _final = json.loads(open(cc.STATE).read())["jobs"].get("produces", {}).get("state")
+    if _final not in ("running", None):
+        break
+ck("it finished", _final == "done", str(_final))
+_ctx = hook(STATUS, "UserPromptSubmit", {"session_id": cc.current_session()})
+_text = json.loads(_ctx or "{}").get("hookSpecificOutput", {}).get("additionalContext", "")
+ck("the session is told it finished", "FINISHED" in _text, _text[:80])
+ck("and gets the result it produced", "FINAL RESULT: accuracy 0.93" in _text, _text[-120:])
+ck("and is told not to run it again", "not re-run" in _text.lower() or "do not re-run" in _text.lower())
+_again = json.loads(hook(STATUS, "UserPromptSubmit", {"session_id": cc.current_session()}) or "{}")
+_again = _again.get("hookSpecificOutput", {}).get("additionalContext", "")
+ck("and is not told twice", "FINISHED" not in _again, _again[:60])
+
+cli("rm", "--all", "--force")
+with cc.state_rw() as st:
+    st["inbox"] = []
+cli("config", "--set", "announce_done=false")
+cli("run", "--name", "quiet-one", "--eta", "1h", "--", "sh", "-c", "echo hi")
+for _ in range(30):
+    time.sleep(1)
+    if json.loads(open(cc.STATE).read())["jobs"].get("quiet-one", {}).get("state") != "running":
+        break
+_text = json.loads(hook(STATUS, "UserPromptSubmit", {"session_id": cc.current_session()}) or "{}")
+_text = _text.get("hookSpecificOutput", {}).get("additionalContext", "")
+ck("announce_done=false keeps it quiet", "FINISHED" not in _text, _text[:60])
+cli("config", "--reset")
+sandbox.kill_watchers(cc)
+cli("rm", "--all", "--force")
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

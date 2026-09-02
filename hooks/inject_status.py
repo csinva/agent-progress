@@ -102,7 +102,7 @@ def collect_crashes(cc, cfg, session_id, limit=3):
             ev = cc.take_crash(session_id)
             if not ev:
                 break
-            out.append(cc.format_crash(ev, cfg))
+            out.append(cc.format_report(ev, cfg))
         left = still_waiting(cc, cfg, session_id)
         if out and left:
             out.append("%d more tracked job(s) also crashed and are still queued; "
@@ -318,8 +318,8 @@ def main():
         if not reports:
             return 0
         if len(reports) > 1:
-            reports.insert(0, "%d tracked jobs crashed. All of them, in order:"
-                           % len(reports))
+            reports.insert(0, "%d tracked jobs ended while you were working. "
+                              "All of them, in order:" % len(reports))
         print(json.dumps({"decision": "block", "reason": "\n\n".join(reports)}))
         return 0
 

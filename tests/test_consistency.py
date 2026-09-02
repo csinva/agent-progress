@@ -179,6 +179,46 @@ for _name in sorted(os.listdir(os.path.join(ROOT, "tests"))):
 ck("no test kills or counts processes by a pattern another run could match",
    not _offenders, str(_offenders[:3]))
 
+print()
+# `_spec` defaults its type to "int", so a setting whose default is True but
+# which forgets to say "bool" is declared an integer - and setting it to `false`
+# then fails with a message about converting a string to a number, while the
+# setting silently keeps its old value. announce_done shipped that way for
+# exactly as long as it took to write a test for it.
+_KIND = {bool: "bool", int: "int", float: "float", str: "str", type(None): "str"}
+_mismatched = []
+for _key in sorted(cc.CONFIG_SPEC):
+    _spec_ = cc.CONFIG_SPEC[_key]
+    _want = _KIND.get(type(_spec_["default"]))
+    if _want == "int" and _spec_["type"] == "float":
+        continue                     # a float setting may sensibly default to a whole number
+    if _want != _spec_["type"]:
+        _mismatched.append((_key, type(_spec_["default"]).__name__, _spec_["type"]))
+ck("every setting's declared type matches its default", not _mismatched, str(_mismatched))
+
+# and every setting can actually be set to something other than its default
+_unsettable = []
+for _key in sorted(cc.CONFIG_SPEC):
+    _spec_ = cc.CONFIG_SPEC[_key]
+    if _spec_["type"] == "bool":
+        _try = "false" if _spec_["default"] else "true"
+    elif _spec_["choices"]:
+        _try = next((c for c in _spec_["choices"] if c != _spec_["default"]), None)
+    elif _spec_["type"] in ("int", "float"):
+        _try = str((_spec_["lo"] if _spec_["lo"] is not None else 0) + 1)
+    else:
+        _try = "x"
+    if _try is None:
+        continue
+    try:
+        _got = cc.coerce(_key, _try)
+        if _got == _spec_["default"]:
+            _unsettable.append((_key, "unchanged"))
+    except Exception as _ex:
+        _unsettable.append((_key, repr(_ex)[:40]))
+ck("and every setting accepts a value other than its default",
+   not _unsettable, str(_unsettable[:3]))
+
 print("  %d declarations checked" % CHECKS[0])
 print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))

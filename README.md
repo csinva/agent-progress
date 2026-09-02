@@ -15,13 +15,14 @@
 </p>
 
 <p align="center">
-  <img src="demo/agent-progress.gif" width="100%" alt="three things asked for in words, the commands Claude ran, and the resulting progress bars">
+  <img src="demo/agent-progress.gif" width="100%" alt="two jobs streaming their own output under progress bars, with their endings shown beside the conversation">
 </p>
 
 <p align="center">
-  <i>Three things asked for in plain words, the commands Claude chose, what it said back,<br>
-  and the bars. One line when a job starts, one when it ends, nothing in between —<br>
-  except the benchmark, which died, and got explained.<br>
+  <i>Three things asked for in plain words, and the commands Claude chose. The output<br>
+  keeps coming exactly as it would have; all the plugin adds is the bar. When a job<br>
+  ends — well or badly — the news arrives beside the conversation, not inside it.<br>
+  The build took four seconds and was never tracked at all.<br>
   Full recording: <a href="demo/agent-progress.mov">demo/agent-progress.mov</a></i>
 </p>
 

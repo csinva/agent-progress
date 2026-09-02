@@ -295,21 +295,21 @@ PANELS = [
      "file": "train.py", "body": TRAIN,
      "idle": "not tracked yet",
      "reply": "Training is running.",
-     "done_reply": "Training finished. Final loss 0.41."},
+     "beside": "\u2713 train finished after 04:12\n  loss 0.41"},
     {"key": "benchmark", "jid": "slurm-81734",
      "ask": "benchmark llama-7b on the cluster",
      "command": "sbatch bench.sbatch",
      "file": "bench.sbatch", "body": BENCH_SBATCH,
      "idle": "not submitted yet",
      "reply": "Submitted. It is in the queue.",
-     "done_reply": "Slurm killed it: out of memory on cuda:0,\n"
-                   "in the third warmup pass. 7b in fp32 needs\n"
-                   "~28GB on 2 GPUs. Resubmit with bfloat16."},
+     "beside": "\U0001f480 slurm-81734 OUT_OF_MEMORY after 02:14\n"
+               "  torch.cuda.OutOfMemoryError: 8.00 GiB\n"
+               "  agent-progress log slurm-81734 -n 60"},
     {"key": "make", "jid": None, "ask": "build the project", "command": "make -j8",
      "file": "Makefile", "body": MAKEFILE,
      "idle": "under 20s - never tracked",
      "reply": "Built. Four seconds, nothing to track.",
-     "done_reply": None},
+     "beside": None},
 ]
 
 
@@ -373,6 +373,19 @@ class Panel(object):
                          stderr=subprocess.STDOUT)
         self.started = True
 
+    def drained(self):
+        """True when everything the command has written has been shown.
+
+        The record closes the moment the command exits, but the last lines it
+        printed may still be sitting in the file unread. Saying "finished"
+        before showing them puts the news above the output it is about."""
+        if not self.path:
+            return True
+        try:
+            return self.offset >= os.path.getsize(self.path)
+        except OSError:
+            return True
+
     def drain(self):
         if not self.path:
             return
@@ -390,25 +403,33 @@ class Panel(object):
             if not line:
                 continue
             tone = "warn" if line.startswith("[agent-progress]") else "dim"
-            # the handoff message is written for a wide terminal; in a column
-            # only its first sentence earns the space
+            # The only thing the plugin still prints into a command's output is
+            # the note about a scheduler job, and that is written for a wide
+            # terminal; in a column, its first clause earns the space.
             bare = line.strip()
             if bare.startswith("[agent-progress]"):
                 if "job" in bare and "queued" in bare:
                     line = "[agent-progress] slurm job 81734, queued"
-                elif any("tracked, now" in l for l in self.lines):
+                elif any("[agent-progress]" in l for l in self.lines):
                     continue
-                else:
-                    line = "[agent-progress] tracked, now in the background"
-            elif bare.startswith(("agent-progress ", "If you expect", "bar can say",
-                                  "running in the background", "Note:", "statusline was",
-                                  "Restart Claude Code", "and `agent-progress")):
-                continue        # the full banner is written for a wide terminal
+            elif bare.startswith(("agent-progress ", "Progress comes from",
+                                  "state comes from", "Do not poll", "Note:",
+                                  "statusline was", "Restart Claude Code",
+                                  "and `agent-progress")):
+                continue        # the rest of that note is written for a wide terminal
             self.say(self.cc.paint("  " + line, tone, True))
 
     def reply(self, text, tone="done"):
         for line in (text or "").split("\n"):
             self.say(self.cc.paint("  " + line, tone, True))
+
+    def beside(self, text, tone="done"):
+        """What the user is shown next to the conversation when a job ends.
+
+        Not Claude speaking: Claude is not told. Drawn against a rule so it
+        reads as something arriving from the side rather than a reply."""
+        for line in (text or "").split("\n"):
+            self.say(self.cc.paint("  \u2502 " + line, tone, True))
 
     def job(self):
         jid = self.spec.get("jid")
@@ -444,12 +465,12 @@ SCRIPT = [
     (8.0,  1,  "sbatch returned in a tenth of a second. the job is queued, and tracked"),
     (16.0, 1,  "queued is not running: no invented progress, and slurm's own reason"),
     (24.0, 8,  "meanwhile the training run waits out the 20-second threshold"),
-    (30.0, 1,  "it crossed it: tracked, moved to the background, a bar of its own"),
+    (30.0, 1,  "it crossed it: a bar of its own. the output keeps coming, unchanged"),
     (35.0, 1,  "Claude gives the training run an estimate - a hook cannot guess one"),
     (44.0, 4,  "the queue lets the benchmark start"),
     (54.0, 1,  "its clock starts now: the 38s of waiting was never counted as work"),
-    (60.0, 1,  "slurm kills it: out of memory. that is when Claude speaks up"),
-    (78.0, 14, "the training run carries on, costing nothing while it does"),
+    (60.0, 1,  "slurm kills it. the news arrives beside the conversation, not in it"),
+    (78.0, 14, "the training run carries on, its output still the caller's"),
     (84.0, 1,  "and the build? four seconds, never tracked, never mentioned again"),
 ]
 
@@ -548,10 +569,11 @@ def main():
             # queued is not finished: a job waiting for nodes has not ended,
             # and answering as though it had puts the obituary before the job
             if (j and j.get("state") not in (None, "running", "queued")
-                    and done_key not in fired and pan.spec.get("done_reply")):
+                    and pan.drained()
+                    and done_key not in fired and pan.spec.get("beside")):
                 fired.add(done_key)
-                pan.reply(pan.spec["done_reply"],
-                          "fail" if j.get("state") == "failed" else "done")
+                pan.beside(pan.spec["beside"],
+                           "fail" if j.get("state") == "failed" else "done")
 
         if now > 24.0 and "quick" not in fired:
             fired.add("quick")

@@ -19,6 +19,7 @@ import fcntl
 import glob as globmod
 import hashlib
 import json
+import math
 import os
 import re
 import select
@@ -208,17 +209,17 @@ def coerce(key, value):
             else:
                 raise ValueError("expected true or false")
         elif t == "int":
-            value = int(float(s))
+            value = int(_finite(float(s), key))
         elif t == "float":
-            value = float(s)
+            value = _finite(float(s), key)
         else:
             value = s
     elif t == "bool":
         value = bool(value)
     elif t == "int":
-        value = int(value)
+        value = int(_finite(float(value), key))
     elif t == "float":
-        value = float(value)
+        value = _finite(float(value), key)
     else:
         value = str(value)
     if key == "auto_track" and value == "wrap":
@@ -775,11 +776,25 @@ def _int(v):
         return None
 
 
+def _finite(x, key):
+    if not math.isfinite(x):
+        raise ValueError("%s must be a real number, not %s" % (key, x))
+    return x
+
+
 def _float(v):
+    """A finite number, or None.
+
+    float() accepts "nan" and "inf", and training logs are full of the word -
+    `loss nan` is what a diverged run prints. Reading one as progress put a rate
+    of nan into the bar, which then displayed the word to the user and claimed
+    the job had no time remaining. Neither is a number a bar can be drawn from,
+    so neither is a number."""
     try:
-        return float(v)
+        out = float(v)
     except (TypeError, ValueError):
         return None
+    return out if math.isfinite(out) else None
 
 
 def read_tail(path, offset, max_bytes=262144):
@@ -807,7 +822,14 @@ def read_tail(path, offset, max_bytes=262144):
 
 def _measured_rate(job, now, cfg):
     """Units per second from recent samples, or None."""
-    samples = job.get("samples") or []
+    # A sample that is not two finite numbers cannot be measured from, and
+    # not-a-number compares False against everything, so it would slip past the
+    # tests below and put a rate of nan into the bar. Records written by an
+    # older version, or by hand, can still hold one.
+    samples = [x for x in (job.get("samples") or [])
+               if isinstance(x, (list, tuple)) and len(x) == 2
+               and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                       and math.isfinite(v) for v in x)]
     if len(samples) < 2:
         return None, 0
     win = samples[-int(cfg["rate_window"]):]
@@ -2394,6 +2416,11 @@ def notify(title, message, ok=True):
 def record_sample(job, units, now):
     """Append to the rate-estimation ring buffer, ignoring non-advances."""
     samples = job.setdefault("samples", [])
+    # not-a-number compares False against everything, so the "did it advance"
+    # test below would wave it through and every rate after it would be nan
+    if not isinstance(units, (int, float)) or isinstance(units, bool) \
+            or not math.isfinite(units):
+        return
     if samples and units <= samples[-1][1]:
         return
     samples.append([now, units])

@@ -8,6 +8,7 @@ that is subtly wrong looks like a bar.
 """
 import importlib.util
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -350,6 +351,68 @@ ck("but a locally run one does",
    isinstance(made.get("_new_job"), dict) and made["_new_job"].get("exit_file"))
 with cc.state_rw() as st:
     st["jobs"] = {}
+
+print()
+print("=== numbers a bar cannot be drawn from ===")
+# float() accepts "nan" and "inf", and a diverged training run prints the word
+# on every line. One reaching the samples gave the bar a rate of nan, which it
+# then showed to the user as "nans/it" while claiming no time remained.
+import math as _math
+
+ck("nan is not a number here", cc._float("nan") is None)
+ck("nor is inf", cc._float("inf") is None and cc._float("-inf") is None)
+ck("but a real one still is", cc._float("3.5") == 3.5)
+_j = {"samples": []}
+cc.record_sample(_j, float("nan"), time.time())
+cc.record_sample(_j, float("inf"), time.time())
+ck("a sample that is not a number is refused", _j["samples"] == [])
+cc.record_sample(_j, 5, time.time())
+ck("and a real one is kept", len(_j["samples"]) == 1)
+
+_cfg = dict(cc.load_config())
+_now = time.time()
+_hostile = {
+    "step beyond total": dict(step=150, total=100),
+    "negative step": dict(step=-5, total=100),
+    "zero total": dict(step=5, total=0),
+    "percent over 100": dict(pct=180.0),
+    "negative percent": dict(pct=-20.0),
+    "nan percent": dict(pct=float("nan")),
+    "infinite percent": dict(pct=float("inf")),
+    "started in the future": dict(started=_now + 3600),
+    "ended before it started": dict(state="done", ended=_now - 600, started=_now),
+    "nan estimate": dict(est_total_s=float("nan")),
+    "infinite estimate": dict(est_total_s=float("inf")),
+    "negative estimate": dict(est_total_s=-500),
+    "samples out of order": dict(samples=[[_now, 10], [_now - 30, 40]], step=10, total=100),
+    "a nan among the samples": dict(samples=[[_now - 30, float("nan")], [_now, 5]],
+                                    step=5, total=100),
+    "malformed sample rows": dict(samples=[["x", "y"], None, [_now, 5]], step=5, total=100),
+    "identical timestamps": dict(samples=[[_now, 1], [_now, 2]], step=2, total=100),
+    "progress going backwards": dict(samples=[[_now - 60, 90], [_now, 10]], step=10, total=100),
+}
+_bad = []
+for _name, _extra in sorted(_hostile.items()):
+    _job = dict(state="running", started=_now - 60, samples=[], unit="it", updated=_now)
+    _job.update(_extra)
+    try:
+        _e = cc.estimate(_job, _now, _cfg)
+        _line = re.sub(r"\033\[[0-9;]*m", "", cc.render_line(_job, _cfg, width=100))
+        _pct = _e.get("pct")
+        _sane = _pct is None or (isinstance(_pct, (int, float)) and _math.isfinite(_pct)
+                                 and -0.01 <= _pct <= 100.01)
+        if not (_sane and "nan" not in _line.lower() and "inf" not in _line.lower()):
+            _bad.append((_name, _pct, _line[:50]))
+    except Exception as _ex:
+        _bad.append((_name, "RAISED", repr(_ex)))
+ck("every hostile job still draws a sane bar", not _bad, str(_bad[:2]))
+for _key in ("max_jobs", "bar_width"):
+    try:
+        cc.coerce(_key, "nan")
+        _rejected = False
+    except ValueError:
+        _rejected = True
+    ck("a setting cannot be set to nan (%s)" % _key, _rejected)
 
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:

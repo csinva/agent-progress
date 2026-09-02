@@ -2665,6 +2665,69 @@ def finalize(job, exit_code, now, st=None):
             enqueue_crash(st, job, now, kind="done")
 
 
+
+def ended_already(job):
+    """Has this job finished without anyone having noticed yet?
+
+    The same two pieces of evidence the watcher trusts, and for the same
+    reasons: an exit file this plugin wrote itself, which cannot be mistaken
+    for anything else, and - for a job we merely attached to - a pid of ours
+    that is gone. Silence is not evidence, so a job that is merely quiet is
+    left alone."""
+    if job.get("state") not in ACTIVE_STATES:
+        return False
+    own_exit = job.get("exit_file")
+    if own_exit and os.path.exists(own_exit):
+        return True
+    return job.get("pid") is not None and not alive(job.get("pid"))
+
+
+def reap_ended(session_id=None, now=None):
+    """Close out jobs that have already ended but whose watcher has not looked.
+
+    A watcher notices a death on its next tick, which can be several seconds
+    away. A job that dies a second after it starts is therefore still marked
+    `running` when the turn ends, and the report saying it died waits for the
+    next tick - which is to say, until after the person has spoken again. That
+    is the one thing they asked always to hear about, so the turn ending looks
+    for itself rather than waiting to be told.
+
+    Cheap on purpose: a stat per active job, no probe, and the write lock is
+    taken only when something actually looks finished."""
+    now = now or time.time()
+    try:
+        snapshot = state_ro()
+    except Exception:
+        return []
+    candidates = [jid for jid, job in snapshot["jobs"].items()
+                  if ended_already(job) and job_belongs_here(job, session_id)]
+    if not candidates:
+        return []
+    reaped = []
+    try:
+        with state_rw() as st:
+            for jid in candidates:
+                job = st["jobs"].get(jid)
+                # Re-checked under the lock: the watcher may have won the race,
+                # and whoever gets here second must not report it twice.
+                if job is None or not ended_already(job):
+                    continue
+                code, wrote_status = job.get("exit_code"), False
+                try:
+                    with open((job.get("log") or "") + ".exit") as f:
+                        code = int(f.read().strip())
+                    wrote_status = True
+                except Exception:
+                    pass
+                if not wrote_status and job.get("exit_file"):
+                    code = code if code not in (None, 0) else 137
+                    job["note"] = job.get("note") or "killed before it finished"
+                finalize(job, code, now, st)
+                reaped.append(dict(job))
+    except Exception:
+        return reaped
+    return reaped
+
 OBSERVED_FIELDS = ("milestones_hit", "size_bytes", "scheduler_state")
 
 

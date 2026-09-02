@@ -469,6 +469,95 @@ ck("uninstall removes the statusline", "statusLine" not in d, str(d))
 ck("uninstall keeps other settings", d.get("model") == "opus", str(d))
 shutil.rmtree(fake, ignore_errors=True)
 
+# ---------------------------------------------------------------- fast deaths
+# A watcher notices a death on its next tick. A job that fails a second after
+# it starts is therefore still marked running when the turn ends, so the turn
+# ending has to look for itself - otherwise the one thing the person asked
+# always to hear about arrives only after they have spoken again.
+INJECT = os.path.join(HOOKS, "inject_status.py")
+
+
+def reap_home():
+    h = tempfile.mkdtemp(prefix="agent-progress-reap-")
+    return h, dict(os.environ, AGENT_PROGRESS_HOME=h, AGENT_PROGRESS_NOTIFY="false")
+
+
+def hook(env, event, sid, **extra):
+    payload = dict({"session_id": sid, "stop_hook_active": False}, **extra)
+    r = subprocess.run([sys.executable, INJECT, event], input=json.dumps(payload),
+                       capture_output=True, text=True,
+                       env=dict(env, CLAUDE_CODE_SESSION_ID=sid))
+    said = ""
+    if r.stdout.strip():
+        try:
+            said = json.loads(r.stdout).get("systemMessage", "")
+        except ValueError:
+            said = r.stdout
+    return r.returncode, said
+
+
+def records(home):
+    st = json.load(open(os.path.join(home, "state.json")))
+    return [j for j in st["jobs"].values() if isinstance(j, dict)]
+
+
+home, renv = reap_home()
+subprocess.run([sys.executable, ENGINE, "run", "--name", "quickfail", "--eta", "1h", "--",
+                "sh", "-c", "sleep 1; exit 3"], capture_output=True,
+               env=dict(renv, CLAUDE_CODE_SESSION_ID="reap1"))
+time.sleep(2.5)
+rc, said = hook(renv, "Stop", "reap1")
+ck("a job that dies fast is reported on the same turn", "quickfail" in said, repr(said[:120]))
+ck("reporting it does not block the turn", rc == 0, str(rc))
+job = [j for j in records(home) if j.get("id") == "quickfail"]
+ck("the fast death is written down as a failure",
+   bool(job) and job[0].get("state") == "failed" and job[0].get("exit_code") == 3,
+   str(job[:1]))
+_rc, again = hook(renv, "Stop", "reap1")
+ck("and is not reported a second time", "quickfail" not in again, repr(again[:120]))
+sandbox.kill_watchers(cc)
+subprocess.run(["pkill", "-f", os.path.join(home, "")], capture_output=True)
+shutil.rmtree(home, ignore_errors=True)
+
+home, renv = reap_home()
+live = subprocess.Popen([sys.executable, ENGINE, "run", "--name", "stillgoing", "--eta", "1h",
+                         "--", "sleep", "45"], stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        env=dict(renv, CLAUDE_CODE_SESSION_ID="reap2"))
+time.sleep(3)
+rc, said = hook(renv, "Stop", "reap2")
+job = [j for j in records(home) if j.get("id") == "stillgoing"]
+ck("a running job is not mistaken for a dead one",
+   bool(job) and job[0].get("state") == "running", str(job[:1]))
+ck("and nothing is said about it", said == "", repr(said[:80]))
+rc, said = hook(renv, "UserPromptSubmit", "reap2", prompt="hello")
+ck("a prompt does not end a running job either",
+   [j for j in records(home) if j.get("id") == "stillgoing"][0].get("state") == "running")
+for jr in records(home):
+    for pid in (jr.get("pid"), jr.get("watcher_pid")):
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except (OSError, TypeError, ValueError):
+            pass
+sandbox.kill_watchers(cc)
+shutil.rmtree(home, ignore_errors=True)
+
+home, renv = reap_home()
+for a in (0, 1):
+    subprocess.run([sys.executable, ENGINE, "run", "--name", "own%d" % a, "--eta", "1h", "--",
+                    "sh", "-c", "sleep 1; exit 4"], capture_output=True,
+                   env=dict(renv, CLAUDE_CODE_SESSION_ID="reapA%d" % a))
+time.sleep(2.5)
+_rc, first = hook(renv, "Stop", "reapA0")
+ck("reaping tells an agent about its own dead job",
+   "own0" in first and "own1" not in first, repr(first[:120]))
+_rc, second = hook(renv, "Stop", "reapA1")
+ck("and the other agent still hears about its own",
+   "own1" in second and "own0" not in second, repr(second[:120]))
+sandbox.kill_watchers(cc)
+shutil.rmtree(home, ignore_errors=True)
+
+
 print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:

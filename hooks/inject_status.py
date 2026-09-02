@@ -260,6 +260,18 @@ def revive_watchers(cc):
         pass
 
 
+def reap_ended(cc, session_id):
+    """Notice deaths the watcher has not got to yet, before saying what died.
+
+    Without this the report for a job that fails a second after it starts waits
+    for the watcher's next tick - which lands after the turn has ended, so the
+    person hears about it only once they have spoken again."""
+    try:
+        cc.reap_ended(session_id)
+    except Exception:
+        pass
+
+
 def main():
     # Same ten-second budget as every other hook, and nothing here is worth
     # spending it on: a status summary that cannot be written is a summary
@@ -276,6 +288,9 @@ def main():
         return 0
 
     if event == "Stop":
+        # A job that died moments ago is still marked running until its watcher
+        # ticks; look before reporting, or the news misses this turn entirely.
+        reap_ended(cc, session_id)
         # Nothing here ever blocks. A turn ending is the user's turn to speak,
         # and holding it open to say something about a background job puts the
         # plugin in the middle of a conversation it is not part of. News goes
@@ -309,6 +324,7 @@ def main():
     # The check in front of this is a lock-free read that answers "no" in
     # microseconds when every watcher is alive, which is almost always.
     revive_watchers(cc)
+    reap_ended(cc, session_id)
 
     if event == "UserPromptSubmit":
         count_prompt(cc, cfg, session_id)

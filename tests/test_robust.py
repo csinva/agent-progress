@@ -371,7 +371,7 @@ h = subprocess.run([sys.executable, os.path.join(ROOT, "hooks", "auto_track.py")
                    env=dict(os.environ, AGENT_PROGRESS_AUTO_TRACK="instruct"))
 dt = time.time() - t
 fcntl.flock(lf, fcntl.LOCK_UN); lf.close()
-ck("the pre-command hook returns well inside its own timeout", dt < 8,
+ck("the pre-command hook returns well inside its own timeout", dt < 2,
    "%.1fs" % dt)
 ck("and never fails the command it sits in front of",
    h.returncode == 0 and "Traceback" not in h.stderr, repr(h.stderr[-160:]))

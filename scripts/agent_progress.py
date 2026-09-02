@@ -1522,15 +1522,22 @@ def auto_seen(command, session_id, remember=True, ttl=6 * 3600):
     digest = hashlib.sha1(command.strip().encode("utf-8")).hexdigest()[:16]
     key = "%s:%s" % (session_id or "-", digest)
     now = time.time()
-    with state_rw() as st:
-        seen = st.setdefault("auto_track_seen", {})
-        for k, ts in list(seen.items()):
-            if now - ts > ttl:
-                del seen[k]
-        hit = key in seen
-        if remember and not hit:
-            seen[key] = now
-        return hit
+    # This sits in front of every command, and all it decides is whether to ask
+    # about the same command twice. Waiting seconds on a busy lock to answer
+    # that is a worse outcome than answering "no" - several sessions writing at
+    # once was making the hook stall before the command it was asked about.
+    try:
+        with state_rw(timeout=0.3) as st:
+            seen = st.setdefault("auto_track_seen", {})
+            for k, ts in list(seen.items()):
+                if now - ts > ttl:
+                    del seen[k]
+            hit = key in seen
+            if remember and not hit:
+                seen[key] = now
+            return hit
+    except StateBusy:
+        return False
 
 
 # ------------------------------------------------------------- batch schedulers

@@ -315,6 +315,42 @@ ck("and one that turns out to be long earns a bar", cc.job_visible(grown, cfg, n
 old_enough = {"state": "running", "started": now - 300, "samples": [], "unit": "it"}
 ck("elapsed alone is still enough", cc.job_visible(old_enough, cfg, now))
 
+print()
+print("=== every way of creating a job, in one breath ===")
+# A search-and-replace once landed inside attach_batch_job instead of the two
+# places it was meant for, and every scheduler job raised NameError on creation
+# - no slurm, LSF or PBS job could be tracked at all. It shipped, because the
+# paths that were checked were the ones the edit was supposed to touch. This
+# costs a second and covers all of them.
+import types as _types
+
+_args = _types.SimpleNamespace(
+    eta=None, note=None, desc=None, unit=None, total=None, pattern=None,
+    monitor=None, log=None, cwd=None, interval=None, force_show=False,
+    files=None, size=None, probe=None, milestones=None, name=None, quiet=True)
+made = {}
+try:
+    made["_new_job"] = cc._new_job(_args, cmd="echo hi", log="/tmp/x.log",
+                                   exit_file="/tmp/x.log.exit", pid=1)
+except Exception as ex:
+    made["_new_job"] = "RAISED %r" % (ex,)
+for kind in ("slurm", "lsf", "pbs"):
+    try:
+        with cc.state_rw() as st:
+            st["jobs"] = {}
+        made[kind] = cc.attach_batch_job(kind, "4242", "/tmp", eta=None,
+                                         name="probe-" + kind)
+    except Exception as ex:
+        made[kind] = "RAISED %r" % (ex,)
+for how, got in sorted(made.items()):
+    ck("a job can be made the %s way" % how, not str(got).startswith("RAISED"), str(got)[:80])
+ck("a scheduler job records no exit file of its own",
+   not (cc.state_ro()["jobs"].get("probe-pbs") or {}).get("exit_file"))
+ck("but a locally run one does",
+   isinstance(made.get("_new_job"), dict) and made["_new_job"].get("exit_file"))
+with cc.state_rw() as st:
+    st["jobs"] = {}
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

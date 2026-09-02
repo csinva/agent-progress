@@ -246,7 +246,15 @@ def main():
 
     if event == "SessionStart":
         remember_session(cc, session_id)
-        revive_watchers(cc)
+
+    # Also on every prompt, not only when a session starts. A watcher can die -
+    # killed, out of memory, the machine rebooted - and reviving them only at
+    # session start means that inside a session which stays open for hours,
+    # nothing ever brings one back: the job's record stops being updated and its
+    # bar sits at whatever it last said, still calling a finished job running.
+    # The check in front of this is a lock-free read that answers "no" in
+    # microseconds when every watcher is alive, which is almost always.
+    revive_watchers(cc)
 
     blocks = collect_crashes(cc, cfg, session_id)
     lines, hidden, signature = job_lines(cc, cfg, session_id)

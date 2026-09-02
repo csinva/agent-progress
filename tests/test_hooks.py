@@ -307,6 +307,36 @@ ck("and its elapsed time is not negative",
    "-" not in cc.fmt_dur(cc.estimate(future, None, cfg)["elapsed"]))
 
 print()
+print()
+print("=== a watcher that dies mid-job comes back ===")
+# Watchers were revived only when a session started. Inside a session left open
+# for hours, nothing ever brought one back: the job's record stopped being
+# updated and its bar sat at whatever it last said, still calling a job that
+# had finished long ago "running".
+cli("rm", "--all", "--force")
+cli("run", "--name", "orphaned", "--eta", "1h", "--", "sleep", "30")
+time.sleep(2)
+wpid = json.loads(open(cc.STATE).read())["jobs"]["orphaned"].get("watcher_pid")
+ck("the job started with a watcher", bool(wpid))
+try:
+    os.kill(int(wpid), 9)
+except OSError:
+    pass
+time.sleep(1)
+gone = subprocess.run(["pgrep", "-f", "_watch orphaned"], capture_output=True, text=True).stdout.split()
+ck("and the watcher is gone", not gone, str(gone))
+hook(STATUS, "UserPromptSubmit", {"session_id": "s"})
+time.sleep(1.5)
+back = subprocess.run(["pgrep", "-f", "_watch orphaned"], capture_output=True, text=True).stdout.split()
+ck("a prompt brings it back", len(back) == 1, str(back))
+hook(STATUS, "UserPromptSubmit", {"session_id": "s"})
+time.sleep(1)
+again = subprocess.run(["pgrep", "-f", "_watch orphaned"], capture_output=True, text=True).stdout.split()
+ck("and does not stack up a second one", len(again) == 1, str(again))
+sandbox.kill_watchers(cc)
+subprocess.run(["pkill", "-f", "_watch orphaned"], capture_output=True)
+cli("rm", "--all", "--force")
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

@@ -238,6 +238,16 @@ for round_no in range(ROUNDS):
         for j in jobs:
             if j["session"] != sid and j["id"] in text:
                 leaks.append((sid, j["id"]))
+    # duplicate watchers have been a bug twice: two sessions reviving the same
+    # job at once, and a revival racing the watcher it was replacing
+    doubled = []
+    for j in jobs:
+        out = subprocess.run(["pgrep", "-f", "_watch " + j["id"]],
+                             capture_output=True, text=True).stdout.split()
+        if len(out) > 1:
+            doubled.append((j["id"], len(out)))
+    ck("round %d: no job ended up with two watchers" % round_no, not doubled, str(doubled))
+
     ck("round %d: no statusline crashed" % round_no, not crashes, str(crashes))
     ck("round %d: and none showed another session's job" % round_no, not leaks, str(leaks))
 

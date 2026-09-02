@@ -188,6 +188,34 @@ for _label, _break in (
     ck("%s: and nothing is thrown at the user" % _label, _clean)
 
 print()
+print("=== if the job cannot be registered, the wrapper keeps carrying it ===")
+# The handoff is the moment tracking takes over. If it fails, the wrapper does
+# not abandon the command - it stops trying to hand it off and goes on
+# forwarding its output to the end. Nothing had exercised that branch, and it is
+# the difference between a lost result and a slow one.
+_home = tempfile.mkdtemp(prefix="agent-progress-handoff-fails-")
+_env = dict(os.environ, AGENT_PROGRESS_HOME=_home)
+subprocess.run([sys.executable, ENGINE, "ls"], capture_output=True, env=_env)
+_p = subprocess.Popen([sys.executable, ENGINE, "exec", "--name", "w", "--after", "2",
+                       "--shell", "echo first; sleep 5; echo LAST-LINE; exit 6"],
+                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_env)
+time.sleep(1)
+with open(os.path.join(_home, "state.json"), "w") as _f:
+    _f.write("{ not json")
+os.chmod(_home, 0o500)                    # and now it cannot be repaired either
+try:
+    _out, _err = _p.communicate(timeout=90)
+except subprocess.TimeoutExpired:
+    _p.kill()
+    _out, _err = "", "timed out"
+os.chmod(_home, 0o700)
+ck("the command's exit code still comes back", _p.returncode == 6, str(_p.returncode))
+ck("output from before the failed handoff is forwarded", "first" in _out, _out[:60])
+ck("and output from after it is too", "LAST-LINE" in _out, _out[-60:])
+ck("with nothing thrown at the user", "Traceback" not in _err, _err[-70:])
+shutil.rmtree(_home, ignore_errors=True)
+
+print()
 print("=== nothing watching a job may end it ===")
 # Only three places in the engine may signal a process: the liveness probe
 # (signal 0, which does nothing), forwarding an interrupt the wrapper itself

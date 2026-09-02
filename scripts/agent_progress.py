@@ -1736,6 +1736,7 @@ LSF_STATE_CMD = "bjobs -noheader -o stat %(id)s 2>/dev/null | head -1"
 PBS_STATE_CMD = "qstat -x -f %(id)s 2>/dev/null | grep -o 'job_state = .' | head -1"
 
 STATE_CMDS = {"slurm": SLURM_STATE_CMD, "lsf": LSF_STATE_CMD, "pbs": PBS_STATE_CMD}
+CANCEL_CMDS = {"slurm": "scancel %(id)s", "lsf": "bkill %(id)s", "pbs": "qdel %(id)s"}
 
 
 def detect_submission(text, command=None):
@@ -3646,23 +3647,74 @@ def cmd_finish(args, state):
     with state_rw() as st:
         jid = resolve(st, args.job, mutating=True,
                       any_session=getattr(args, "any_session", False))
-        job = st["jobs"][jid]
-        if state == "cancelled" and job.get("pid") and alive(job["pid"]):
-            try:
-                os.killpg(os.getpgid(job["pid"]), signal.SIGTERM)
-            except Exception:
-                try:
-                    os.kill(job["pid"], signal.SIGTERM)
-                except Exception:
-                    pass
+        snapshot = dict(st["jobs"][jid])
+    said = None
+    if state == "cancelled":
+        # Outside the lock: a cluster can take its time answering, and nothing
+        # else should wait on it.
+        said = _stop_job(snapshot)
+    with state_rw() as st:
+        job = st["jobs"].get(jid)
+        if job is None:
+            raise SystemExit("job %s is gone" % jid)
         code = getattr(args, "exit_code", None)
         finalize(job, 0 if state == "done" else (code if code is not None else 1), time.time())
         job["state"] = state
         if getattr(args, "note", None):
             job["note"] = args.note
+        elif said:
+            job["note"] = said
         out = dict(job)
     _announce(out)
+    if said:
+        print("  " + said)
     return 0
+
+
+def _stop_job(job):
+    """Make the job stop, whichever kind it is. Returns a line saying what was
+    done, or None when there was nothing to do.
+
+    A job with a live pid gets SIGTERM, process group and all. A job that
+    belongs to a scheduler has no pid of ours to signal: it is cancelled
+    through the scheduler, or not at all. Marking such a record cancelled
+    while the job ran on was the bar saying one thing and the cluster doing
+    another - an agent telling the user it had stopped a training run that
+    was still burning GPU hours. If the scheduler will not take the
+    cancellation, the record is left as it is and this fails, so nobody is
+    told a job stopped that did not."""
+    if job.get("pid") and alive(job["pid"]):
+        try:
+            os.killpg(os.getpgid(job["pid"]), signal.SIGTERM)
+        except Exception:
+            try:
+                os.kill(job["pid"], signal.SIGTERM)
+            except Exception:
+                pass
+        return None
+    kind, sched_id = batch_of(job)
+    if not kind or not sched_id:
+        return None
+    cmd = CANCEL_CMDS.get(kind)
+    if not cmd:
+        return None
+    try:
+        r = subprocess.run(["/bin/sh", "-c", cmd % {"id": shlex.quote(str(sched_id))}],
+                           capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise SystemExit("%s did not answer in 30s; %s job %s is still queued or running, "
+                         "and the record is unchanged" % (cmd.split()[0], kind, sched_id))
+    except OSError as ex:
+        raise SystemExit("could not run %s (%s); %s job %s is still queued or running, "
+                         "and the record is unchanged"
+                         % (cmd.split()[0], os_error_message(ex), kind, sched_id))
+    if r.returncode != 0:
+        why = (r.stderr or r.stdout).strip().splitlines()
+        raise SystemExit("%s failed (exit %d)%s; %s job %s is still queued or running, "
+                         "and the record is unchanged"
+                         % (cmd.split()[0], r.returncode,
+                            (": " + why[-1][:160]) if why else "", kind, sched_id))
+    return "cancelled through %s (%s job %s)" % (cmd.split()[0], kind, sched_id)
 
 
 def cmd_ls(args):

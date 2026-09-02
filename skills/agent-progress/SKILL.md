@@ -347,7 +347,7 @@ state by hand only for jobs whose end the tool cannot see:
 ```bash
 agent-progress done ingest
 agent-progress fail ingest --exit-code 137 --note "OOM killed"
-agent-progress cancel ingest        # also SIGTERMs the process
+agent-progress cancel ingest        # also SIGTERMs the process (scancel/bkill/qdel for a scheduler job)
 ```
 
 ## Appearance

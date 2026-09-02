@@ -248,8 +248,8 @@ Job names are not chosen — they come from the command — so two agents each
 training something both have a job called `train`. Lookup prefers your own, and
 anything that *changes* a job (`cancel`, `done`, `fail`, `update`, `rm`) refuses
 to reach into another session without `--any-session`. `cancel` signals the
-process group, so this is the difference between tidying up and killing someone
-else's run.
+process group (or asks the scheduler, with `scancel`/`bkill`/`qdel`, for a queued
+job), so this is the difference between tidying up and killing someone else's run.
 
 `agent-progress ls` and `agent-progress watch` are asked directly and so show
 every session's work. `rm --all` is scoped the other way: inside a session it

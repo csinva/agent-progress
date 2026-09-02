@@ -302,6 +302,49 @@ except OSError:
 run("rm", "--all", "--force")
 
 print()
+print("=== cancelling a scheduler job cancels it on the scheduler ===")
+SCANCEL_LOG = os.path.join(sandbox.HOME, "scancel.txt")
+SCANCEL_RC = os.path.join(sandbox.HOME, "scancel.rc")
+_sc = os.path.join(BIN, "scancel")
+with open(_sc, "w") as f:
+    f.write('#!/bin/sh\necho "$@" >> "%s"\nexit $(cat "%s" 2>/dev/null || echo 0)\n'
+            % (SCANCEL_LOG, SCANCEL_RC))
+os.chmod(_sc, os.stat(_sc).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+slurm_says(scontrol="JobId=91 JobState=RUNNING Reason=None TimeLimit=01:00:00 "
+                    "RunTime=00:10:00 NodeList=gpu-2\n")
+run("slurm", "91", "--name", "stopme", "--interval", "2s")
+r = run("cancel", "stopme")
+ck("cancel succeeds", r.returncode == 0, r.stderr[-160:])
+ck("and scancel was called with the job's id",
+   os.path.exists(SCANCEL_LOG) and "91" in open(SCANCEL_LOG).read(),
+   open(SCANCEL_LOG).read() if os.path.exists(SCANCEL_LOG) else "(never called)")
+ck("the record says so", job("stopme").get("state") == "cancelled"
+   and "scancel" in (job("stopme").get("note") or ""), str(job("stopme").get("note")))
+ck("and the caller is told", "scancel" in r.stdout, r.stdout[-200:])
+run("rm", "--all", "--force")
+
+open(SCANCEL_RC, "w").write("1")
+run("slurm", "91", "--name", "stubborn", "--interval", "2s")
+r = run("cancel", "stubborn")
+ck("a cancel the scheduler refuses fails", r.returncode != 0, str(r.returncode))
+ck("and says the job is still running", "still queued or running" in r.stderr, r.stderr[-200:])
+ck("and leaves the record alone", job("stubborn").get("state") in ("running", "queued"),
+   str(job("stubborn").get("state")))
+os.remove(SCANCEL_RC)
+run("rm", "--all", "--force")
+
+os.remove(_sc)
+run("slurm", "91", "--name", "nocmd", "--interval", "2s")
+_path = os.environ["PATH"]
+os.environ["PATH"] = BIN            # nothing else on it, so no scancel anywhere
+r = run("cancel", "nocmd")
+os.environ["PATH"] = _path
+ck("with no scancel to run, cancel fails rather than pretending",
+   r.returncode != 0 and job("nocmd").get("state") in ("running", "queued"),
+   "%s %s" % (r.returncode, r.stderr[-160:]))
+run("rm", "--all", "--force")
+
+print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

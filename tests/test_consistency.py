@@ -160,6 +160,25 @@ for _doc in _docs:
                    if m not in _REAL})
     ck("%s names only paths the plugin uses" % _doc, not _bad, str(_bad))
 
+print()
+# Four separate times a test has killed or counted processes with a pattern
+# general enough to match another run's - the sandbox gives each run its own
+# state directory, but there is only one process table. Any pkill or pgrep in
+# the suites must name something unique to the run.
+_offenders = []
+for _name in sorted(os.listdir(os.path.join(ROOT, "tests"))):
+    if not _name.endswith(".py"):
+        continue
+    _src = open(os.path.join(ROOT, "tests", _name)).read()
+    for _m in re.finditer(r'"(pkill|pgrep)",\s*"-f",\s*([^\]]+)\]', _src):
+        _pattern = _m.group(2).strip()
+        # acceptable: built from TAG, or from a variable holding one
+        if "TAG" in _pattern or "+ " in _pattern or _pattern.startswith(("_", "orphan", "jid")):
+            continue
+        _offenders.append("%s: %s %s" % (_name, _m.group(1), _pattern[:40]))
+ck("no test kills or counts processes by a pattern another run could match",
+   not _offenders, str(_offenders[:3]))
+
 print("  %d declarations checked" % CHECKS[0])
 print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))

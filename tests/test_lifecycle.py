@@ -167,7 +167,9 @@ print("=== forgetting a job that is still running ===")
 # watcher and its bar and leaves it running with nothing following it. That is
 # almost never what a cleanup meant, and it is easy to type by accident.
 cli("rm", "--all", "--force")
-cli("run", "--name", "alive", "--eta", "1h", "--", "sleep", "60")
+_marker = "agent-progress-alive-" + sandbox.TAG
+cli("run", "--name", "alive", "--eta", "1h", "--",
+    "sh", "-c", "exec sleep 60  # " + _marker)
 cli("start", "corpse", "--eta", "1h", "--monitor", "time", "--no-watch")
 with cc.state_rw() as st:
     st["jobs"]["corpse"]["pid"] = 999999          # a pid that is long gone
@@ -184,7 +186,7 @@ ck("and the refusal says what to do instead",
 ck("--force forgets it", cli("rm", "alive", "--force").returncode == 0)
 ck("and then it is gone", "alive" not in json.loads(open(cc.STATE).read())["jobs"])
 sandbox.kill_watchers(cc)
-subprocess.run(["pkill", "-f", "sleep 60"], capture_output=True)
+subprocess.run(["pkill", "-f", _marker], capture_output=True)
 cli("rm", "--all", "--force")
 
 print()

@@ -294,7 +294,7 @@ _NUMERIC_FIELDS = ("started", "updated", "ended", "eta_end", "eta_prior_s",
                    "est_total_s", "initial_est_total_s", "next_probe", "interval_s",
                    "interval_override", "units", "total", "pct", "step", "exit_code",
                    "pid", "watcher_pid", "log_offset", "size_bytes",
-                   "submitted", "queued_seconds")
+                   "submitted", "queued_seconds", "prompts_since_done")
 
 
 def _sanitize(st):

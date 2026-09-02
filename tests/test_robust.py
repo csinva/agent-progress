@@ -72,6 +72,45 @@ for label, doc in shapes.items():
        (r.stderr + r2.stderr).strip().splitlines()[-1][:70] if (r.stderr or r2.stderr) else "")
 
 print()
+print("=== every field of a job, given the wrong kind of value ===")
+# The state file is a plain file that several processes write and anyone can
+# edit. A value of the wrong shape must make the bar know less, never make it
+# raise - a statusline that exits non-zero shows nothing at all. Fuzzing every
+# field rather than the ones thought of keeps that true for fields added later:
+# `prompts_since_done` was added and immediately broke the statusline on a
+# string, because "two" >= 2 is a TypeError.
+run("rm", "--all", "--force")
+run("start", "fuzzed", "--eta", "2h", "--monitor", "time", "--no-watch")
+run("done", "fuzzed")
+_template = dict(json.loads(open(cc.STATE).read())["jobs"]["fuzzed"])
+_wrong = ["a string", [1, 2], {"k": "v"}, True, None, -1, 0, 1e18, float("nan")]
+_broken = []
+for _field in sorted(_template):
+    for _value in _wrong:
+        _st = json.loads(open(cc.STATE).read())
+        _st["jobs"]["fuzzed"] = dict(_template, **{_field: _value})
+        with open(cc.STATE, "w") as _f:
+            json.dump(_st, _f)
+        _r = subprocess.run([sys.executable, ENGINE, "statusline"],
+                            input=json.dumps({"session_id": cc.current_session()}),
+                            capture_output=True, text=True, env=os.environ)
+        if _r.returncode != 0 or "Traceback" in _r.stderr:
+            _broken.append((_field, _value,
+                            (_r.stderr.strip().splitlines() or [""])[-1][:60]))
+ck("no single wrong value can stop the statusline drawing",
+   not _broken, "%d combinations broke it, e.g. %s" % (len(_broken), _broken[:2]))
+_ls_broken = []
+for _field in sorted(_template):
+    _st = json.loads(open(cc.STATE).read())
+    _st["jobs"]["fuzzed"] = dict(_template, **{_field: {"deeply": ["wrong"]}})
+    with open(cc.STATE, "w") as _f:
+        json.dump(_st, _f)
+    if subprocess.run([sys.executable, ENGINE, "ls"], capture_output=True).returncode != 0:
+        _ls_broken.append(_field)
+ck("nor listing them", not _ls_broken, str(_ls_broken[:3]))
+run("rm", "--all", "--force")
+
+print()
 print("=== stdin that is never closed ===")
 # read() waits for end-of-file, not for the data. A caller that writes nothing,
 # or writes and then keeps the pipe open, would otherwise block the statusline

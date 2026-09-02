@@ -1452,6 +1452,39 @@ def suggest_job_name(command):
     return "job"
 
 
+def _safe_search(rx, text):
+    """re.search that treats a bad pattern as no match rather than an error."""
+    try:
+        return bool(re.search(rx, text))
+    except re.error:
+        return False
+
+
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w{1,40})\1[\s\S]{0,8000}?^\2[ \t]*$", re.M)
+SEPARATORS = re.compile(r"[\n;]|&&|\|\||\|")
+
+
+def command_segments(command, cap=400, most=40):
+    """The separate commands in one shell line, minus any heredoc bodies.
+
+    Claude writes a setup and the real work in a single call all the time -
+    `mkdir -p out && python train.py`, or a heredoc that writes a script
+    followed by the line that runs it. Judging such a command by its first word
+    called it trivial and left a training run untracked. Heredoc bodies come out
+    because they are data: the text of a script is not a command being run.
+
+    Bounded on both counts so a pathological command cannot make this
+    expensive, and sampled from both ends rather than the front: a command that
+    writes five thousand lines of data and then runs the job keeps the job,
+    which taking only the first forty segments would have thrown away."""
+    text = HEREDOC.sub(" ", command or "")
+    parts = [seg.strip()[:cap] for seg in SEPARATORS.split(text) if seg.strip()]
+    if len(parts) <= most:
+        return parts
+    half = most // 2
+    return parts[:half] + parts[-half:]
+
+
 def classify_command(command, tool_input=None, cfg=None):
     """Decide whether a Bash command deserves a progress bar.
 
@@ -1471,13 +1504,25 @@ def classify_command(command, tool_input=None, cfg=None):
         result["why"] = "auto-tracking is off" if command else "empty command"
         return result
 
+    segments = command_segments(command) or [head]
+
+    # An unanchored rule - the plugin talking to itself, a --help, a --dry-run -
+    # is about the command as a whole. A rule anchored to the start says "this
+    # command is a trivial one", and only settles it if every part of a compound
+    # command is trivial: `mkdir -p out && python train.py` is not.
+    trivial = []
     for rx in AUTO_TRACK_IGNORE + _split_patterns(cfg["auto_track_ignore"]):
         try:
-            if re.search(rx, head):
+            if rx.lstrip().startswith("^"):
+                trivial.append(rx)
+            elif re.search(rx, head):
                 result["why"] = "matches an ignore rule"
                 return result
         except re.error:
             continue
+    if trivial and all(any(_safe_search(rx, seg) for rx in trivial) for seg in segments):
+        result["why"] = "every part of it is a trivial command"
+        return result
 
     background = bool(tool_input.get("run_in_background"))
     if background and not cfg["auto_track_background"]:
@@ -1500,7 +1545,7 @@ def classify_command(command, tool_input=None, cfg=None):
         return result
     for rx, label in AUTO_TRACK_PATTERNS:
         try:
-            if re.search(rx, head):
+            if any(_safe_search(rx, seg) for seg in segments):
                 result.update(track=True, signal="pattern", why="it looks like %s" % label)
                 return result
         except re.error:

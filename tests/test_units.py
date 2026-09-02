@@ -414,6 +414,41 @@ for _key in ("max_jobs", "bar_width"):
         _rejected = True
     ck("a setting cannot be set to nan (%s)" % _key, _rejected)
 
+print()
+print("=== a job buried in a compound command ===")
+# Claude writes the setup and the work in one call constantly - a heredoc that
+# writes a script and then the line that runs it, or `mkdir -p out && python
+# train.py`. Judging the whole thing by its first word called it trivial and
+# left the training run untracked, which is the main case the plugin exists for.
+_cases = [
+    ("setup and then the job", "mkdir -p out && python3 train.py --epochs 50", True),
+    ("a heredoc, then the job",
+     "cat > t.py <<'X'\nimport time\nX\npython3 train.py", True),
+    ("five thousand lines, then the job",
+     "\n".join("mkdir -p d%d" % i for i in range(5000)) + "\npython3 train.py", True),
+    ("a huge heredoc, then the job",
+     "cat > f <<'X'\n" + ("data line\n" * 20000) + "X\npython3 train.py", True),
+    ("trivial all the way through", "mkdir -p out && ls -la && echo done", False),
+    ("just a listing", "ls -la", False),
+    ("asking for help", "python train.py --help", False),
+    ("a long token and a job", "python train.py " + "a" * 200000, True),
+    ("thousands of echoes", " && ".join("echo %d" % i for i in range(5000)), False),
+]
+_wrong, _slow = [], []
+for _name, _cmd, _want in _cases:
+    _t0 = time.time()
+    _got = cc.classify_command(_cmd)["track"]
+    _took = time.time() - _t0
+    if _got != _want:
+        _wrong.append((_name, _got, _want))
+    if _took > 1.0:
+        _slow.append((_name, round(_took, 1)))
+ck("a job is found wherever it sits in a compound command", not _wrong, str(_wrong))
+ck("and deciding stays fast on pathological commands", not _slow, str(_slow))
+ck("heredoc bodies are not read as commands",
+   not cc.classify_command("cat > f <<'X'\npython3 train.py\nX\nls")["track"],
+   "the text of a script is data, not a command being run")
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

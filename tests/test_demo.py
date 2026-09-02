@@ -90,7 +90,11 @@ print()
 print("=== the benchmark goes through the queue, for real ===")
 submitted_at = time.time()
 by_key["benchmark"].launch()
-deadline = time.time() + 90
+# Generous ceilings. The demo runs on a wall clock - its stub scheduler queues
+# for a fixed number of seconds - so on a machine running other suites at the
+# same time the whole thing slips. Each loop stops the moment its condition
+# holds, so waiting longer costs nothing when the machine is idle.
+deadline = time.time() + 240
 while time.time() < deadline and by_key["benchmark"].job() is None:
     time.sleep(0.5)
 j = by_key["benchmark"].job() or {}
@@ -114,7 +118,7 @@ ck("and fits the column", cc.visible_len(line) <= rec.PANEL_COLS,
 
 os.system("%s %s update slurm-81734 --interval 1s --quiet >/dev/null 2>&1"
           % (sys.executable, ENGINE))
-deadline = time.time() + 120
+deadline = time.time() + 300
 while time.time() < deadline and (by_key["benchmark"].job() or {}).get("state") == "queued":
     time.sleep(0.5)
 j = by_key["benchmark"].job() or {}
@@ -126,7 +130,7 @@ ck("and the clock is slurm's runtime, not time since submission",
    "%.0fs of run time out of %.0fs since submitting, %ds of it queued"
    % (elapsed, since_submit, QUEUED))
 
-deadline = time.time() + 150
+deadline = time.time() + 360
 while time.time() < deadline and (by_key["benchmark"].job() or {}).get("state") == "running":
     time.sleep(0.5)
 j = by_key["benchmark"].job() or {}

@@ -3172,6 +3172,11 @@ def cmd_exec(args):
     proc = subprocess.Popen(
         ["/bin/sh", "-c", "( %s ) > %s 2>&1; echo $? > %s"
          % (command, shlex.quote(log), shlex.quote(exitf))],
+        # No stdin, deliberately. This command may outlive the call that started
+        # it, and a detached job holding the session's stdin gets stopped by the
+        # kernel the moment it reads. It costs nothing: a command run by the
+        # tool this sits in front of is already given a stdin that is at
+        # end-of-file, so it sees exactly what it would have seen unwrapped.
         cwd=args.cwd or os.getcwd(), stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -4023,26 +4028,28 @@ def build_parser():
     sp.add_argument("--after", help="start tracking after this long (default: config)")
     sp.add_argument("--name", help="job name if it does get tracked")
     sp.add_argument("--shell", help="the command, as one string, run with /bin/sh -c")
-    sp.add_argument("--cwd")
-    sp.add_argument("--desc")
+    sp.add_argument("--cwd", help="working directory for the command")
+    sp.add_argument("--desc", help="human description of the job")
     sp.add_argument("--keep-log", action="store_true",
                     help="keep the capture file even if no job was created")
-    sp.add_argument("command", nargs=argparse.REMAINDER)
+    sp.add_argument("command", nargs=argparse.REMAINDER,
+                    help="-- the command to run, if not given with --shell")
     sp.set_defaults(fn=cmd_exec)
 
     sp = sub.add_parser("slurm", help="track a job that is already in a scheduler queue")
     sp.add_argument("job_id", help="the scheduler's job id")
-    sp.add_argument("--scheduler", default="slurm", choices=sorted(STATE_CMDS))
+    sp.add_argument("--scheduler", default="slurm", choices=sorted(STATE_CMDS),
+                    help="which queue the job is in")
     sp.add_argument("--eta", help="how long you expect it to take")
-    sp.add_argument("--name")
-    sp.add_argument("--desc")
-    sp.add_argument("--cwd")
+    sp.add_argument("--name", help="short job name (default: the scheduler id)")
+    sp.add_argument("--desc", help="human description of the job")
+    sp.add_argument("--cwd", help="where the scheduler writes its log")
     sp.add_argument("--interval", metavar="DUR",
                     help="how often to ask the scheduler (default: the cadence policy)")
     sp.set_defaults(fn=cmd_slurm)
 
     sp = sub.add_parser("start", help="track an already-running job (by pid and/or log)")
-    sp.add_argument("name")
+    sp.add_argument("name", help="what to call it on the bar")
     sp.add_argument("--pid", type=int, help="pid to watch for completion")
     sp.add_argument("--cmd", help="command string, for display")
     sp.add_argument("--no-watch", action="store_true", help="do not spawn the log watcher")
@@ -4051,19 +4058,20 @@ def build_parser():
     sp.set_defaults(fn=cmd_start)
 
     sp = sub.add_parser("update", help="revise progress or the ETA (Claude calls this)")
-    sp.add_argument("job")
+    sp.add_argument("job", help="job id, or enough of one to be unambiguous")
     sp.add_argument("--step", type=int, help="current step or count")
-    sp.add_argument("--total", type=int)
+    sp.add_argument("--total", type=int, help="total steps/epochs, if known")
     sp.add_argument("--pct", type=float, help="percent complete, 0-100")
     sp.add_argument("--eta", help="revised time REMAINING from now")
     sp.add_argument("--reset-rate", action="store_true",
                     help="discard measured samples (use after a phase change)")
-    sp.add_argument("--note")
-    sp.add_argument("--desc")
-    sp.add_argument("--unit")
-    sp.add_argument("--pattern")
-    sp.add_argument("--quiet", action="store_true")
-    sp.add_argument("--force-show", action="store_true")
+    sp.add_argument("--note", help="short status note shown on the bar")
+    sp.add_argument("--desc", help="human description of the job")
+    sp.add_argument("--unit", help="unit label, e.g. ep, step, img")
+    sp.add_argument("--pattern", help="custom regex with (?P<step>) (?P<total>) groups")
+    sp.add_argument("--quiet", action="store_true", help="change it without printing the bar")
+    sp.add_argument("--force-show", action="store_true",
+                    help="show on the statusline even if it is a short job")
     sp.add_argument("--any-session", action="store_true",
                     help="allow acting on a job another session started")
     monitor_flags(sp)
@@ -4071,34 +4079,36 @@ def build_parser():
 
     for name, state in (("done", "done"), ("fail", "failed"), ("cancel", "cancelled")):
         sp = sub.add_parser(name, help="mark a job %s" % state)
-        sp.add_argument("job")
-        sp.add_argument("--note")
+        sp.add_argument("job", help="job id, or enough of one to be unambiguous")
+        sp.add_argument("--note", help="a line saying why, kept with the job")
         sp.add_argument("--any-session", action="store_true",
                         help="allow acting on a job another session started")
         if name == "fail":
-            sp.add_argument("--exit-code", type=int, default=1)
+            sp.add_argument("--exit-code", type=int, default=1,
+                            help="the exit code to record")
         sp.set_defaults(fn=(lambda s: (lambda a: cmd_finish(a, s)))(state))
 
     sp = sub.add_parser("ls", help="list tracked jobs")
     sp.add_argument("--json", action="store_true", help="machine-readable (Claude reads this)")
-    sp.add_argument("--running", action="store_true")
+    sp.add_argument("--running", action="store_true", help="only jobs still going")
     sp.set_defaults(fn=cmd_ls)
 
     sp = sub.add_parser("show", help="details for one job")
-    sp.add_argument("job")
-    sp.add_argument("--json", action="store_true")
+    sp.add_argument("job", help="job id, or enough of one to be unambiguous")
+    sp.add_argument("--json", action="store_true", help="machine-readable")
     sp.set_defaults(fn=cmd_show)
 
     sp = sub.add_parser("log", help="tail a tracked job's log")
-    sp.add_argument("job")
-    sp.add_argument("-n", "--lines", type=int, default=40)
-    sp.add_argument("--bytes", type=int, default=262144)
+    sp.add_argument("job", help="job id, or enough of one to be unambiguous")
+    sp.add_argument("-n", "--lines", type=int, default=40, help="how many lines to show")
+    sp.add_argument("--bytes", type=int, default=262144,
+                    help="how much of the end of the log to read")
     sp.set_defaults(fn=cmd_log)
 
     sp = sub.add_parser("rm", help="forget jobs")
-    sp.add_argument("job", nargs="*")
-    sp.add_argument("--all", action="store_true")
-    sp.add_argument("--finished", action="store_true")
+    sp.add_argument("job", nargs="*", help="jobs to forget; none means use a flag below")
+    sp.add_argument("--all", action="store_true", help="every job of this session's")
+    sp.add_argument("--finished", action="store_true", help="only jobs that have ended")
     sp.add_argument("--everywhere", action="store_true",
                     help="also remove jobs belonging to other sessions")
     sp.add_argument("--force", action="store_true",
@@ -4106,18 +4116,19 @@ def build_parser():
     sp.set_defaults(fn=cmd_rm)
 
     sp = sub.add_parser("statusline", help="render for the Claude Code statusline")
-    sp.add_argument("--width", type=int)
+    sp.add_argument("--width", type=int, help="terminal width to render for")
     sp.set_defaults(fn=cmd_statusline)
 
     sp = sub.add_parser("watch", help="live dashboard for a second terminal pane")
-    sp.add_argument("--interval", type=float, default=1.0)
-    sp.add_argument("--bar-width", type=int)
-    sp.add_argument("--once", action="store_true")
+    sp.add_argument("--interval", type=float, default=1.0, help="seconds between redraws")
+    sp.add_argument("--bar-width", type=int, help="bar width to draw")
+    sp.add_argument("--once", action="store_true", help="draw once and exit")
     sp.set_defaults(fn=cmd_watch)
 
     sp = sub.add_parser("demo", help="run a simulated job end-to-end")
-    sp.add_argument("--steps", type=int, default=40)
-    sp.add_argument("--step-seconds", type=float, default=1.5)
+    sp.add_argument("--steps", type=int, default=40, help="steps the simulated job takes")
+    sp.add_argument("--step-seconds", type=float, default=1.5,
+                    help="seconds per simulated step")
     sp.add_argument("--eta", default="30s", help="deliberately-wrong prior, to show blending")
     sp.add_argument("--interval", default="2s", help="probe cadence for the demo")
     sp.add_argument("--tour", action="store_true",
@@ -4153,8 +4164,8 @@ def build_parser():
     sp = sub.add_parser("inbox", help="crash reports queued for the Claude session")
     sp.add_argument("--drain", action="store_true",
                     help="claim and print the next undelivered report")
-    sp.add_argument("--json", action="store_true")
-    sp.add_argument("--limit", type=int, default=10)
+    sp.add_argument("--json", action="store_true", help="machine-readable")
+    sp.add_argument("--limit", type=int, default=10, help="how many reports to list")
     sp.set_defaults(fn=cmd_inbox)
 
     sp = sub.add_parser("monitors", help="explain the ways progress can be observed")
@@ -4167,7 +4178,8 @@ def build_parser():
     sp.add_argument("job")
     sp.add_argument("--interval", type=float, default=None,
                     help="force a fixed probe interval (default: the cadence policy)")
-    sp.add_argument("--max-idle", type=float, default=86400.0)
+    sp.add_argument("--max-idle", type=float, default=86400.0,
+                    help="give up after this long with no sign of life")
     sp.set_defaults(fn=cmd_watch_daemon)
 
     return p

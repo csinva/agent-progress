@@ -219,6 +219,53 @@ for _key in sorted(cc.CONFIG_SPEC):
 ck("and every setting accepts a value other than its default",
    not _unsettable, str(_unsettable[:3]))
 
+print()
+# `--help` is the whole documentation for anyone not reading the README, and
+# flags shared between subcommands had drifted: --desc was described under `run`
+# and blank under `exec`, --total under `start` and blank under `update`.
+import argparse as _argparse
+
+_subs = cc.build_parser()._subparsers._group_actions[0].choices
+_undocumented = []
+for _name, _sp in sorted(_subs.items()):
+    if _name.startswith("_"):
+        continue
+    for _a in _sp._actions:
+        if _a.dest == "help" or _a.help is _argparse.SUPPRESS:
+            continue
+        if not _a.help:
+            _undocumented.append("%s %s" % (_name, "/".join(_a.option_strings) or _a.dest))
+ck("every option and argument says what it is for", not _undocumented, str(_undocumented[:4]))
+
+# and a flag that appears on several subcommands should mean the same thing
+_by_flag = {}
+for _name, _sp in sorted(_subs.items()):
+    if _name.startswith("_"):
+        continue
+    for _a in _sp._actions:
+        for _opt in _a.option_strings:
+            if _a.help and _a.help is not _argparse.SUPPRESS:
+                _by_flag.setdefault(_opt, {}).setdefault(_a.help, []).append(_name)
+# Flags that genuinely mean different things in different places. Anything not
+# on this list that differs is drift, not intent.
+_MAY_DIFFER = {
+    "--eta": "a prior for a new job, a revision for a running one, a fixed value for the demo",
+    "--interval": "probe cadence for a job, redraw rate for the dashboard",
+    "--json": "the shape of whatever that subcommand prints",
+    "--name": "what to call the job, worded for how the job arrives",
+    "--note": "a status note on a bar, or the reason a job was ended",
+    "--cwd": "where to run a command, but where a scheduler writes for a queued job",
+    "--path": "the config file, or the file a size monitor measures",
+    "--set": "a setting saved, or a setting only tried",
+}
+_conflicting = {f: sorted(h) for f, h in _by_flag.items()
+                if len(h) > 1 and f not in _MAY_DIFFER}
+ck("a flag on several subcommands is described the same way", not _conflicting,
+   str(list(_conflicting)[:4]))
+ck("and every flag allowed to differ actually does",
+   all(len(_by_flag.get(f, {})) > 1 for f in _MAY_DIFFER if f in _by_flag),
+   str([f for f in _MAY_DIFFER if f in _by_flag and len(_by_flag[f]) == 1]))
+
 print("  %d declarations checked" % CHECKS[0])
 print()
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))

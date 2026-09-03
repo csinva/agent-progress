@@ -684,6 +684,53 @@ ck("while a session re-running its own finished job reuses the id",
 reset()
 
 print()
+print()
+print("=== a job on another login node is left alone from this one ===")
+# A shared home directory shares the state file between the machines of a
+# cluster. A pid from another machine says nothing here - and treating it as
+# dead closed running jobs, spawned duplicate watchers, and could have
+# signalled some unrelated local process by that number.
+_h = tempfile.mkdtemp(prefix="agent-progress-host-")
+_env = dict(os.environ, AGENT_PROGRESS_HOME=_h, AGENT_PROGRESS_NOTIFY="false", CLAUDE_CODE_SESSION_ID="nodeB")
+_S = os.path.join(_h, "state.json")
+def _rec():
+    return json.load(open(_S))["jobs"]["train"]
+def _hook(ev):
+    r = subprocess.run([sys.executable, os.path.join(HOOKS, "inject_status.py"), ev],
+                       input=json.dumps({"session_id": "nodeB", "stop_hook_active": False, "prompt": "hi"}),
+                       capture_output=True, text=True, env=_env)
+    return json.loads(r.stdout).get("systemMessage", "") if r.stdout.strip() else ""
+subprocess.run([sys.executable, ENGINE, "run", "--name", "train", "--eta", "1h", "--force-show", "--", "sleep", "60"],
+               capture_output=True, env=_env)
+_j = _rec()
+for _pid in (_j["watcher_pid"], _j["pid"]):
+    os.kill(int(_pid), signal.SIGKILL)               # here those numbers are nobody's
+time.sleep(0.3)
+_st = json.load(open(_S)); _st["jobs"]["train"].update(host="login-node-A", watcher_host="login-node-A")
+json.dump(_st, open(_S, "w"))
+_said = _hook("Stop")
+ck("a turn ending here does not close it", _rec()["state"] == "running" and _said == "", "%s %r" % (_rec()["state"], _said[:60]))
+_hook("UserPromptSubmit")
+ck("a prompt here does not spawn a watcher for it", _rec()["watcher_pid"] == _j["watcher_pid"], str(_rec()["watcher_pid"]))
+r = subprocess.run([sys.executable, ENGINE, "rm", "train"], capture_output=True, text=True, env=_env)
+ck("rm presumes it alive and refuses", r.returncode != 0, r.stderr[-100:])
+r = subprocess.run([sys.executable, ENGINE, "cancel", "train"], capture_output=True, text=True, env=_env)
+ck("cancel refuses rather than signalling a pid that is not here",
+   r.returncode != 0 and "login-node-A" in r.stderr and _rec()["state"] == "running", r.stderr[-120:])
+r = subprocess.run([sys.executable, ENGINE, "statusline", "--width", "100"], input=json.dumps({"session_id": "nodeB"}),
+                   capture_output=True, text=True, env=_env)
+ck("its bar still shows here", "train" in r.stdout)
+open(_rec()["exit_file"], "w").write("3\n")
+_said = _hook("Stop")
+ck("its exit file, when it appears, is believed", _rec()["state"] == "failed" and _rec()["exit_code"] == 3,
+   str((_rec()["state"], _rec()["exit_code"])))
+ck("and reported once, here", "train" in _said and "exit 3" in _said, repr(_said[:80]))
+ck("the record says where it ran", _rec().get("host") == "login-node-A")
+ck("new records say where they run", json.load(open(_S))["jobs"]["train"].get("host") is not None)
+r = subprocess.run([sys.executable, ENGINE, "rm", "train", "--force"], capture_output=True, text=True, env=_env)
+ck("--force still forgets it", r.returncode == 0)
+shutil.rmtree(_h, ignore_errors=True)
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

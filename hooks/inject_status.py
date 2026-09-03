@@ -246,14 +246,16 @@ def revive_watchers(cc):
     try:
         st = cc.state_ro()
         if not any(j.get("state") in cc.ACTIVE_STATES and not j.get("no_watch")
-                   and not cc.alive(j.get("watcher_pid"))
+                   and not cc.watcher_alive(j) and (not j.get("pid") or cc.pid_here(j))
                    for j in st["jobs"].values()):
             return                      # nothing to do, and no need to take the lock
         with cc.state_rw() as w:
             for jid, job in w["jobs"].items():
                 if job.get("state") not in cc.ACTIVE_STATES or job.get("no_watch"):
                     continue
-                if cc.alive(job.get("watcher_pid")):
+                if job.get("pid") and not cc.pid_here(job):
+                    continue            # its process is on another machine; watch it there
+                if cc.watcher_alive(job):
                     continue            # re-checked under the lock, so only one wins
                 job["watcher_pid"] = cc.spawn_watcher(jid)
     except Exception:

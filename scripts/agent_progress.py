@@ -25,6 +25,7 @@ import select
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -341,7 +342,8 @@ def _sanitize(st):
                     job[key] = None
             for key in ("id", "state", "unit", "note", "desc", "cmd", "log", "pattern",
                         "state_probe", "queue_reason", "nodes", "partition",
-                        "scheduler_state", "session_id", "bridge_id", "exit_file"):
+                        "scheduler_state", "session_id", "bridge_id", "exit_file",
+                        "host", "watcher_host"):
                 if key in job and job[key] is not None and not isinstance(job[key], str):
                     job[key] = None
             job["id"] = job.get("id") or str(jid)
@@ -691,7 +693,7 @@ def new_id(st, name):
     # writing its readings into the new job's record.
     prev = st["jobs"][base]
     if (prev.get("state") not in ACTIVE_STATES and job_belongs_here(prev)
-            and not alive(prev.get("watcher_pid"))):
+            and not watcher_alive(prev)):
         return base
     if prev.get("state") not in ACTIVE_STATES and job_belongs_here(prev):
         # ours, finished, but its watcher has not noticed yet: the new run
@@ -760,6 +762,40 @@ def resolve(st, ref, mutating=False, any_session=False):
         if len(pool) > 1:
             raise SystemExit("ambiguous job ref %r: matches %s" % (ref, ", ".join(sorted(pool))))
     raise SystemExit("no such job: %r (try: agent-progress ls)" % ref)
+
+
+# A pid means something only on the machine it belongs to. A home directory
+# shared between the login nodes of a cluster shares this state file too, and
+# a session on one node asking "is pid 4242 alive" about a job on another gets
+# an answer about some unrelated process - or about nothing, which read as the
+# job having died. Every record says where it runs; a pid elsewhere is presumed
+# alive, since nothing here can tell.
+HOST = socket.gethostname()
+
+
+def pid_here(job):
+    """Can this machine answer questions about the job's pid?"""
+    host = job.get("host")
+    return not host or host == HOST
+
+
+def watcher_here(job):
+    host = job.get("watcher_host") or job.get("host")
+    return not host or host == HOST
+
+
+def job_pid_alive(job):
+    """The job's process, as far as this machine can tell; presumed alive
+    when it lives on another one."""
+    if not pid_here(job):
+        return True
+    return alive(job.get("pid"))
+
+
+def watcher_alive(job):
+    if not watcher_here(job):
+        return True
+    return alive(job.get("watcher_pid"))
 
 
 def alive(pid):
@@ -2874,7 +2910,7 @@ def finalize(job, exit_code, now, st=None):
     # caller was killed outright, nobody read the output, and the report becomes
     # the only way the result comes back.
     waited_for = job.get("caller_waits") and (
-        not job.get("waiter_pid") or alive(job.get("waiter_pid")))
+        not job.get("waiter_pid") or not pid_here(job) or alive(job.get("waiter_pid")))
     if st is not None and not waited_for:
         if job["state"] == "failed":
             enqueue_crash(st, job, now)
@@ -2896,7 +2932,7 @@ def ended_already(job):
     own_exit = job.get("exit_file")
     if own_exit and os.path.exists(own_exit):
         return True
-    return job.get("pid") is not None and not alive(job.get("pid"))
+    return job.get("pid") is not None and not job_pid_alive(job)
 
 
 def reap_ended(session_id=None, now=None):
@@ -3097,6 +3133,7 @@ def _watch_loop(args):
             if job is None or job.get("state") not in ACTIVE_STATES:
                 return 0
             job["watcher_pid"] = os.getpid()
+            job["watcher_host"] = HOST
             has_pid = bool(job.get("pid"))
             cfg = load_config()
             interval = args.interval or poll_interval(
@@ -3139,7 +3176,7 @@ def _watch_loop(args):
         # it as news ended live jobs and took their bars with them.
         own_exit = snapshot.get("exit_file")
         finished_file = bool(own_exit) and os.path.exists(own_exit)
-        gone = bool(finished_file) or (has_pid and not alive(snapshot.get("pid")))
+        gone = bool(finished_file) or (has_pid and not job_pid_alive(snapshot))
         # a queued job has produced no output to read; the queue is the only
         # thing worth asking, and it is asked below
         reading, verdict, updates, info = observe(
@@ -3312,7 +3349,7 @@ def _new_job(args, cmd=None, log=None, exit_file=None, pid=None):
         "desc": one_line(getattr(args, "desc", None)),
         "cmd": cmd,
         "log": log, "exit_file": exit_file,
-        "pid": pid,
+        "pid": pid, "host": HOST,
         "unit": unit,
         "total": getattr(args, "total", None),
         "total_locked": bool(getattr(args, "total", None)),
@@ -3833,7 +3870,7 @@ def _register(command, name, log, exitf, pid, started, cfg, args):
         jid = new_id(st, name)
         st["jobs"][jid] = {
             "id": jid, "desc": args.desc, "cmd": command, "log": log,
-            "exit_file": exitf, "pid": pid,
+            "exit_file": exitf, "pid": pid, "host": HOST,
             "unit": "it", "total": None, "total_locked": False, "step": None,
             "units": None, "pct": None, "state": "running", "exit_code": None,
             "started": started, "updated": time.time(), "ended": None,
@@ -3980,6 +4017,11 @@ def _stop_job(job):
     was still burning GPU hours. If the scheduler will not take the
     cancellation, the record is left as it is and this fails, so nobody is
     told a job stopped that did not."""
+    if job.get("pid") and not pid_here(job):
+        raise SystemExit("%s runs on %s (pid %s), and a signal from here would reach some "
+                         "other process by that number. Cancel it from that machine, or\n"
+                         "  agent-progress rm %s --force   to stop tracking it"
+                         % (job.get("id"), job.get("host"), job["pid"], job.get("id")))
     if job.get("pid") and alive(job["pid"]):
         try:
             pgid = os.getpgid(job["pid"])
@@ -4132,7 +4174,7 @@ def cmd_rm(args):
         finding the pid by hand. Records of jobs that have finished, and of jobs
         whose process is already gone, are ordinary rubbish and go freely."""
         pid = job.get("pid")
-        return (job.get("state") in ACTIVE_STATES and pid and alive(pid)) or (
+        return (job.get("state") in ACTIVE_STATES and pid and job_pid_alive(job)) or (
             job.get("state") in ACTIVE_STATES and batch_of(job)[0])
 
     def removable(job):
@@ -4626,8 +4668,9 @@ def cmd_doctor(args):
     for j in running:
         w = j.get("watcher_pid")
         print("  %-16s watcher=%s%s  pid=%s%s" % (
-            j.get("id"), w, "" if alive(w) else " (DEAD)",
-            j.get("pid"), "" if alive(j.get("pid")) else " (exited)"))
+            j.get("id"), w, "" if watcher_alive(j) else " (DEAD)",
+            j.get("pid"), (" (on %s)" % j.get("host")) if not pid_here(j)
+            else ("" if alive(j.get("pid")) else " (exited)")))
     settings = os.path.join(HOME, ".claude", "settings.json")
     wired = False
     try:

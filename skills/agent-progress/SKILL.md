@@ -41,7 +41,8 @@ agent-progress run --name train --eta 3h -- python -m src.train --config base.ya
 
 Use `run` when you already believe it is long: the bar is then right from the
 first frame. `exec --after 20s` is for when you are unsure - it runs the command
-normally and only takes it into the background if it outlasts the threshold.
+normally, in the foreground, with its output and exit code, and only gives it a
+bar if it outlasts the threshold. It never backgrounds anything.
 
 **Then say nothing about any of it.** The user asked for a job, not for a report
 on how it is being watched. Do not announce that tracking started, do not
@@ -157,9 +158,10 @@ cluster work:
   watcher already asks every fifteen seconds while a job is queued, and the
   answer is in `ls --json` for free. Polling the scheduler yourself costs tokens
   and tells you less.
-- Its estimate, until it starts, is the job's slurm `TimeLimit` - an upper
-  bound, not a measurement. Replace it with a real one once the job is running
-  and you can see what it is doing.
+- While it is queued, `ls --json` reports no estimate: nothing is running to
+  measure. Once it starts, the job's slurm `TimeLimit` stands in as the estimate
+  - an upper bound, not a measurement. Replace it with a real one once you can
+  see what the job is doing.
 
 The wait is not counted as run time: when slurm reports the job started, the
 clock is re-anchored to slurm's own `RunTime`. So `elapsed_s` on a running
@@ -226,8 +228,8 @@ For something already running:
 agent-progress start reindex --pid 45123 --log /var/log/reindex.log --eta 3h
 ```
 
-Then stop. The statusline carries it from there, and anything worth
-notification are how they follow it - you do not need to narrate any of it.
+Then stop. The statusline carries it from there, and its ending reaches the
+user on its own - you do not need to narrate any of it.
 
 ## Other sessions
 
@@ -249,8 +251,9 @@ not every second. The total estimate is recomputed at each observation, and the
 cadence stretches with it. The bar shows `est 2h15m (+45m)` when the estimate has
 moved materially from your first guess.
 
-You are told about running jobs at session start and on each user prompt, so you
-can volunteer status without checking anything.
+With `report_style=context` you are told about running jobs on each prompt, and
+can volunteer status without checking anything. By default (`report_style=side`)
+nothing is sent to you; `agent-progress ls` is how you look.
 
 **Intervene only when you know something the watcher cannot see:**
 
@@ -273,10 +276,12 @@ waiting for a job. If the user wants genuinely periodic reporting, use the
 
 ## When a job finishes
 
-**You will not be told.** A job ending is shown to the user beside the
+**By default you are not told.** A job ending is shown to the user beside the
 conversation, not handed to you: it costs the conversation nothing and
 interrupts nothing. So do not wait for it, do not poll for it, and do not
-mention it unless the user brings it up.
+mention it unless the user brings it up. (With `report_style=context` the
+report comes to you with the next prompt instead, and says what to do with it -
+relay it, and follow its instructions.)
 
 If they do ask - "did it finish?", "what did it get?" - then look:
 
@@ -290,7 +295,16 @@ That is also the only reason to run those commands. A job observes itself.
 ## When a job crashes
 
 A job that dies is shown to the user beside the conversation, the same way a
-finished one is, and you are not interrupted for it. What they see looks like:
+finished one is, and you are not interrupted for it. What they see:
+
+```
+💀 trainer SIGKILL after 04:12
+  Epoch 1/50 loss 2.1
+  agent-progress log trainer -n 60
+```
+
+With `report_style=context` you receive the fuller version with your next
+prompt instead:
 
 ```
 💀 A tracked job CRASHED while you were working: 'trainer'
@@ -312,6 +326,14 @@ were doing, and even if it is unrelated to the current task. Then:
    memory, a missing file).
 4. **Do not re-run the job without asking.** It may have burned hours, and
    re-running it blindly can repeat an expensive failure.
+
+One ending is not a crash: a command tracked automatically in the foreground
+that outlives the Bash tool's timeout is stopped with SIGTERM. Its report says
+`was STOPPED`, names the timeout as the likely cause, and gives the way out -
+relaunch it detached with `agent-progress run --name <id> --eta <estimate> --
+'<command>'`, so the call returns at once and the job reports when it ends.
+Do that rather than running it in the foreground again, which would only time
+out again.
 
 Several jobs can die at once — an out-of-memory or a failing GPU takes
 everything on the machine — and they arrive together in one report. Say that

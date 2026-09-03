@@ -707,7 +707,7 @@ def new_id(st, name):
     return "%s-%d" % (base, n)
 
 
-def resolve(st, ref, mutating=False, any_session=False):
+def resolve(st, ref, mutating=False, any_session=False, flag="--any-session"):
     """Find a job by exact id, then unique prefix, then substring.
 
     This session's jobs come first. Ids are global but names are not chosen -
@@ -743,9 +743,9 @@ def resolve(st, ref, mutating=False, any_session=False):
                     % ", ".join(own)) if own else ""
             raise SystemExit(
                 "%s belongs to another session (%s), so this would reach outside "
-                "this one.%s\nPass --any-session only if that session's job is "
+                "this one.%s\nPass %s only if that session's job is "
                 "really the one you want."
-                % (jid, (jobs[jid].get("session_id") or "unknown")[:12], hint))
+                % (jid, (jobs[jid].get("session_id") or "unknown")[:12], hint, flag))
         return jid
 
     if ref in jobs:
@@ -2594,7 +2594,9 @@ def format_report(ev, cfg=None):
                      "Do not re-run it in the foreground the same way; that would only "
                      "time out again."
                      % (ev.get("reason_short") or "a signal", ev.get("job") or "<name>",
-                        (ev.get("cmd") or "<command>")[:200]))
+                        # one quoted argument: `run` passes a single argument to the
+                        # shell whole, so `a; b` stays one command instead of two
+                        shlex.quote((ev.get("cmd") or "<command>")[:200])))
     else:
         lines.append("Tell the user this job crashed, summarize why from the output above, "
                      "and suggest a fix if the cause is clear. Do not re-run it without "
@@ -3433,9 +3435,8 @@ def _announce(job):
         print("  statusline was fixed at startup and no bar will appear here.")
         print("  Restart Claude Code to get one; tracking itself works either way,")
         print("  and `agent-progress ls` shows this job now.")
-    if job.get("auto_launched"):
-        print("  Tracked automatically, and now running detached - this command will not")
-        print("  print its output here. To work with it:")
+    if job.get("auto_launched") and job.get("state") in ACTIVE_STATES:
+        print("  Tracked automatically. To work with it:")
         print("    agent-progress log %s -n 40        read what it has printed so far"
               % job["id"])
         print("    agent-progress ls --json              progress, ETA and state")
@@ -4261,7 +4262,8 @@ def cmd_rm(args):
         removed, refused = [], []
         for ref in args.job:
             try:
-                jid = resolve(st, ref, mutating=True, any_session=args.everywhere)
+                jid = resolve(st, ref, mutating=True, any_session=args.everywhere,
+                              flag="--everywhere")
             except SystemExit as ex:
                 refused.append(str(ex))
                 continue
@@ -4694,6 +4696,7 @@ def cmd_doctor(args):
     print("state file : %s (%s)" % (STATE, "exists" if os.path.exists(STATE) else "not created yet"))
     print("logs dir   : %s" % LOGS)
     print("python     : %s" % sys.version.split()[0])
+    print("host       : %s (a pid on another machine is presumed alive)" % HOST)
     st = state_ro()
     running = [j for j in st["jobs"].values() if j.get("state") in ACTIVE_STATES]
     queued = [j for j in running if j.get("state") == "queued"]

@@ -8,8 +8,9 @@ Two jobs:
 2. Deliver crash reports. Nothing can push a message into a running Claude
    session from outside, so a crash is queued by the watcher and collected here
    at the first opportunity. On Stop - the moment Claude finishes a turn - a
-   pending crash blocks the stop once, which makes Claude report it straight
-   away instead of waiting for the user to type something.
+   pending report is shown beside the transcript (report_style=side), where it
+   interrupts nobody; with report_style=context it is handed to Claude with
+   the next prompt instead. Nothing here ever blocks a turn.
 """
 
 import json

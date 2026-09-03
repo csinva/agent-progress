@@ -232,8 +232,9 @@ def main():
 
     report = cli("inbox", "--drain").strip()
     if report and "no undelivered" not in report:
-        print("\n%sThe crash report Claude receives%s %s(delivered by the Stop hook, "
-              "the moment Claude finishes its next turn)%s\n"
+        print("\n%sThe crash report%s %s(shown beside the transcript the moment "
+              "Claude finishes its turn; with report_style=context, handed to Claude "
+              "with the next prompt)%s\n"
               % (BOLD, RESET, DIM, RESET))
         print("\n".join("  " + ln for ln in report.splitlines()))
 

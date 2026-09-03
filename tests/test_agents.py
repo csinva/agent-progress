@@ -731,6 +731,16 @@ r = subprocess.run([sys.executable, ENGINE, "rm", "train", "--force"], capture_o
 ck("--force still forgets it", r.returncode == 0)
 shutil.rmtree(_h, ignore_errors=True)
 
+print()
+print("=== a refusal names the flag the command actually takes ===")
+reset()
+as_session("agent-A", "start", "theirs", "--eta", "3h", "--monitor", "time", "--no-watch")
+r = as_session("agent-B", "rm", "theirs")
+ck("rm's refusal says --everywhere", "--everywhere" in r.stderr and "--any-session" not in r.stderr, r.stderr[-160:])
+r = as_session("agent-B", "cancel", "theirs")
+ck("cancel's says --any-session", "--any-session" in r.stderr, r.stderr[-160:])
+reset()
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

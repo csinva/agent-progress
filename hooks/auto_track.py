@@ -31,7 +31,7 @@ from _shared import load_engine, read_payload  # noqa: E402
 INSTRUCTIONS = """\
 This command looks long-running (%(why)s), so it was stopped once to be tracked
 instead. Relaunch it through agent-progress, which gives it a live progress bar in
-the statusline and tells you when it finishes or crashes:
+the statusline and shows the user when it finishes or crashes:
 
   agent-progress run --name %(name)s --eta <your estimate> <monitor flags> -- %(command)s
 

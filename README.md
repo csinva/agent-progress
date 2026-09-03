@@ -150,8 +150,9 @@ or:
 /agent-progress:progress
 ```
 
-Claude is told about running jobs at session start and on each prompt, so it can
-volunteer *"that pipeline is 60% done, landing around 4:15pm"* unprompted.
+With `report_style=context`, Claude is told about running jobs on each prompt
+and can volunteer *"that pipeline is 60% done, landing around 4:15pm"*
+unprompted. By default nothing is sent to Claude; the bar is for you.
 
 Or drive it yourself:
 
@@ -246,8 +247,9 @@ training run as its own.
 
 Job names are not chosen — they come from the command — so two agents each
 training something both have a job called `train`. Lookup prefers your own, and
-anything that *changes* a job (`cancel`, `done`, `fail`, `update`, `rm`) refuses
-to reach into another session without `--any-session`. `cancel` signals the
+anything that *changes* a job (`cancel`, `done`, `fail`, `update`) refuses to
+reach into another session without `--any-session` (`rm` says `--everywhere`,
+since it is about which sessions' records to touch). `cancel` signals the
 process group (or asks the scheduler, with `scancel`/`bkill`/`qdel`, for a queued
 job), so this is the difference between tidying up and killing someone else's run.
 
@@ -295,8 +297,8 @@ hook — but catching one is not the same as tracking it.
 
 A caught command is wrapped so that **it runs exactly as it would have**: same
 output, streamed as it appears, same exit code. If it finishes within **20
-seconds**, that is the end of it. No job is created, no file is written, nothing
-is said to Claude, and no tokens are spent. The overwhelming majority of
+seconds**, that is the end of it. No job is created, no file is left behind,
+nothing is said to Claude, and no tokens are spent. The overwhelming majority of
 commands land here.
 
 Only a command still running after the threshold gets a bar, and getting one
@@ -416,7 +418,7 @@ short. `defer` pays nothing up front and fills the estimate in afterwards.
 Two more things kept cheap:
 
 - A job tracked below the two-minute statusline floor is recorded but never
-  shown, and Claude is told not to bother estimating it.
+  shown, and Claude is told only not to re-launch it.
 - Job status used to be re-sent to Claude on every prompt. It now goes out only
   when the picture changes — a job appears, finishes, or gains an estimate — and
   otherwise at most once per `context_min_interval_seconds` (default 5 minutes).
@@ -502,12 +504,14 @@ slower says so: `est 26m (+6m)`.
    and Claude reports what died and suggests a fix.
 
 Nothing can push a message into a running Claude session from outside, so
-delivery is queued rather than instantaneous: the report arrives at the first of
-Claude finishing a turn or you sending a message. It is delivered exactly once
-and never lost.
+delivery is queued rather than instantaneous: with `report_style=side` (the
+default) the report appears when Claude next finishes a turn; with
+`report_style=context` it goes to Claude with your next message. One channel
+per mode, delivered exactly once and never lost.
 
 `agent-progress config --set crash_alert=false` keeps the skull and the notification
-but drops the report. A job you `cancel` isn't a crash — it gets `■` and
+but drops the beside-the-transcript report (`report_style=off` silences the
+context channel too). A job you `cancel` isn't a crash — it gets `■` and
 stays silent.
 
 ---
@@ -566,7 +570,7 @@ Presets bundle common combinations:
 | `rich` | every field, wider bar, five jobs |
 | `tqdm` | tqdm-faithful |
 | `plain` | ascii, no color |
-| `quiet` | only jobs over ten minutes, one at a time, no sound |
+| `quiet` | only jobs over ten minutes, one at a time, no notifications |
 | `guided` | ask before taking a command over (`auto_track=instruct`) |
 | `manual` | never take one over (`auto_track=off`) |
 | `eager` | start tracking from the first second |

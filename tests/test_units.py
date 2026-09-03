@@ -671,6 +671,13 @@ j = {"state": "running", "started": time.time() + 3600, "samples": []}
 ck("a start in the future - another machine's clock - is not a negative elapsed", cc.estimate(j)["elapsed"] == 0.0,
    str(cc.estimate(j)["elapsed"]))
 
+ev = {"kind": "crash", "job": "longjob", "exit_code": 143, "reason_short": "SIGTERM", "reason": "SIGTERM",
+      "cmd": "echo starting; sleep 60; echo never", "log": "/nonexistent", "log_tail": "", "duration": 5,
+      "note": "killed by SIGTERM", "auto_launched": True}
+rep = cc.format_report(ev)
+ck("the relaunch line Claude is given keeps a compound command whole",
+   "-- 'echo starting; sleep 60; echo never'" in rep, rep[-200:])
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

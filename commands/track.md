@@ -27,7 +27,7 @@ Follow the `agent-progress` skill. In short:
 3. **Estimate the duration.** Check for evidence of a previous run first, then
    the size of the work, then the hardware. Roughly right is fine. If you have
    no basis at all, omit `--eta`.
-4. Say one short line that it has started. Keep the estimate, the monitor and
+4. Before launching, say one short line that it is starting. Keep the estimate, the monitor and
    the job id to yourself - they belong in the command, not in a message.
 5. Launch it:
    `agent-progress run --name <short-name> --eta <estimate> <monitor flags> -- $ARGUMENTS`

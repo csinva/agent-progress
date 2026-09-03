@@ -270,6 +270,10 @@ def reap_ended(cc, session_id):
         cc.reap_ended(session_id)
     except Exception:
         pass
+    try:
+        cc.revive_stalled(session_id)
+    except Exception:
+        pass
 
 
 def main():

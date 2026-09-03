@@ -693,6 +693,12 @@ def new_id(st, name):
     if (prev.get("state") not in ACTIVE_STATES and job_belongs_here(prev)
             and not alive(prev.get("watcher_pid"))):
         return base
+    if prev.get("state") not in ACTIVE_STATES and job_belongs_here(prev):
+        # ours, finished, but its watcher has not noticed yet: the new run
+        # takes a suffixed id, and the old bar - a failure, usually, since
+        # this is what re-running after one looks like - retires now rather
+        # than sitting beside the new one for half an hour
+        prev["superseded"] = True
     n = 2
     while "%s-%d" % (base, n) in st["jobs"]:
         n += 1
@@ -1449,6 +1455,8 @@ def pick_jobs(st, cfg, session_id=None, apply_visibility=True, scoped=True):
     for j in st["jobs"].values():
         if j.get("state") in ACTIVE_STATES:
             pass
+        elif j.get("superseded"):
+            continue                    # re-run under a new id; that one is the bar
         else:
             failed = j.get("state") in ("failed", "stalled")
             linger = cfg["keep_failed_seconds"] if failed else cfg["keep_done_seconds"]
@@ -2108,10 +2116,22 @@ def slurm_probe(job_id, cwd=None):
 
     # The job as a whole. Anything still running or queued outranks the tasks
     # that have finished: a job is over only when none of it is left.
+    requeued = False
     if tally["running"]:
         state = "running"
     elif tally["queued"]:
         state = "queued"
+    elif tally["failed"] and tally["done"] and source == "sacct" and any(
+            (rec.get("State") or "").split("_BY_")[0].split()[0] in REQUEUE_STATES
+            for rec in recs if rec.get("State")) and classify_slurm(
+            recs[-1].get("JobState") or recs[-1].get("State")) == "done":
+        # sacct lists every attempt. A job that was preempted and requeued has
+        # a PREEMPTED row and then the row that finished; the first is history,
+        # and calling the whole job failed on it reported a run that completed
+        # as one that died.
+        state = "done"
+        requeued = True
+        word = (recs[-1].get("JobState") or recs[-1].get("State") or "").strip()
     elif tally["failed"]:
         state = "failed"
     elif tally["done"]:
@@ -2123,7 +2143,7 @@ def slurm_probe(job_id, cwd=None):
             "run_seconds": run_seconds, "limit_seconds": limit_seconds,
             "tasks_total": total, "tasks_done": tally["done"] + tally["failed"],
             "tasks_running": tally["running"], "tasks_queued": tally["queued"],
-            "tasks_failed": tally["failed"]}
+            "tasks_failed": tally["failed"], "requeued": requeued}
 
 
 def apply_batch_info(job, info, now):
@@ -2924,6 +2944,57 @@ def reap_ended(session_id=None, now=None):
     except Exception:
         return reaped
     return reaped
+
+REQUEUE_STATES = {"PREEMPTED", "NODE_FAIL", "REQUEUED", "BOOT_FAIL"}
+
+
+def revive_stalled(session_id=None, now=None):
+    """A stalled job that has started writing again is running again.
+
+    Stalled means only that nothing was seen for a long time; it is the
+    watcher giving up, not the job ending. A job that resumes - a training
+    run restarted from its checkpoint into the same log - was left frozen at
+    the pause glyph with nothing watching it. Any growth in the log since it
+    was declared stalled is life: the record goes back to running and, unless
+    it asked for no watcher, gets one."""
+    now = now or time.time()
+    try:
+        snapshot = state_ro()
+    except Exception:
+        return []
+    def woke(job):
+        if job.get("state") != "stalled" or not job.get("log"):
+            return False
+        try:
+            st_ = os.stat(job["log"])
+        except OSError:
+            return False
+        since = job.get("ended") or job.get("updated") or 0
+        return st_.st_mtime > since or (job.get("size_bytes") or 0) < st_.st_size
+    candidates = [jid for jid, job in snapshot["jobs"].items()
+                  if isinstance(job, dict) and woke(job) and job_belongs_here(job, session_id)]
+    if not candidates:
+        return []
+    revived = []
+    try:
+        with state_rw() as st:
+            for jid in candidates:
+                job = st["jobs"].get(jid)
+                if job is None or not woke(job):
+                    continue
+                job["state"] = "running"
+                job["ended"] = None
+                job["exit_code"] = None
+                job["updated"] = now
+                job["note"] = (job.get("note") or "").replace("[no progress seen]", "").strip() or None
+                job["resumed"] = (job.get("resumed") or 0) + 1
+                if not job.get("no_watch"):
+                    job["watcher_pid"] = spawn_watcher(jid)
+                revived.append(jid)
+    except Exception:
+        return revived
+    return revived
+
 
 OBSERVED_FIELDS = ("milestones_hit", "size_bytes", "scheduler_state")
 

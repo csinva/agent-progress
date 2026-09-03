@@ -9,6 +9,7 @@ the installer.
 import importlib.util
 import json
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -836,6 +837,73 @@ r = subprocess.run([sys.executable, os.path.join(HOOKS, "auto_track.py")],
                    input=json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}, "session_id": "src"}),
                    capture_output=True, text=True, env=renv)
 ck("nothing is rewritten", r.stdout.strip() == "", r.stdout[:120])
+shutil.rmtree(home, ignore_errors=True)
+
+print()
+print("=== a job that resumes after a failure gets its bar back ===")
+# stalled, then the log grows again: the pause glyph was permanent
+home, renv = reap_home()
+renv = dict(renv, CLAUDE_CODE_SESSION_ID="rs")
+rlog = os.path.join(home, "t.log")
+open(rlog, "w").write("epoch 1/10\n")
+subprocess.run([sys.executable, ENGINE, "start", "t", "--log", rlog, "--eta", "1h", "--no-watch"],
+               capture_output=True, env=renv)
+with open(os.path.join(home, "state.json")) as fh:
+    stx = json.load(fh)
+stx["jobs"]["t"]["no_watch"] = False
+json.dump(stx, open(os.path.join(home, "state.json"), "w"))
+wp = subprocess.Popen([sys.executable, ENGINE, "_watch", "t", "--max-idle", "1", "--interval", "1"],
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=renv)
+deadline = time.time() + 30
+while time.time() < deadline and [j for j in records(home) if j.get("id") == "t"][0].get("state") != "stalled":
+    time.sleep(0.5)
+ck("a quiet log-only job is called stalled", [j for j in records(home) if j.get("id") == "t"][0].get("state") == "stalled")
+time.sleep(1.1)
+open(rlog, "a").write("epoch 2/10\nepoch 3/10\n")
+hook(renv, "UserPromptSubmit", "rs", prompt="hi")
+rec = [j for j in records(home) if j.get("id") == "t"][0]
+ck("once its log grows, a prompt brings it back to running", rec.get("state") == "running", str(rec.get("state")))
+ck("with a watcher of its own again", cc.alive(rec.get("watcher_pid")), str(rec.get("watcher_pid")))
+deadline = time.time() + 20
+while time.time() < deadline and [j for j in records(home) if j.get("id") == "t"][0].get("step") != 3:
+    time.sleep(0.5)
+ck("and the new progress is read", [j for j in records(home) if j.get("id") == "t"][0].get("step") == 3,
+   str([j for j in records(home) if j.get("id") == "t"][0].get("step")))
+_rc, said = hook(renv, "Stop", "rs")
+ck("nothing is reported about it", said == "", repr(said[:80]))
+sandbox.kill_watchers(cc)
+try:
+    wp.kill()
+except OSError:
+    pass
+shutil.rmtree(home, ignore_errors=True)
+
+# failed by hand, then re-run at once while the old watcher still lives: the
+# failed bar retires rather than sitting beside the new run for half an hour
+home, renv = reap_home()
+renv = dict(renv, CLAUDE_CODE_SESSION_ID="rr")
+subprocess.run([sys.executable, ENGINE, "run", "--name", "train", "--eta", "1h", "--force-show", "--", "sleep", "30"],
+               capture_output=True, env=renv)
+subprocess.run([sys.executable, ENGINE, "fail", "train", "--exit-code", "3"], capture_output=True, env=renv)
+first = [j for j in records(home) if j.get("id") == "train"][0]
+ck("the first run is marked failed while its watcher still lives",
+   first.get("state") == "failed" and cc.alive(first.get("watcher_pid")), str((first.get("state"), first.get("watcher_pid"))))
+subprocess.run([sys.executable, ENGINE, "run", "--name", "train", "--eta", "1h", "--force-show", "--", "sleep", "30"],
+               capture_output=True, env=renv)
+ids = sorted(j.get("id") for j in records(home))
+ck("the re-run gets an id of its own", ids == ["train", "train-2"], str(ids))
+ck("and the old record is marked superseded", [j for j in records(home) if j.get("id") == "train"][0].get("superseded") is True)
+r = subprocess.run([sys.executable, ENGINE, "statusline", "--width", "120"], input=json.dumps({"session_id": "rr"}),
+                   capture_output=True, text=True, env=renv)
+shown = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout)
+ck("only the new run is on the bar", "train-2" in shown and shown.count("train") == 1, shown[:200])
+for j in records(home):
+    for pid in (j.get("pid"), j.get("watcher_pid")):
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except (OSError, TypeError, ValueError):
+            pass
+sandbox.kill_watchers(cc)
 shutil.rmtree(home, ignore_errors=True)
 
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))

@@ -374,6 +374,33 @@ ck("a PBS job that finished with a non-zero status is failed", job("pbsfail").ge
    str(job("pbsfail").get("state")))
 run("rm", "--all", "--force")
 
+print()
+print("=== a requeued job ends on its last attempt ===")
+slurm_says(scontrol="JobId=55 JobState=RUNNING Reason=None TimeLimit=02:00:00 RunTime=00:10:00 NodeList=gpu-1\n")
+run("slurm", "55", "--name", "rq", "--interval", "1s")
+time.sleep(2)
+slurm_says(scontrol="JobId=55 JobState=PENDING Reason=Requeued TimeLimit=02:00:00 RunTime=00:00:00 NodeList=(null)\n",
+           sacct="PREEMPTED|00:10:00|2026-09-01T10:00:00|0:0|gpu-1\n")
+ck("preempted and requeued reads as queued again", until(lambda: job("rq").get("state") == "queued", 30),
+   str(job("rq").get("state")))
+slurm_says(scontrol="JobId=55 JobState=RUNNING Reason=None TimeLimit=02:00:00 RunTime=00:01:00 NodeList=gpu-2\n",
+           sacct="PREEMPTED|00:10:00|2026-09-01T10:00:00|0:0|gpu-1\nRUNNING|00:01:00|2026-09-01T10:20:00|0:0|gpu-2\n")
+ck("and running again when it restarts", until(lambda: job("rq").get("state") == "running", 30),
+   str(job("rq").get("state")))
+slurm_says(sacct="PREEMPTED|00:10:00|2026-09-01T10:00:00|0:0|gpu-1\nCOMPLETED|00:30:00|2026-09-01T10:20:00|0:0|gpu-2\n")
+until(lambda: job("rq").get("state") not in ("running", "queued"), 60)
+ck("the attempt that completed decides: done, not failed", job("rq").get("state") == "done",
+   "%s %s" % (job("rq").get("state"), job("rq").get("scheduler_state")))
+run("rm", "--all", "--force")
+slurm_says(scontrol="JobId=56 JobState=RUNNING Reason=None TimeLimit=02:00:00 RunTime=00:10:00 NodeList=gpu-1\n")
+run("slurm", "56", "--name", "rq2", "--interval", "1s")
+time.sleep(2)
+slurm_says(sacct="PREEMPTED|00:10:00|2026-09-01T10:00:00|0:0|gpu-1\nFAILED|00:05:00|2026-09-01T10:20:00|1:0|gpu-2\n")
+until(lambda: job("rq2").get("state") not in ("running", "queued"), 60)
+ck("but a requeued attempt that failed is still a failure", job("rq2").get("state") == "failed",
+   str(job("rq2").get("state")))
+run("rm", "--all", "--force")
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

@@ -906,6 +906,26 @@ for j in records(home):
 sandbox.kill_watchers(cc)
 shutil.rmtree(home, ignore_errors=True)
 
+print()
+print("=== the watcher's error log is bounded ===")
+home, renv = reap_home()
+os.environ["AGENT_PROGRESS_HOME"] = home
+big = os.path.join(home, "watcher.log")
+open(big, "wb").write(b"x" * (1024 * 1024 + 10))
+open(os.path.join(home, "wl.log"), "w").write("x\n")
+wl = subprocess.run([sys.executable, ENGINE, "start", "wl", "--eta", "1h", "--log", os.path.join(home, "wl.log")],
+                    capture_output=True, text=True, env=renv)
+time.sleep(1)
+ck("a watcher.log over a megabyte is rotated when a watcher starts",
+   os.path.exists(big + ".1") and os.path.getsize(big) < 1024 * 1024, str(os.listdir(home)))
+sandbox.kill_watchers(cc)
+for j in records(home):
+    try:
+        os.kill(int(j.get("watcher_pid")), signal.SIGKILL)
+    except (OSError, TypeError, ValueError):
+        pass
+shutil.rmtree(home, ignore_errors=True)
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

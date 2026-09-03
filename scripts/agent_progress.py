@@ -986,7 +986,7 @@ def estimate(job, now=None, cfg=None):
     cfg = cfg or load_config()
     started = job.get("started") or now
     ended = job.get("ended")
-    elapsed = (ended or now) - started
+    elapsed = max(0.0, (ended or now) - started)    # clocks differ between machines
 
     total = job.get("total")
     units = job.get("units")            # step + sub-step fraction, a float
@@ -2413,9 +2413,21 @@ def enqueue_crash(st, job, now, kind="crash"):
         "duration": (job.get("ended") or now) - (job.get("started") or now),
         "session_id": job.get("session_id"),
         "bridge_id": job.get("bridge_id"),
+        "note": job.get("note"),
+        "auto_launched": bool(job.get("auto_launched")),
         "delivered": None,
     })
     trim_inbox(st)
+
+
+def cut_short_by_caller(ev):
+    """Was this a wrapped foreground command stopped by a signal - which is to
+    say, almost always, the Bash tool's timeout - rather than a program that
+    crashed? The two need opposite advice: a crash wants a diagnosis; a
+    timeout wants the job launched detached so the call can return."""
+    return (bool(ev.get("auto_launched")) and (ev.get("note") or "").startswith("killed by")
+            and ev.get("exit_code") in (128 + signal.SIGTERM, 128 + signal.SIGINT,
+                                        128 + signal.SIGKILL, 128 + signal.SIGHUP))
 
 
 CRASH_KEEP = 50         # the comfortable size of the queue
@@ -2519,11 +2531,15 @@ def format_beside(ev, cfg=None):
     if ev.get("duration") is not None:
         head += " after %s" % fmt_dur(ev["duration"])
     lines = [head]
+    if cut_short_by_caller(ev):
+        lines.append("  stopped by %s - the tool's timeout, most likely; "
+                     "`agent-progress run` lets it finish" % (ev.get("reason_short") or "a signal"))
     if ev.get("handover"):
         lines.append("  (started by another session, which has since gone)")
     for ln in (ev.get("log_tail") or "").splitlines()[-6:]:
         lines.append("  " + ln[:120])
-    lines.append("  agent-progress log %s -n 60" % (ev.get("job") or "<id>"))
+    if ev.get("log") and os.path.exists(ev["log"]):
+        lines.append("  agent-progress log %s -n 60" % (ev.get("job") or "<id>"))
     return "\n".join(lines)
 
 
@@ -2547,6 +2563,8 @@ def format_report(ev, cfg=None):
             "%s A job from ANOTHER session %s, and that session never collected the "
             "report - it has probably exited. This was not your job: say so if you "
             "mention it, and do not re-run it." % (glyph, word.lower()))
+    if cut_short_by_caller(ev):
+        word = "was STOPPED"
     lines.append("%s A tracked job %s while you were working: '%s'"
                  % (glyph, word, ev.get("job")))
     if ended_well:
@@ -2556,8 +2574,8 @@ def format_report(ev, cfg=None):
     if ev.get("cmd"):
         cmd = command_for_display(ev["cmd"])
         lines.append("  command: %s" % (cmd[:200] + ("..." if len(cmd) > 200 else "")))
-    if ev.get("log"):
-        lines.append("  log: %s" % ev["log"])
+    if ev.get("log") and os.path.exists(ev["log"]):
+        lines.append("  log: %s" % ev["log"])      # a wrapper's log goes with the wrapper
     if ev.get("log_tail"):
         lines.append("  last output:")
         for ln in ev["log_tail"].splitlines()[-15:]:
@@ -2566,6 +2584,17 @@ def format_report(ev, cfg=None):
         lines.append("Tell the user it finished and what it produced, reading the result "
                      "out of the output above. `agent-progress log %s -n 60` if you need "
                      "more of it. Do not re-run it." % (ev.get("job") or "<id>"))
+    elif cut_short_by_caller(ev):
+        lines.append("This is not the program crashing: the command was stopped by %s - "
+                     "almost certainly the Bash tool's timeout running out while it was "
+                     "still going. It needs longer than a foreground call allows. Launch "
+                     "it detached, so the call returns at once and the job reports here "
+                     "when it ends:\n"
+                     "  agent-progress run --name %s --eta <your estimate> -- %s\n"
+                     "Do not re-run it in the foreground the same way; that would only "
+                     "time out again."
+                     % (ev.get("reason_short") or "a signal", ev.get("job") or "<name>",
+                        (ev.get("cmd") or "<command>")[:200]))
     else:
         lines.append("Tell the user this job crashed, summarize why from the output above, "
                      "and suggest a fix if the cause is clear. Do not re-run it without "
@@ -2802,7 +2831,15 @@ def poll_interval(job, cfg, est_total_s):
 def spawn_watcher(jid):
     """Detach a tiny process that tails the log and keeps the job's state fresh."""
     script = os.path.abspath(__file__)
-    err = open(os.path.join(ROOT, "watcher.log"), "a")
+    errlog = os.path.join(ROOT, "watcher.log")
+    try:
+        # bounded: it only ever holds tracebacks, and one that repeats for
+        # months should not grow without limit
+        if os.path.getsize(errlog) > 1024 * 1024:
+            os.replace(errlog, errlog + ".1")
+    except OSError:
+        pass
+    err = open(errlog, "a")
     p = subprocess.Popen(
         [sys.executable, script, "_watch", jid],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,

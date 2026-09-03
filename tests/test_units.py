@@ -652,6 +652,25 @@ for text in ("1 month", "3 hz", "2 dozen", "1 mile"):
     except SystemExit:
         ck("%r is refused" % text, True)
 
+print()
+print("=== a job cut short by its caller is not a crash ===")
+ev = {"kind": "crash", "job": "train", "exit_code": 143, "reason_short": "SIGTERM", "reason": "SIGTERM - terminated",
+      "cmd": "python train.py", "log": "/nonexistent/train.log", "log_tail": "epoch 1", "duration": 120,
+      "note": "killed by SIGTERM", "auto_launched": True}
+rep = cc.format_report(ev)
+ck("the report says stopped, not crashed", "STOPPED" in rep and "CRASHED" not in rep, rep[:80])
+ck("and tells Claude the likely cause and the way out", "timeout" in rep and "agent-progress run --name train" in rep, rep[-300:])
+ck("and does not point at a log that is gone", "log:" not in rep and "agent-progress log" not in rep, rep)
+side = cc.format_beside(ev)
+ck("the person's version says the same in a line", "timeout" in side and "agent-progress run" in side, side)
+ev2 = dict(ev, note=None, auto_launched=False, exit_code=1, reason_short="exit 1")
+ck("an ordinary failure is still called a crash", "CRASHED" in cc.format_report(ev2) and "timeout" not in cc.format_report(ev2))
+ev3 = dict(ev, auto_launched=False)
+ck("a run job killed by a signal is a crash, not a timeout", "timeout" not in cc.format_report(ev3))
+j = {"state": "running", "started": time.time() + 3600, "samples": []}
+ck("a start in the future - another machine's clock - is not a negative elapsed", cc.estimate(j)["elapsed"] == 0.0,
+   str(cc.estimate(j)["elapsed"]))
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

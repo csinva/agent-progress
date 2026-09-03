@@ -1080,12 +1080,18 @@ def _unit_seconds(word):
     """'h', 'hr', 'hours', 'min', 'd', 'days', 'ms', ... -> seconds, or None."""
     if not word:
         return 1.0                       # a bare number is seconds
-    if word == "ms" or word.startswith("milli"):
-        return 0.001
-    for letter in "smhdw":
-        if word.startswith(letter):
-            return float(_UNIT_SECONDS[letter])
-    return None
+    spellings = {
+        "ms": ("ms", "msec", "msecs", "millisecond", "milliseconds", "millis"),
+        "s": ("s", "sec", "secs", "second", "seconds"),
+        "m": ("m", "min", "mins", "minute", "minutes"),
+        "h": ("h", "hr", "hrs", "hour", "hours"),
+        "d": ("d", "day", "days"),
+        "w": ("w", "wk", "wks", "week", "weeks"),
+    }
+    for unit, words in spellings.items():
+        if word in words:
+            return float(_UNIT_SECONDS[unit])
+    return None                          # "10 msec" is not ten minutes; "1 month" is not a minute
 
 
 def parse_duration(text):
@@ -1568,8 +1574,9 @@ AUTO_TRACK_IGNORE = [
 # thing being run.
 _NAME_HINTS = [
     r"([\w.-]{1,80})\.py\b",
+    r"([\w.-]{1,80})\.sh\b",
     r"\b(?:npm|pnpm|yarn|cargo|go|docker|terraform|dbt|dvc|bazel)\s+(?:run\s+)?(\w{1,40})",
-    r"^\s*(?:sudo\s+)?([\w.-]{1,80})",
+    r"^\s*(?:sudo\s+)?(?:\S*/)?([\w.-]{1,80})",     # the basename of `./scripts/run.sh`
 ]
 
 
@@ -1615,6 +1622,7 @@ def command_segments(command, cap=400, most=40):
     writes five thousand lines of data and then runs the job keeps the job,
     which taking only the first forty segments would have thrown away."""
     text = HEREDOC.sub(" ", command or "")
+    text = re.sub(r"\\\n", " ", text)         # a continuation line is the same line
     parts = [seg.strip()[:cap] for seg in SEPARATORS.split(text) if seg.strip()]
     if len(parts) <= most:
         return parts
@@ -1625,8 +1633,14 @@ def command_segments(command, cap=400, most=40):
 _SHELL_STATE = re.compile(
     r"\s*(?:cd|pushd|popd|export|source|\.|alias|unalias|unset|nohup|disown)(?:\s|$)"
     r"|\s*[A-Za-z_][A-Za-z0-9_]*=\S*\s*$")
+# `source` and `.` are deliberately not here: what a sourced file defines -
+# functions, unexported variables - has to be in the shell that runs the work,
+# and the work runs in the wrapper's own shell. Such a command is left whole.
+# A backslash is excluded from the argument too: `cd /tmp \` + newline + `&& x`
+# is one line to the shell, and cutting it at the newline handed the launcher
+# to `cd` as arguments.
 _LEADING_STATE = re.compile(
-    r"\A(\s*(?:cd|pushd|export|source|\.)(?:\s[^;&|\n\'\"`$()]*)?(?:&&|;|\n)\s*)")
+    r"\A(\s*(?:cd|pushd|export)(?:\s[^;&|\n\'\"`$()\\]*)?(?:&&|;|\n)\s*)")
 
 
 def split_shell_prefix(command):
@@ -1715,7 +1729,8 @@ def classify_command(command, tool_input=None, cfg=None):
     if body is None:
         result["why"] = "part of it changes the shell it runs in, or leaves it"
         return result
-    if re.search(r"(?<![&|>])&\s*(?:#[^\n]*)?$", head):
+    last = re.sub(r"(?:^|\s)#[^\n]*$", "", head.rstrip().split("\n")[-1])
+    if re.search(r"(?<![&|>])&\s*$", last):
         result["why"] = "it puts itself in the background"
         return result
     result["prefix"], result["body"] = prefix, body
@@ -3846,9 +3861,15 @@ def cmd_finish(args, state):
         jid = resolve(st, args.job, mutating=True,
                       any_session=getattr(args, "any_session", False))
         snapshot = dict(st["jobs"][jid])
-    if snapshot.get("state") not in ACTIVE_STATES:
+    if snapshot.get("state") not in ACTIVE_STATES and snapshot.get("state") != "stalled":
         if snapshot.get("state") == state:
-            _announce(snapshot)          # saying it twice is harmless
+            # saying it twice is harmless, and a note that came with it is kept
+            if getattr(args, "note", None):
+                with state_rw() as st:
+                    if jid in st["jobs"]:
+                        st["jobs"][jid]["note"] = one_line(args.note)
+                        snapshot = dict(st["jobs"][jid])
+            _announce(snapshot)
             return 0
         # but `cancel` on a job that finished must not rewrite how it ended
         raise SystemExit("%s already ended (%s); nothing to mark"
@@ -4012,6 +4033,15 @@ def cmd_log(args):
     return 0
 
 
+def _discard_unless_live(job):
+    """A forgotten job's files go with it - unless the job is still running,
+    when the wrapper is still streaming that log to its caller and will remove
+    it itself on the way out. Unlinking it under the wrapper cut the caller's
+    output short."""
+    if job.get("state") not in ACTIVE_STATES:
+        _discard_auto_files(job)
+
+
 def cmd_rm(args):
     # `rm --all` inside a session clears that session's work, not the machine's.
     # Several agents share this file, and one of them tidying up should not throw
@@ -4059,7 +4089,7 @@ def cmd_rm(args):
             kept = sum(1 for k, v in st["jobs"].items() if ours(v) and k not in gone)
             others = elsewhere(st["jobs"].values())
             for k in gone:
-                _discard_auto_files(st["jobs"].pop(k))
+                _discard_unless_live(st["jobs"].pop(k))
             print("removed %d job(s)%s%s"
                   % (len(gone), " from this session" if scoped else "",
                      note(kept, others)))
@@ -4095,7 +4125,7 @@ def cmd_rm(args):
                     "  agent-progress rm %s --force  forget it and let it run on"
                     % (jid, st["jobs"][jid].get("pid"), jid, jid))
                 continue
-            _discard_auto_files(st["jobs"].pop(jid))
+            _discard_unless_live(st["jobs"].pop(jid))
             removed.append(jid)
     for jid in removed:
         print("removed %s" % jid)

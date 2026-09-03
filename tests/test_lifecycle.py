@@ -796,6 +796,48 @@ ck("and the prompt hook hands it to Claude", "ctx" in r.stdout and "additionalCo
 sandbox.kill_watchers(cc)
 shutil.rmtree(home, ignore_errors=True)
 
+print()
+print("=== forgetting a running wrapped job does not cut its output ===")
+home, renv = reap_home()
+wr = subprocess.Popen([sys.executable, ENGINE, "exec", "--name", "pump", "--after", "0.1", "--shell",
+                       "for i in 1 2 3 4 5 6; do echo line$i; sleep 0.3; done; exit 7"],
+                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=renv)
+time.sleep(0.9)
+r = subprocess.run([sys.executable, ENGINE, "rm", "pump", "--force"], capture_output=True, text=True, env=renv)
+out, _ = wr.communicate(timeout=30)
+ck("rm --force forgot the record", "removed pump" in r.stdout, r.stdout + r.stderr)
+ck("and the caller still got every line", out == "".join("line%d\n" % i for i in range(1, 7)), repr(out))
+ck("with the command's own exit code", wr.returncode == 7, str(wr.returncode))
+ck("and no files left behind", not os.listdir(os.path.join(home, "logs")), str(os.listdir(os.path.join(home, "logs"))))
+sandbox.kill_watchers(cc)
+shutil.rmtree(home, ignore_errors=True)
+
+print()
+print("=== a stalled job can still be closed by hand ===")
+home, renv = reap_home()
+subprocess.run([sys.executable, ENGINE, "start", "st", "--eta", "1h", "--no-watch"], capture_output=True, env=renv)
+stf = os.path.join(home, "state.json")
+st = json.load(open(stf)); st["jobs"]["st"]["state"] = "stalled"; st["jobs"]["st"]["ended"] = time.time()
+json.dump(st, open(stf, "w"))
+r = subprocess.run([sys.executable, ENGINE, "done", "st", "--note", "it was fine"], capture_output=True, text=True, env=renv)
+rec = [j for j in records(home) if j.get("id") == "st"][0]
+ck("done on a stalled job is accepted", r.returncode == 0 and rec["state"] == "done", str((r.returncode, rec["state"])))
+r = subprocess.run([sys.executable, ENGINE, "done", "st", "--note", "second note"], capture_output=True, text=True, env=renv)
+rec = [j for j in records(home) if j.get("id") == "st"][0]
+ck("a repeated done keeps the note it came with", r.returncode == 0 and rec.get("note") == "second note", str(rec.get("note")))
+shutil.rmtree(home, ignore_errors=True)
+
+print()
+print("=== the hook leaves a sourced command whole ===")
+home, renv = reap_home()
+lib = os.path.join(home, "lib.sh"); open(lib, "w").write("myfunc() { echo from-func; }\nLR=0.1\n")
+cmd = "source %s && python train.py && myfunc" % lib
+r = subprocess.run([sys.executable, os.path.join(HOOKS, "auto_track.py")],
+                   input=json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}, "session_id": "src"}),
+                   capture_output=True, text=True, env=renv)
+ck("nothing is rewritten", r.stdout.strip() == "", r.stdout[:120])
+shutil.rmtree(home, ignore_errors=True)
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

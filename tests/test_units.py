@@ -624,6 +624,34 @@ ck("the name comes from the work, not the cd", verdict("cd /tmp && python train.
 ck("clip adds no escape code to a plain line", "\033" not in cc.clip("a" * 50, 20))
 ck("but keeps colour balanced when there was some", cc.clip("\033[31m" + "a" * 50, 20).endswith("\033[0m"))
 
+print()
+print("=== the prefix split knows its limits ===")
+cfg = load_cfg = cc.load_config()
+def verdict(c):
+    return cc.classify_command(c, {}, cfg)
+ck("a continuation line inside a cd is not cut", not verdict("cd /tmp \\\n  && python train.py")["track"])
+ck("source is never split from the work: the command is left whole",
+   not verdict("source lib.sh && python train.py")["track"] and not verdict(". lib.sh; python train.py")["track"])
+v = verdict("python train.py \\\n  model=resnet \\\n  data=cifar")
+ck("hydra overrides on continuation lines are still tracked", v["track"], v["why"])
+ck("make VAR=x on a continuation line is still tracked", verdict("make \\\n  CC=gcc")["track"])
+ck("an & inside a trailing comment is not backgrounding", verdict("pytest # trailing &")["track"]
+   and verdict("pytest; # &")["track"])
+ck("a real trailing & still is", not verdict("pytest &")["track"] and not verdict("pytest 2>&1 &")["track"])
+ck("a && b is not backgrounding", verdict("make && python train.py")["track"])
+ck("./train.sh is named train", cc.suggest_job_name("./train.sh") == "train", cc.suggest_job_name("./train.sh"))
+ck("./scripts/run_eval.sh --x is named run_eval", cc.suggest_job_name("./scripts/run_eval.sh --x") == "run_eval",
+   cc.suggest_job_name("./scripts/run_eval.sh --x"))
+ck("bash train.sh is named train", cc.suggest_job_name("bash train.sh") == "train", cc.suggest_job_name("bash train.sh"))
+for text, want in (("10 msec", 0.01), ("5 secs", 5), ("3 hrs", 10800), ("2 days", 172800), ("1 hour 5 minutes", 3900)):
+    ck("%r -> %s" % (text, want), abs(cc.parse_duration(text) - want) < 1e-9, str(cc.parse_duration(text)))
+for text in ("1 month", "3 hz", "2 dozen", "1 mile"):
+    try:
+        cc.parse_duration(text)
+        ck("%r is refused" % text, False, "accepted")
+    except SystemExit:
+        ck("%r is refused" % text, True)
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

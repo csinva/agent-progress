@@ -4184,6 +4184,18 @@ def cmd_log(args):
     return 0
 
 
+def _forget_reports(st, jids):
+    """A job the user has forgotten has nothing left to say. Its undelivered
+    reports went on being delivered - "train crashed" about a record that
+    had been removed on purpose - and, with nothing to remove them, they
+    accumulated across runs in a shared state directory."""
+    inbox = st.get("inbox")
+    if not isinstance(inbox, list) or not jids:
+        return
+    st["inbox"] = [e for e in inbox
+                   if not (isinstance(e, dict) and e.get("job") in jids and not e.get("delivered"))]
+
+
 def _discard_unless_live(job):
     """A forgotten job's files go with it - unless the job is still running,
     when the wrapper is still streaming that log to its caller and will remove
@@ -4241,6 +4253,7 @@ def cmd_rm(args):
             others = elsewhere(st["jobs"].values())
             for k in gone:
                 _discard_unless_live(st["jobs"].pop(k))
+            _forget_reports(st, set(gone))
             print("removed %d job(s)%s%s"
                   % (len(gone), " from this session" if scoped else "",
                      note(kept, others)))
@@ -4253,6 +4266,7 @@ def cmd_rm(args):
             others = elsewhere(done_jobs)
             for k in gone:
                 _discard_auto_files(st["jobs"].pop(k))
+            _forget_reports(st, set(gone))
             print("removed %d finished job(s)%s" % (len(gone), note(0, others)))
             return 0
         # Every name is looked at before anything is printed. Raising on the
@@ -4279,6 +4293,7 @@ def cmd_rm(args):
                 continue
             _discard_unless_live(st["jobs"].pop(jid))
             removed.append(jid)
+        _forget_reports(st, set(removed))
     for jid in removed:
         print("removed %s" % jid)
     for why in refused:

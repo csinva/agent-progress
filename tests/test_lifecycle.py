@@ -150,9 +150,13 @@ ck("and the one that died as a crash", _kinds.get("wentbadly") == "crash", str(_
 ck("the listing does not call a success a crash",
    "wentwell" in _listing and "status 0" not in _listing, _listing[:100])
 ck("and still calls a death a death", "wentbadly" in _listing, _listing[:100])
-_report = cli("inbox", "--drain").stdout
+# drain claims the oldest report first, and nothing orders which of the two
+# watchers wrote first - so look at both, not at whichever came out first
+_reports = [cli("inbox", "--drain").stdout for _ in range(2)]
+_finished = [r for r in _reports if "wentwell" in r]
 ck("a drained report carries the job's own output",
-   "the answer is 42" in _report or "FINISHED" in _report, _report[:90])
+   bool(_finished) and "the answer is 42" in _finished[0] and "FINISHED" in _finished[0],
+   " | ".join(r[:60] for r in _reports))
 sandbox.kill_watchers(cc)
 cli("rm", "--all", "--force")
 with cc.state_rw() as st:
@@ -924,6 +928,41 @@ for j in records(home):
         os.kill(int(j.get("watcher_pid")), signal.SIGKILL)
     except (OSError, TypeError, ValueError):
         pass
+shutil.rmtree(home, ignore_errors=True)
+
+print()
+print("=== a forgotten job has nothing left to say ===")
+home, renv = reap_home()
+renv = dict(renv, CLAUDE_CODE_SESSION_ID="fg")
+subprocess.run([sys.executable, ENGINE, "run", "--name", "gone", "--eta", "1h", "--", "sh", "-c", "sleep 1; exit 2"],
+               capture_output=True, env=renv)
+subprocess.run([sys.executable, ENGINE, "run", "--name", "kept", "--eta", "1h", "--", "sh", "-c", "sleep 1; exit 3"],
+               capture_output=True, env=renv)
+deadline = time.time() + 30
+while time.time() < deadline and any(j.get("state") == "running" for j in records(home)):
+    time.sleep(0.5)
+time.sleep(1)
+deadline = time.time() + 20          # the record and its report are written together; wait for both
+while time.time() < deadline:
+    _st = json.load(open(os.path.join(home, "state.json")))
+    pending = [e.get("job") for e in _st.get("inbox", []) if not e.get("delivered")]
+    if sorted(pending) == ["gone", "kept"]:
+        break
+    time.sleep(0.5)
+_wl = os.path.join(home, "watcher.log")
+ck("both deaths are waiting to be reported", sorted(pending) == ["gone", "kept"],
+   "pending=%s states=%s inbox=%s watcher.log=%r" % (
+       pending, {k: (v.get("state"), v.get("exit_code"), v.get("note")) for k, v in _st["jobs"].items()},
+       [(e.get("job"), e.get("delivered")) for e in _st.get("inbox", [])],
+       open(_wl).read()[-400:] if os.path.exists(_wl) else ""))
+subprocess.run([sys.executable, ENGINE, "rm", "gone"], capture_output=True, env=renv)
+_rc, said = hook(renv, "Stop", "fg")
+ck("forgetting one drops its report", "gone" not in said, repr(said[:120]))
+ck("and the other's still arrives", "kept" in said and "exit 3" in said, repr(said[:120]))
+subprocess.run([sys.executable, ENGINE, "rm", "--all", "--force"], capture_output=True, env=renv)
+left = [e for e in json.load(open(os.path.join(home, "state.json"))).get("inbox", []) if not e.get("delivered")]
+ck("rm --all leaves no undelivered report behind", not left, str(left))
+sandbox.kill_watchers(cc)
 shutil.rmtree(home, ignore_errors=True)
 
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))

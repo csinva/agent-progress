@@ -443,7 +443,12 @@ AGENT_PROGRESS_NO_AUTO=1 <command>                         # just this once
 ```
 
 Nothing is ever silently allowed past a permission prompt: the rewritten command
-still goes through the normal approval flow.
+still goes through the normal approval flow. It is also kept within your allow
+rules: Claude Code checks the rewritten command, so `Bash(python3:*)` would stop
+matching a command that now starts with the plugin's launcher. When your rules
+allow the original, the wrapper takes a form they still match - `python3
+<engine> …` or `bash -c '…'` - and when no such form exists the command runs
+untouched, without a bar, rather than trip a prompt you had settled.
 
 ## What counts as progress
 

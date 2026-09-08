@@ -1896,6 +1896,106 @@ def launcher_is_on_path():
     return bool(shutil.which("agent-progress"))
 
 
+# ---------------------------------------------------------- permission rules
+#
+# Claude Code checks a Bash command against the user's permission rules after
+# hooks have had their say - so a command the user allowed, `Bash(python3:*)`,
+# stops being allowed the moment it is rewritten to start with this plugin's
+# launcher. Interactively that is a prompt for every tracked command however
+# carefully the allowlist was written; in a non-interactive session it is the
+# command being refused outright, and the plugin breaking automation it was
+# meant to decorate. The rules are never *decided* here - the harness does
+# that - only read, to choose a form of the wrapper the rules still match, or
+# to leave the command alone when there is none.
+
+def permission_allow_rules(cwd=None):
+    """The user's Bash allow rules, from every settings file Claude Code reads."""
+    files = [os.path.join(HOME, ".claude", "settings.json")]
+    if cwd:
+        files += [os.path.join(cwd, ".claude", "settings.json"),
+                  os.path.join(cwd, ".claude", "settings.local.json")]
+    rules = []
+    for path in files:
+        try:
+            with open(path) as f:
+                allow = (json.load(f).get("permissions") or {}).get("allow") or []
+        except Exception:
+            continue
+        for rule in allow:
+            if isinstance(rule, str) and (rule == "Bash" or rule.startswith("Bash(")):
+                rules.append(rule)
+    return rules
+
+
+def rule_allows(command, rules):
+    """Would one of these rules match this command? Conservative: the plain
+    forms only - `Bash`, `Bash(exact command)`, `Bash(prefix:*)`. Anything
+    fancier is treated as not matching, which only ever costs a bar."""
+    text = (command or "").strip()
+    for rule in rules:
+        if rule == "Bash":
+            return True
+        body = rule[len("Bash("):-1] if rule.startswith("Bash(") and rule.endswith(")") else None
+        if body is None:
+            continue
+        if body.endswith(":*"):
+            prefix = body[:-2]
+            if text == prefix or text.startswith(prefix + " "):
+                return True
+        elif text == body:
+            return True
+    return False
+
+
+def _interpreter_ok(tok):
+    """Can `tok` run this engine? Only a Python 3.8+ can, and `python` is
+    still Python 2 on some machines."""
+    path = shutil.which(tok)
+    if not path:
+        return False
+    try:
+        r = subprocess.run([path, "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"],
+                           capture_output=True, timeout=5)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def wrap_within_rules(prefix, body, name, after, cwd=None):
+    """The wrapped command, in the form the user's allow rules are most likely
+    to match.
+
+    Rules given on the command line (`--allowedTools`) are invisible here, so
+    the form that keeps the command's own first token - `python3 <engine> ...`
+    for a Python command, `bash -c '...'` for a script - is preferred whenever
+    it exists: `Bash(python3:*)` goes on matching, and nothing is lost. Rules
+    in the settings files can be read, and when they allow the original but
+    no form of the wrapper, the command runs untouched: a bar is worth less
+    than the command, and far less than the user's permission settings
+    meaning what they say. None means leave it alone."""
+    plain = prefix + wrap_command(body, name, after=after)
+    candidates = []
+    engine = os.path.abspath(__file__)
+    try:
+        tok = shlex.split(body)[0] if body.strip() else ""
+    except (ValueError, IndexError):
+        tok = body.split()[0] if body.split() else ""
+    base = os.path.basename(tok)
+    if base.startswith("python") and _interpreter_ok(tok):
+        candidates.append(prefix + wrap_command(body, name, after=after,
+                                                launcher="%s %s" % (tok, shlex.quote(engine))))
+    elif base in ("bash", "sh", "zsh") and shutil.which(tok):
+        candidates.append(prefix + "%s -c %s" % (tok, shlex.quote(wrap_command(body, name, after=after))))
+    candidates.append(plain)
+    rules = permission_allow_rules(cwd)
+    if rules and rule_allows(prefix + body, rules):
+        for c in candidates:
+            if rule_allows(c, rules):
+                return c
+        return None
+    return candidates[0]
+
+
 def wrap_command(command, name, launcher=None, after=None):
     """The tracked form of a command.
 

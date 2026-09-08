@@ -109,9 +109,11 @@ def main():
         # A leading `cd repo &&` or `export X=1 &&` stays in front, in the
         # caller's own shell, where its effect belongs; the work after it is
         # what gets the bar.
-        wrapped = verdict.get("prefix", "") + cc.wrap_command(
-            verdict.get("body") or command, verdict["name"],
-            after=cfg["auto_track_after_seconds"])
+        wrapped = cc.wrap_within_rules(verdict.get("prefix", ""), verdict.get("body") or command,
+                                       verdict["name"], cfg["auto_track_after_seconds"],
+                                       cwd=data.get("cwd"))
+        if wrapped is None:
+            return 0        # the user's allow rules would not match any wrapper: run it as is
         updated = dict(tool_input, command=wrapped)
         emit({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",

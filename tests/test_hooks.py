@@ -535,6 +535,45 @@ objs, d = _start({"session_id": "u3"}, env=dict(_env, PATH=os.path.join(_h, ".lo
 ck("after installing, session start is silent", not objs, str(objs)[:120])
 shutil.rmtree(_h, ignore_errors=True)
 
+print()
+print("=== the wrapper keeps to the user's permission rules ===")
+# Claude Code checks a command against the allow rules after hooks have
+# rewritten it. A command the user allowed must not become one they did not.
+_rh = tempfile.mkdtemp(prefix="agent-progress-rules-")
+os.makedirs(os.path.join(_rh, ".claude"))
+_rp = tempfile.mkdtemp(prefix="agent-progress-proj-")
+os.makedirs(os.path.join(_rp, ".claude"))
+def _wrap(cmd, rules, project_rules=None):
+    json.dump({"permissions": {"allow": rules}}, open(os.path.join(_rh, ".claude", "settings.json"), "w"))
+    lp = os.path.join(_rp, ".claude", "settings.local.json")
+    if project_rules is not None:
+        json.dump({"permissions": {"allow": project_rules}}, open(lp, "w"))
+    elif os.path.exists(lp):
+        os.remove(lp)
+    r = subprocess.run([sys.executable, os.path.join(HOOKS, "auto_track.py")],
+                       input=json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}, "session_id": "r", "cwd": _rp}),
+                       capture_output=True, text=True,
+                       env=dict(os.environ, HOME=_rh, AGENT_PROGRESS_HOME=os.path.join(_rh, "st"), AGENT_PROGRESS_NOTIFY="false"))
+    return json.loads(r.stdout)["hookSpecificOutput"]["updatedInput"]["command"] if r.stdout.strip() else None
+w = _wrap("python3 train.py", ["Bash(python3:*)"])
+ck("a python3 rule gets a wrapper that starts with python3", w is not None and w.startswith("python3 ") and "agent_progress.py" in w, str(w)[:100])
+ck("and the original command still runs inside it", w is not None and "--shell 'python3 train.py'" in w, str(w)[-60:])
+w = _wrap("bash train.sh", ["Bash(bash:*)"])
+ck("a bash rule gets bash -c around the wrapper", w is not None and w.startswith("bash -c "), str(w)[:80])
+ck("a command the rules allow but no wrapper form could is left alone", _wrap("make train", ["Bash(make:*)"]) is None)
+w = _wrap("python3 train.py", [])
+ck("with no rules known, the python3-first form is still preferred (CLI rules are invisible here)",
+   w is not None and w.startswith("python3 ") and "exec --name" in w, str(w)[:80])
+w = _wrap("make train", [])
+ck("and a command that cannot host the engine gets the plain wrapper", w is not None and "exec --name" in w and not w.startswith("make"), str(w)[:80])
+ck("a bare Bash rule allows everything, so any form is fine", _wrap("python3 train.py", ["Bash"]) is not None)
+ck("an unrelated rule changes nothing", _wrap("python3 train.py", ["Bash(git:*)"]) is not None)
+w = _wrap("python3 train.py", [], project_rules=["Bash(python3:*)"])
+ck("a project's own settings.local.json counts too", w is not None and w.startswith("python3 "), str(w)[:80])
+ck("rule matching is exact about the prefix", not cc.rule_allows("python3x train.py", ["Bash(python3:*)"])
+   and cc.rule_allows("python3", ["Bash(python3:*)"]) and cc.rule_allows("make", ["Bash(make)"]) and not cc.rule_allows("make x", ["Bash(make)"]))
+shutil.rmtree(_rh, ignore_errors=True); shutil.rmtree(_rp, ignore_errors=True)
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

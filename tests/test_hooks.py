@@ -497,13 +497,43 @@ ck("with the shim off PATH, session start names the full path to use",
 _env_on = dict(_env_off, PATH=_bin + os.pathsep + _off)
 r = subprocess.run([sys.executable, STATUS, "SessionStart"], input=json.dumps({"session_id": "fresh2"}),
                    capture_output=True, text=True, env=_env_on)
-ck("with it on PATH, nothing is said", r.stdout.strip() == "", r.stdout[:120])
+_d = json.loads(r.stdout) if r.stdout.strip() else {}
+ck("with it on PATH, no launcher advice is given", "hookSpecificOutput" not in _d, r.stdout[:120])
 r = subprocess.run([sys.executable, ENGINE, "doctor"], capture_output=True, text=True, env=_env_off)
 ck("doctor says the launcher is off PATH and what to use", "NOT on PATH" in r.stdout and "~/.local/bin/agent-progress" in r.stdout,
    r.stdout[-300:])
 r = subprocess.run([sys.executable, ENGINE, "doctor"], capture_output=True, text=True, env=_env_on)
 ck("and that it is on PATH when it is", "agent-progress (on PATH)" in r.stdout, r.stdout[-300:])
 shutil.rmtree(_fresh, ignore_errors=True)
+
+print()
+print("=== a session with no bar to show is told why, once ===")
+_h = tempfile.mkdtemp(prefix="agent-progress-unwired-")
+os.makedirs(os.path.join(_h, ".claude"))
+_off = os.pathsep.join(p for p in os.environ.get("PATH", "").split(os.pathsep) if ".local/bin" not in p)
+_env = dict(os.environ, HOME=_h, PATH=_off, AGENT_PROGRESS_HOME=os.path.join(_h, "state"))
+def _start(payload, env=_env):
+    r = subprocess.run([sys.executable, STATUS, "SessionStart"], input=json.dumps(payload),
+                       capture_output=True, text=True, env=env)
+    objs = [l for l in r.stdout.splitlines() if l.strip()]
+    return objs, (json.loads(objs[0]) if objs else {})
+objs, d = _start({"session_id": "u1", "source": "startup"})
+ck("an unwired statusline is explained to the person", "not wired" in d.get("systemMessage", "")
+   and "install-statusline.sh" in d.get("systemMessage", ""), repr(d)[:160])
+ck("and the launcher advice to Claude rides in the same single object",
+   len(objs) == 1 and "not on PATH" in d.get("hookSpecificOutput", {}).get("additionalContext", ""), str(len(objs)))
+objs, d = _start({"session_id": "u1", "source": "resume"})
+ck("a resume does not repeat the statusline note", "systemMessage" not in d, repr(d)[:120])
+with open(os.path.join(_h, ".claude", "settings.json"), "w") as f:
+    json.dump({"statusLine": {"type": "command", "command": 'python3 "/nowhere/agent_progress.py" statusline'}}, f)
+objs, d = _start({"session_id": "u2"})
+ck("a statusline wired to a missing copy is explained", "no longer exists" in d.get("systemMessage", ""), repr(d)[:160])
+r = subprocess.run(["bash", os.path.join(ROOT, "scripts", "install-statusline.sh")], capture_output=True, text=True, env=_env)
+wired = json.load(open(os.path.join(_h, ".claude", "settings.json")))["statusLine"]["command"]
+ck("the installer wires the interpreter by full path", wired.startswith('"/') and "agent_progress.py" in wired, wired[:80])
+objs, d = _start({"session_id": "u3"}, env=dict(_env, PATH=os.path.join(_h, ".local", "bin") + os.pathsep + _off))
+ck("after installing, session start is silent", not objs, str(objs)[:120])
+shutil.rmtree(_h, ignore_errors=True)
 
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:

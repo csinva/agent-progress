@@ -29,6 +29,17 @@ from _shared import load_engine, read_payload  # noqa: E402
 SIDE_LIMIT = 4000       # what Claude Code will show of a systemMessage
 
 
+OUT = {}      # everything this run has to say, printed once as one JSON object
+
+
+def flush_output():
+    """A hook may print at most one JSON object. Two things to say - a note for
+    the person and a line for Claude - go in the same one."""
+    if OUT:
+        print(json.dumps(OUT))
+        OUT.clear()
+
+
 def show_beside(text):
     """Put something in front of the person without putting it in the conversation.
 
@@ -36,13 +47,13 @@ def show_beside(text):
     the model is reading, so news about a job costs the conversation nothing and
     interrupts nobody. This is the whole point of the side channel: a finished
     job is the user's business first, and only Claude's if they say so."""
-    print(json.dumps({"systemMessage": text[:SIDE_LIMIT]}))
+    OUT["systemMessage"] = ((OUT.get("systemMessage", "") + "\n" + text).strip())[:SIDE_LIMIT]
 
 
 def emit(event, text):
     """Hand something to the model, as part of the user's turn."""
-    print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": event, "additionalContext": text}}))
+    spec = OUT.setdefault("hookSpecificOutput", {"hookEventName": event})
+    spec["additionalContext"] = (spec.get("additionalContext", "") + "\n\n" + text).strip()
 
 
 def still_waiting(cc, cfg, session_id):
@@ -325,6 +336,15 @@ def main():
 
     if event == "SessionStart":
         remember_session(cc, session_id)
+        # Once, when the session actually starts - not again on resume, clear or
+        # compact - the person is told if no bar can appear and what to run.
+        try:
+            if payload.get("source") in (None, "startup"):
+                advice = cc.statusline_advice()
+                if advice:
+                    show_beside(advice)
+        except Exception:
+            pass
         # A fresh install whose ~/.local/bin is not on PATH yet: every
         # `agent-progress ...` the skill suggests would fail with "command not
         # found". One line, once, saying what to type instead.
@@ -384,7 +404,13 @@ def main():
 
 
 if __name__ == "__main__":
+    rc = 0
     try:
-        sys.exit(main())
+        rc = main()
     except Exception:
-        sys.exit(0)   # a hook must never break the session
+        rc = 0        # a hook must never break the session
+    try:
+        flush_output()
+    except Exception:
+        pass
+    sys.exit(rc or 0)

@@ -18,9 +18,10 @@ if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' 2
   exit 1
 fi
 
-python3 - "$SETTINGS" "$ENGINE" "$MODE" <<'PYEOF'
+PY="$(command -v python3)"
+python3 - "$SETTINGS" "$ENGINE" "$MODE" "$PY" <<'PYEOF'
 import json, os, shutil, sys, time
-settings, engine, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+settings, engine, mode, py = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 data = {}
 if os.path.exists(settings):
@@ -52,7 +53,9 @@ else:
         print("      (restore it from the backup above if you want it back)")
     data["statusLine"] = {
         "type": "command",
-        "command": 'python3 "%s" statusline' % engine,
+        # the interpreter by full path: a Claude Code started from a launcher
+        # rather than a terminal may not have the same PATH as this shell
+        "command": '"%s" "%s" statusline' % (py, engine),
         "padding": 0,
     }
     print("statusLine wired to %s" % engine)

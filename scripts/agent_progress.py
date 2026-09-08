@@ -669,11 +669,53 @@ def session_is_new(session_id, st=None):
 
 
 def statusline_wired():
+    return statusline_status()[0] == "ok"
+
+
+def statusline_status():
+    """("ok" | "none" | "missing" | "other", detail).
+
+    "ok" means settings.json runs this engine as the statusline; "none" that
+    no agent-progress statusline is wired at all - a plugin installed from a
+    marketplace cannot run the install script, so this is every such install
+    until the person runs it; "missing" that it points at a file that is not
+    there any more - the repo moved, or an older copy was deleted; "other"
+    that it runs a different copy of the engine than this one."""
     try:
         with open(os.path.join(HOME, ".claude", "settings.json")) as f:
-            return "agent_progress" in json.dumps(json.load(f).get("statusLine", {}))
+            cmd = (json.load(f).get("statusLine") or {}).get("command") or ""
     except Exception:
-        return False
+        return "none", None
+    if "agent_progress" not in cmd:
+        return "none", None
+    m = re.search(r'"([^"]*agent_progress\.py)"', cmd) or re.search(r"(\S*agent_progress\.py)", cmd)
+    wired = m.group(1) if m else None
+    if not wired:
+        return "ok", None
+    if not os.path.exists(wired):
+        return "missing", wired
+    try:
+        if os.path.realpath(wired) != os.path.realpath(os.path.abspath(__file__)):
+            return "other", wired
+    except OSError:
+        pass
+    return "ok", wired
+
+
+def statusline_advice():
+    """One line for the person when no bar can appear, or None when one can."""
+    kind, where = statusline_status()
+    installer = os.path.join(os.path.dirname(os.path.abspath(__file__)), "install-statusline.sh")
+    if kind == "none":
+        return ("agent-progress: no progress bar will appear yet - the statusline is not "
+                "wired. Run once, then restart Claude Code:  %s" % installer)
+    if kind == "missing":
+        return ("agent-progress: the statusline points at %s, which no longer exists, so "
+                "no bar will appear. Run once, then restart Claude Code:  %s" % (where, installer))
+    if kind == "other":
+        return ("agent-progress: the statusline runs another copy of the plugin (%s), not "
+                "this one. If that is not intended, run:  %s" % (where, installer))
+    return None
 
 
 def slug(text):
@@ -4784,8 +4826,12 @@ def cmd_doctor(args):
               "             restart Claude Code for the bar." % sid[:8])
     else:
         print("session    : %s - started with the plugin loaded" % sid[:8])
-    print("statusline : %s" % ("wired into settings.json" if wired else
-                               "NOT wired - run scripts/install-statusline.sh"))
+    kind, where = statusline_status()
+    print("statusline : %s" % {
+        "ok": "wired into settings.json",
+        "none": "NOT wired - run scripts/install-statusline.sh, then restart Claude Code",
+        "missing": "wired to %s, which does not exist - run scripts/install-statusline.sh" % where,
+        "other": "wired to a different copy of the engine: %s" % where}[kind])
     print("config     : %s" % json.dumps(cfg))
     return 0
 

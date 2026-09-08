@@ -67,6 +67,12 @@ reverts it. Restart Claude Code afterwards. If `~/.local/bin` is not on your
 told which one to use at session start, and `agent-progress doctor` repeats it.
 It needs Python 3.8 or newer and refuses to install on anything older.
 
+Installed some other way - from a plugin marketplace, or cloned elsewhere? The
+hooks and skills load wherever the plugin lives, but a marketplace cannot run
+the install script, so no bar appears until you do: `scripts/install-statusline.sh`
+inside the plugin's directory wires it. Until then, each session tells you so
+once at startup, and `agent-progress doctor` says what is wired and to what.
+
 ### Installing into sessions that are already open
 
 `/reload-plugins` activates the skills and hooks in a running session, and

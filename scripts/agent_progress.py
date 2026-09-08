@@ -2532,8 +2532,9 @@ def format_beside(ev, cfg=None):
         head += " after %s" % fmt_dur(ev["duration"])
     lines = [head]
     if cut_short_by_caller(ev):
-        lines.append("  stopped by %s - the tool's timeout, most likely; "
-                     "`agent-progress run` lets it finish" % (ev.get("reason_short") or "a signal"))
+        lines.append("  stopped by %s before it finished (an interrupt, a stopped task, the "
+                     "session ending, or a tool timeout); `agent-progress run` lets it finish"
+                     % (ev.get("reason_short") or "a signal"))
     if ev.get("handover"):
         lines.append("  (started by another session, which has since gone)")
     for ln in (ev.get("log_tail") or "").splitlines()[-6:]:
@@ -2585,11 +2586,12 @@ def format_report(ev, cfg=None):
                      "out of the output above. `agent-progress log %s -n 60` if you need "
                      "more of it. Do not re-run it." % (ev.get("job") or "<id>"))
     elif cut_short_by_caller(ev):
-        lines.append("This is not the program crashing: the command was stopped by %s - "
-                     "almost certainly the Bash tool's timeout running out while it was "
-                     "still going. It needs longer than a foreground call allows. Launch "
-                     "it detached, so the call returns at once and the job reports here "
-                     "when it ends:\n"
+        lines.append("This is not the program crashing: the command was stopped by %s "
+                     "before it finished - an interrupt, a background task being stopped, "
+                     "the session ending, or (on older Claude Code versions) the Bash "
+                     "tool's timeout. If it should run to completion regardless, launch "
+                     "it detached: the call returns at once, the job survives all of "
+                     "those, and it reports here when it ends:\n"
                      "  agent-progress run --name %s --eta <your estimate> -- %s\n"
                      "Do not re-run it in the foreground the same way; that would only "
                      "time out again."
@@ -3536,6 +3538,12 @@ def cmd_run(args):
     with state_rw() as st:
         st["jobs"][jid]["watcher_pid"] = wpid
         job = dict(st["jobs"][jid])
+    # Said first, and plainly: this command returning is the launch, not the
+    # result. A Claude that read the launcher's exit code 0 as the job having
+    # finished told the user so, while the job was still running.
+    print("started in the background (pid %s). This command has returned; the job has "
+          "NOT finished. Its ending will be reported when it comes - do not wait for it, "
+          "poll it, or re-run it." % proc.pid)
     _announce(job)
     return 0
 
@@ -3871,6 +3879,11 @@ def _close_bar(jid, code, note=None, cut_short=False):
             if job is not None and job.get("state") in ACTIVE_STATES:
                 if note:
                     job["note"] = note
+                elif code is not None and code > 128 and not job.get("note"):
+                    # the command itself was signalled - the session ending, a
+                    # stopped background task - while the wrapper lived to
+                    # record it; say so, as the interrupted path does
+                    job["note"] = "killed by %s" % _signame(code - 128)
                 if cut_short:
                     job["caller_waits"] = False
                 finalize(job, code, time.time(), st if cut_short else None)

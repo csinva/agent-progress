@@ -328,12 +328,13 @@ were doing, and even if it is unrelated to the current task. Then:
    re-running it blindly can repeat an expensive failure.
 
 One ending is not a crash: a command tracked automatically in the foreground
-that outlives the Bash tool's timeout is stopped with SIGTERM. Its report says
-`was STOPPED`, names the timeout as the likely cause, and gives the way out -
-relaunch it detached with `agent-progress run --name <id> --eta <estimate> --
-'<command>'`, so the call returns at once and the job reports when it ends.
-Do that rather than running it in the foreground again, which would only time
-out again.
+that is stopped by a signal before it finishes - you interrupted it, a
+background task was stopped, the session ended, or on older Claude Code
+versions the Bash tool's timeout ran out. (Current versions do not kill a
+command at the timeout; they move it to a background task, and the bar keeps
+going.) Its report says `was STOPPED` and gives the way out - relaunch it
+detached with `agent-progress run --name <id> --eta <estimate> -- '<command>'`,
+which survives all of those, returns at once, and reports when the job ends.
 
 Several jobs can die at once — an out-of-memory or a failing GPU takes
 everything on the machine — and they arrive together in one report. Say that

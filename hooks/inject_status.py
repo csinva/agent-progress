@@ -325,6 +325,16 @@ def main():
 
     if event == "SessionStart":
         remember_session(cc, session_id)
+        # A fresh install whose ~/.local/bin is not on PATH yet: every
+        # `agent-progress ...` the skill suggests would fail with "command not
+        # found". One line, once, saying what to type instead.
+        try:
+            if not cc.launcher_is_on_path():
+                emit(event, "The agent-progress plugin is installed, but `agent-progress` is "
+                            "not on PATH in this shell. For every agent-progress command "
+                            "use this instead: %s" % cc.launcher_display())
+        except Exception:
+            pass
 
     # Also on every prompt, not only when a session starts. A watcher can die -
     # killed, out of memory, the machine rebooted - and reviving them only at

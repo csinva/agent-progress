@@ -477,6 +477,34 @@ cli("config", "--reset")
 sandbox.kill_watchers(cc)
 cli("rm", "--all", "--force")
 
+print()
+print("=== a fresh install is told which launcher to use ===")
+_fresh = tempfile.mkdtemp(prefix="agent-progress-fresh-")
+_bin = os.path.join(_fresh, ".local", "bin")
+os.makedirs(_bin)
+with open(os.path.join(_bin, "agent-progress"), "w") as f:
+    f.write("#!/bin/sh\nexec %s %s \"$@\"\n" % (sys.executable, ENGINE))
+os.chmod(os.path.join(_bin, "agent-progress"), 0o755)
+_off = os.pathsep.join(p for p in os.environ.get("PATH", "").split(os.pathsep) if ".local/bin" not in p)
+_env_off = dict(os.environ, HOME=_fresh, PATH=_off, AGENT_PROGRESS_HOME=os.path.join(_fresh, "state"))
+r = subprocess.run([sys.executable, STATUS, "SessionStart"], input=json.dumps({"session_id": "fresh"}),
+                   capture_output=True, text=True, env=_env_off)
+ctx = ""
+if r.stdout.strip():
+    ctx = json.loads(r.stdout).get("hookSpecificOutput", {}).get("additionalContext", "")
+ck("with the shim off PATH, session start names the full path to use",
+   "not on PATH" in ctx and "~/.local/bin/agent-progress" in ctx, repr((r.stdout[:120], r.stderr[-80:])))
+_env_on = dict(_env_off, PATH=_bin + os.pathsep + _off)
+r = subprocess.run([sys.executable, STATUS, "SessionStart"], input=json.dumps({"session_id": "fresh2"}),
+                   capture_output=True, text=True, env=_env_on)
+ck("with it on PATH, nothing is said", r.stdout.strip() == "", r.stdout[:120])
+r = subprocess.run([sys.executable, ENGINE, "doctor"], capture_output=True, text=True, env=_env_off)
+ck("doctor says the launcher is off PATH and what to use", "NOT on PATH" in r.stdout and "~/.local/bin/agent-progress" in r.stdout,
+   r.stdout[-300:])
+r = subprocess.run([sys.executable, ENGINE, "doctor"], capture_output=True, text=True, env=_env_on)
+ck("and that it is on PATH when it is", "agent-progress (on PATH)" in r.stdout, r.stdout[-300:])
+shutil.rmtree(_fresh, ignore_errors=True)
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

@@ -965,6 +965,20 @@ ck("rm --all leaves no undelivered report behind", not left, str(left))
 sandbox.kill_watchers(cc)
 shutil.rmtree(home, ignore_errors=True)
 
+print()
+print("=== the installer refuses a python that is too old ===")
+_f = tempfile.mkdtemp(prefix="agent-progress-oldpy-")
+_fake = os.path.join(_f, "bin"); os.makedirs(_fake)
+with open(os.path.join(_fake, "python3"), "w") as fh:
+    fh.write('#!/bin/sh\ncase "$*" in *version_info*) exit 1;; *--version*) echo "Python 3.7.9";; esac\n')
+os.chmod(os.path.join(_fake, "python3"), 0o755)
+os.makedirs(os.path.join(_f, "home", ".claude"))
+r = subprocess.run(["bash", os.path.join(ROOT, "scripts", "install-statusline.sh")], capture_output=True, text=True,
+                   env=dict(os.environ, HOME=os.path.join(_f, "home"), PATH=_fake + os.pathsep + os.environ.get("PATH", "")))
+ck("it stops with a clear message", r.returncode != 0 and "3.8" in r.stderr, "%s %r" % (r.returncode, r.stderr[-120:]))
+ck("and writes nothing", not os.path.exists(os.path.join(_f, "home", ".claude", "settings.json")))
+shutil.rmtree(_f, ignore_errors=True)
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

@@ -33,7 +33,7 @@ This command looks long-running (%(why)s), so it was stopped once to be tracked
 instead. Relaunch it through agent-progress, which gives it a live progress bar in
 the statusline and shows the user when it finishes or crashes:
 
-  agent-progress run --name %(name)s --eta <your estimate> <monitor flags> -- %(command)s
+  %(launcher)s run --name %(name)s --eta <your estimate> <monitor flags> -- %(command)s
 
 Two things to decide first, both covered by the agent-progress skill:
 
@@ -126,7 +126,8 @@ def main():
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",
         "permissionDecisionReason": INSTRUCTIONS % {
-            "why": verdict["why"], "name": verdict["name"], "command": command},
+            "why": verdict["why"], "name": verdict["name"], "command": command,
+            "launcher": cc.launcher_display()},
     }})
     return 0
 

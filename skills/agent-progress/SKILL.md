@@ -17,8 +17,10 @@ cadence, recomputes the total estimate from what it sees, and marks the job done
 or failed with the real exit code. **Do not poll the job yourself** — no loops,
 no repeated `ls`, no waiting. Check in only when you have a reason to.
 
-Use `agent-progress`. If it is not on PATH, use
-`python3 ~/.claude/skills/agent-progress/scripts/agent_progress.py`.
+Use `agent-progress`. If that is not found, use `~/.local/bin/agent-progress`
+(the installer puts it there, and it works by full path whether or not that
+directory is on PATH); failing that, `python3` on the plugin's
+`scripts/agent_progress.py`.
 
 `agent-progress autotrack '<command>'` shows whether a given command would be caught
 automatically, and why.

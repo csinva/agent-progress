@@ -9,6 +9,15 @@ SETTINGS="$HOME/.claude/settings.json"
 BINDIR="$HOME/.local/bin"
 MODE="${1:-install}"
 
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "agent-progress needs python3 (3.8 or newer) and none is on PATH." >&2
+  exit 1
+fi
+if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' 2>/dev/null; then
+  echo "agent-progress needs Python 3.8 or newer; python3 here is $(python3 --version 2>&1)." >&2
+  exit 1
+fi
+
 python3 - "$SETTINGS" "$ENGINE" "$MODE" <<'PYEOF'
 import json, os, shutil, sys, time
 settings, engine, mode = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -66,8 +75,13 @@ EOF
   echo "shim installed -> $BINDIR/agent-progress"
   case ":$PATH:" in
     *":$BINDIR:"*) ;;
-    *) echo "NOTE: $BINDIR is not on your PATH. Add this to ~/.zshrc:"
-       echo "      export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+    *) echo "NOTE: $BINDIR is not on your PATH, so \`agent-progress\` will not resolve"
+       echo "      in Claude's shell. Everything still works meanwhile by full path -"
+       echo "      $BINDIR/agent-progress - and Claude is told so at session start."
+       echo "      To fix it for good, add this to ~/.zshrc (or ~/.bashrc):"
+       echo "      export PATH=\"\$HOME/.local/bin:\$PATH\""
+       echo "      then open a new terminal before starting Claude Code: a session"
+       echo "      inherits PATH from the terminal it was started in." ;;
   esac
 else
   rm -f "$BINDIR/agent-progress" && echo "removed $BINDIR/agent-progress"

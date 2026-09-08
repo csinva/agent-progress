@@ -1834,6 +1834,26 @@ def launcher_prefix():
     return "%s %s" % (shlex.quote(sys.executable), shlex.quote(os.path.abspath(__file__)))
 
 
+def launcher_display():
+    """How to name this tool in text a person or a Claude will paste.
+
+    `agent-progress` when that resolves in this shell; otherwise the shim the
+    installer put in ~/.local/bin, which works by full path whether or not
+    that directory is on PATH; otherwise the interpreter and the engine. A
+    fresh install whose ~/.local/bin was not yet on PATH was told to run
+    `agent-progress ...` and got "command not found" for every instruction."""
+    if shutil.which("agent-progress"):
+        return "agent-progress"
+    shim = os.path.join(os.path.expanduser("~"), ".local", "bin", "agent-progress")
+    if os.path.isfile(shim) and os.access(shim, os.X_OK):
+        return shim.replace(os.path.expanduser("~"), "~", 1)
+    return "python3 %s" % shlex.quote(os.path.abspath(__file__))
+
+
+def launcher_is_on_path():
+    return bool(shutil.which("agent-progress"))
+
+
 def wrap_command(command, name, launcher=None, after=None):
     """The tracked form of a command.
 
@@ -2592,10 +2612,11 @@ def format_report(ev, cfg=None):
                      "tool's timeout. If it should run to completion regardless, launch "
                      "it detached: the call returns at once, the job survives all of "
                      "those, and it reports here when it ends:\n"
-                     "  agent-progress run --name %s --eta <your estimate> -- %s\n"
+                     "  %s run --name %s --eta <your estimate> -- %s\n"
                      "Do not re-run it in the foreground the same way; that would only "
                      "time out again."
-                     % (ev.get("reason_short") or "a signal", ev.get("job") or "<name>",
+                     % (ev.get("reason_short") or "a signal", launcher_display(),
+                        ev.get("job") or "<name>",
                         # one quoted argument: `run` passes a single argument to the
                         # shell whole, so `a; b` stays one command instead of two
                         shlex.quote((ev.get("cmd") or "<command>")[:200])))
@@ -4725,6 +4746,13 @@ def cmd_doctor(args):
     print("logs dir   : %s" % LOGS)
     print("python     : %s" % sys.version.split()[0])
     print("host       : %s (a pid on another machine is presumed alive)" % HOST)
+    if launcher_is_on_path():
+        print("launcher   : agent-progress (on PATH)")
+    else:
+        print("launcher   : `agent-progress` is NOT on PATH in this shell. Use %s"
+              % launcher_display())
+        print("             or add ~/.local/bin to PATH and open a new terminal before")
+        print("             starting Claude Code. Automatic tracking works either way.")
     st = state_ro()
     running = [j for j in st["jobs"].values() if j.get("state") in ACTIVE_STATES]
     queued = [j for j in running if j.get("state") == "queued"]

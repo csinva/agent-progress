@@ -60,9 +60,12 @@ git clone https://github.com/csinva/agent-progress ~/.claude/skills/agent-progre
 ```
 
 Claude Code auto-loads anything in `~/.claude/skills/` as a plugin. The install
-script wires the statusline and puts `agent-progress` on your `PATH`; it backs up
-`~/.claude/settings.json` first, and `--uninstall` reverts it. Restart Claude
-Code afterwards.
+script wires the statusline and installs an `agent-progress` command into
+`~/.local/bin`; it backs up `~/.claude/settings.json` first, and `--uninstall`
+reverts it. Restart Claude Code afterwards. If `~/.local/bin` is not on your
+`PATH` the script says so and everything still works by full path - Claude is
+told which one to use at session start, and `agent-progress doctor` repeats it.
+It needs Python 3.8 or newer and refuses to install on anything older.
 
 ### Installing into sessions that are already open
 

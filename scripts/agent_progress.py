@@ -26,6 +26,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -593,7 +594,7 @@ def _discard_auto_files(job):
     wrapper made: a `run` job's log is the user's, named by them, and stays."""
     if not job.get("auto_launched"):
         return
-    for f in (job.get("log"), job.get("exit_file")):
+    for f in (job.get("log"), job.get("exit_file"), (job.get("log") or "") + ".err"):
         if f and os.path.dirname(os.path.abspath(f)) == os.path.abspath(LOGS):
             try:
                 os.remove(f)
@@ -977,9 +978,14 @@ def read_tail(path, offset, max_bytes=262144):
     """Read new bytes from `offset`. Returns (text, new_offset). Handles the log
     being truncated or rotated out from under us."""
     try:
-        size = os.path.getsize(path)
+        st_ = os.stat(path)
     except OSError:
         return "", offset
+    if not stat.S_ISREG(st_.st_mode):
+        # a FIFO, a device, a socket: reading one blocks until something is
+        # written, and a watcher stuck in a read never ticks again
+        return "", offset
+    size = st_.st_size
     if size < offset:      # truncated / rotated
         offset = 0
     start = max(offset, size - max_bytes)
@@ -1717,7 +1723,8 @@ def command_segments(command, cap=400, most=40):
 
 
 _SHELL_STATE = re.compile(
-    r"\s*(?:cd|pushd|popd|export|source|\.|alias|unalias|unset|nohup|disown)(?:\s|$)"
+    r"\s*(?:cd|pushd|popd|export|source|\.|alias|unalias|unset|nohup|disown|"
+    r"shopt|trap|ulimit|umask)(?:\s|$)"
     r"|\s*[A-Za-z_][A-Za-z0-9_]*=\S*\s*$")
 # `source` and `.` are deliberately not here: what a sourced file defines -
 # functions, unexported variables - has to be in the shell that runs the work,
@@ -1726,7 +1733,14 @@ _SHELL_STATE = re.compile(
 # is one line to the shell, and cutting it at the newline handed the launcher
 # to `cd` as arguments.
 _LEADING_STATE = re.compile(
-    r"\A(\s*(?:cd|pushd|export)(?:\s[^;&|\n\'\"`$()\\]*)?(?:&&|;|\n)\s*)")
+    r"\A(\s*(?:cd|pushd|export|ulimit|umask)(?:\s[^;&|\n\'\"`$()\\]*)?(?:&&|;|\n)\s*)")
+
+
+# `set -e`, `set -o pipefail`: these change how the *rest of the line* runs,
+# so they belong inside the wrapper with the work, and are neither taken as a
+# prefix nor treated as a reason to leave the command alone. `shopt`, `trap`,
+# `ulimit` and `umask` change the calling shell for good and cannot be split
+# off either way, so a command containing one runs untouched.
 
 
 def split_shell_prefix(command):
@@ -2550,6 +2564,11 @@ def enqueue_crash(st, job, now, kind="crash"):
     tail = ""
     if job.get("log"):
         text, _ = read_tail(job["log"], 0, 65536)
+        # a wrapped command's stderr is beside its log; the traceback is there
+        if job.get("auto_launched") and os.path.isfile(job["log"] + ".err"):
+            err, _ = read_tail(job["log"] + ".err", 0, 65536)
+            if err.strip():
+                text = text + ("\n" if text and not text.endswith("\n") else "") + err
         lines = [ln for ln in text.splitlines() if ln.strip()]
         # Store what the report will actually show. The renderer already cuts
         # each line at 200 characters, so keeping the whole of fifteen lines put
@@ -3624,7 +3643,7 @@ def cmd_start(args):
     if args.pid and not alive(args.pid):
         raise SystemExit("pid %s is not running, so there is nothing to track"
                          % args.pid)
-    log = os.path.abspath(args.log) if args.log else None
+    log = check_log_path(args.log) if args.log else None
     with state_rw() as st:
         job = _new_job(args, cmd=args.cmd, log=log, pid=args.pid)
         job["id"] = new_id(st, args.name)
@@ -3663,7 +3682,7 @@ def cmd_run(args):
         # reserve the id; "running" so a concurrent prune cannot reclaim it
         st["jobs"][jid] = {"id": jid, "state": "running", "started": time.time()}
 
-    log = os.path.abspath(args.log) if args.log else os.path.join(LOGS, "%s.log" % jid)
+    log = check_log_path(args.log) if args.log else os.path.join(LOGS, "%s.log" % jid)
     exitf = log + ".exit"
     for stale in (log, exitf):
         try:
@@ -3711,30 +3730,55 @@ def cmd_run(args):
     return 0
 
 
-def _pump(path, offset, stream):
-    """Copy new bytes from the log to a stream, so the command's output appears
-    as it would have if nothing were wrapping it."""
-    try:
-        with open(path, "rb") as f:
-            f.seek(offset)
-            chunk = f.read()
-    except OSError:
-        return offset
-    if chunk:
+class _Relay(object):
+    """Carry the command's stdout and stderr to the caller's, each to its own,
+    byte for byte, while the command itself writes only to files.
+
+    Files, not pipes, on purpose. A wrapper that is killed - SIGKILL cannot be
+    forwarded - leaves its command running; with pipes the command's next
+    write would hit a closed pipe, and a job that should have finished died
+    of SIGPIPE with its output lost. Writing to files, the command cannot
+    tell whether anyone is still reading, and the log keeps everything for
+    the report that follows. The two files also keep the streams apart, which
+    one merged log could not: a traceback belongs on stderr."""
+
+    def __init__(self, out_path, err_path):
+        self.paths = {out_path: sys.stdout, err_path: sys.stderr}
+        self.offsets = {out_path: 0, err_path: 0}
+        self.broken = set()
+
+    def _forward(self, stream, chunk):
+        if stream in self.broken:
+            return
         try:
-            # Bytes, untouched. Decoding each read on its own turned any
-            # multi-byte character that straddled two reads - an accent, an
-            # ellipsis, a progress bar's block glyphs - into replacement
-            # characters, which is the wrapper changing the output.
             raw = getattr(stream, "buffer", None)
             if raw is not None:
                 raw.write(chunk)
             else:
                 stream.write(chunk.decode("utf-8", "replace"))
             stream.flush()
-        except Exception:
-            pass
-    return offset + len(chunk)
+        except (BrokenPipeError, OSError, ValueError):
+            # the caller has gone; the command runs to its end regardless
+            self.broken.add(stream)
+
+    def pump(self):
+        """Forward whatever has been written since the last look."""
+        for path, stream in self.paths.items():
+            try:
+                with open(path, "rb") as f:
+                    f.seek(self.offsets[path])
+                    chunk = f.read()
+            except OSError:
+                continue
+            if chunk:
+                self.offsets[path] += len(chunk)
+                self._forward(stream, chunk)
+
+    def drain(self):
+        self.pump()
+
+    def close(self):
+        pass
 
 
 # ---------------------------------------------------------- interrupt handling
@@ -3793,7 +3837,7 @@ def _signal_child(proc, sig):
             pass
 
 
-def _interrupted(proc, log, sent):
+def _interrupted(proc, relay):
     """Pass the interrupt on to the command and report it the way a shell does."""
     sig = _INTERRUPT[0]
     _release_signals()                 # a second ctrl-c must not be swallowed
@@ -3806,8 +3850,18 @@ def _interrupted(proc, log, sent):
             proc.wait(timeout=2)
         except Exception:
             pass
-    _pump(log, sent, sys.stdout)       # whatever it managed to print
+    relay.drain()                      # whatever it managed to print
     return 128 + sig
+
+
+def check_log_path(path):
+    """A log to follow has to be a plain file, or a name where one can be made."""
+    if not path:
+        return path
+    full = os.path.abspath(os.path.expanduser(path))
+    if os.path.exists(full) and not os.path.isfile(full):
+        raise SystemExit("%s is not a regular file, so it cannot be followed as a log" % path)
+    return full
 
 
 def check_cwd(path):
@@ -3911,12 +3965,13 @@ def cmd_exec(args):
         stamp = "%s-%d" % (slug(name), os.getpid())
         log = os.path.join(LOGS, "%s.log" % stamp)
         exitf = log + ".exit"
-        for stale in (log, exitf):
+        for stale in (log, exitf, log + ".err"):
             try:
                 os.remove(stale)
             except OSError:
                 pass
         open(log, "a").close()
+        open(log + ".err", "a").close()
     except (Exception, SystemExit):
         return _passthrough(command, args.cwd)
 
@@ -3928,9 +3983,14 @@ def cmd_exec(args):
     # signal, so arming it early costs nothing.
     _forward_signals(None)
     started = time.time()
+    errf = log + ".err"
     proc = subprocess.Popen(
-        [USER_SHELL, "-c", "( %s\n) > %s 2>&1; echo $? > %s"
-         % (command, shlex.quote(log), shlex.quote(exitf))],
+        # The newline before the close matters: `pytest  # quick` or a heredoc
+        # ending in `EOF` would otherwise take the `)` onto the comment or the
+        # terminator line. stdout goes to the log and stderr to a file beside
+        # it, and the relay tails both back to the caller's own streams.
+        [USER_SHELL, "-c", "( %s\n) > %s 2> %s; echo $? > %s"
+         % (command, shlex.quote(log), shlex.quote(errf), shlex.quote(exitf))],
         # No stdin, deliberately. This command may outlive the call that started
         # it, and a detached job holding the session's stdin gets stopped by the
         # kernel the moment it reads. It costs nothing: a command run by the
@@ -3940,20 +4000,22 @@ def cmd_exec(args):
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    relay = _Relay(log, errf)
     if _INTERRUPT:
         # it arrived while the child was being started
-        code = _interrupted(proc, log, 0)
+        code = _interrupted(proc, relay)
+        relay.close()
         _discard_run_files(log, exitf, keep=args.keep_log)
         return code
 
-    sent = 0
     bar_jid = None          # the job registered for this command's own bar
     while True:
-        sent = _pump(log, sent, sys.stdout)
+        relay.pump()
         if proc.poll() is not None:
             break
         if _INTERRUPT:
-            code = _interrupted(proc, log, sent)
+            code = _interrupted(proc, relay)
+            relay.close()
             # The command was cut short - a tool timeout, a ctrl-c - so the
             # caller did not see it end. Close the record now, with the signal
             # as its exit status, rather than leaving the bar running until the
@@ -3977,7 +4039,8 @@ def cmd_exec(args):
         time.sleep(0.08)
 
     _release_signals()
-    _pump(log, sent, sys.stdout)          # whatever it wrote on the way out
+    relay.drain()                         # whatever it wrote on the way out
+    relay.close()
     code = proc.returncode
     try:
         # bounded: a verbose build can leave hundreds of megabytes here, and
@@ -4065,7 +4128,7 @@ def _signame(num):
 def _discard_run_files(log, exitf, keep):
     if keep:
         return
-    for f in (log, exitf):
+    for f in (log, exitf, log + ".err"):
         try:
             os.remove(f)
         except OSError:
@@ -4352,7 +4415,7 @@ def cmd_log(args):
     st = state_ro()
     job = st["jobs"][resolve(st, args.job)]
     log = job.get("log")
-    if not log or not os.path.exists(log):
+    if not log or not os.path.isfile(log):     # a FIFO or device would block here
         raise SystemExit("job %s has no log file" % job.get("id"))
     text, _ = read_tail(log, 0, max_bytes=args.bytes)
     lines = [ln for ln in text.splitlines() if ln.strip()]

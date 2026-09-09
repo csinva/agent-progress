@@ -979,6 +979,69 @@ ck("it stops with a clear message", r.returncode != 0 and "3.8" in r.stderr, "%s
 ck("and writes nothing", not os.path.exists(os.path.join(_f, "home", ".claude", "settings.json")))
 shutil.rmtree(_f, ignore_errors=True)
 
+print()
+print("=== a log that is not a plain file is refused, not read ===")
+home, renv = reap_home()
+fifo = os.path.join(home, "pipe.log")
+os.mkfifo(fifo)
+r = subprocess.run([sys.executable, ENGINE, "start", "fifo", "--log", fifo, "--eta", "1h"], capture_output=True, text=True, env=renv, timeout=20)
+ck("start --log on a FIFO is refused at once", r.returncode != 0 and "regular file" in r.stderr, r.stderr[-120:])
+r = subprocess.run([sys.executable, ENGINE, "run", "--name", "f2", "--log", fifo, "--", "true"], capture_output=True, text=True, env=renv, timeout=20)
+ck("so is run --log", r.returncode != 0 and "regular file" in r.stderr, r.stderr[-120:])
+t0 = time.time()
+text, off = cc.read_tail(fifo, 0)
+ck("read_tail on a FIFO returns at once with nothing", text == "" and time.time() - t0 < 2, "%r %.1fs" % (text, time.time() - t0))
+json.dump({"version": 1, "jobs": {"fj": {"id": "fj", "state": "running", "started": time.time(), "log": fifo}},
+           "sessions": {}, "inbox": []}, open(os.path.join(home, "state.json"), "w"))
+r = subprocess.run([sys.executable, ENGINE, "log", "fj"], capture_output=True, text=True, env=renv, timeout=20)
+ck("`log` on such a record does not hang", r.returncode == 0 or r.returncode == 1, str(r.returncode))
+shutil.rmtree(home, ignore_errors=True)
+
+print()
+print("=== the wrapper keeps stdout and stderr apart ===")
+home, renv = reap_home()
+r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "60", "--shell",
+                    "echo out1; echo err1 >&2; echo out2; echo err2 >&2; exit 3"], capture_output=True, env=renv, timeout=60)
+ck("stdout carries only stdout", r.stdout == b"out1\nout2\n", repr(r.stdout))
+ck("stderr carries only stderr", r.stderr == b"err1\nerr2\n", repr(r.stderr))
+ck("and the exit code is the command's", r.returncode == 3, str(r.returncode))
+t0 = time.time()
+r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "60", "--shell", "(sleep 5 & ); echo done"],
+                   capture_output=True, env=renv, timeout=60)
+ck("a grandchild that keeps the pipe open does not keep the caller waiting",
+   r.stdout == b"done\n" and time.time() - t0 < 3, "%r %.1fs" % (r.stdout, time.time() - t0))
+r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "60", "--shell",
+                    "python3 -c \"import sys; sys.stdout.write('x'*3000000); sys.stderr.write('e'*200000)\""],
+                   capture_output=True, env=renv, timeout=120)
+ck("large output on both streams arrives whole", len(r.stdout) == 3000000 and len(r.stderr) == 200000,
+   "%d %d" % (len(r.stdout), len(r.stderr)))
+r = subprocess.run([sys.executable, ENGINE, "exec", "--after", "0.2", "--name", "logged", "--keep-log", "--shell",
+                    "echo o; echo e >&2; sleep 0.6"], capture_output=True, env=renv, timeout=60)
+kept = [f for f in os.listdir(os.path.join(home, "logs")) if f.endswith(".log")]
+ck("the log keeps stdout for the watcher, and stderr sits beside it",
+   bool(kept) and open(os.path.join(home, "logs", kept[0])).read() == "o\n"
+   and open(os.path.join(home, "logs", kept[0]) + ".err").read() == "e\n", str(kept))
+wr = subprocess.Popen([sys.executable, ENGINE, "exec", "--name", "orphan2", "--after", "0.3", "--shell",
+                       "sleep 2; echo RESULT; python3 -c 'import sys; print(\"TRACE\", file=sys.stderr)'"],
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=renv)
+time.sleep(1.2)
+wr.kill()
+wr.wait()
+deadline = time.time() + 40
+while time.time() < deadline:
+    _st = json.load(open(os.path.join(home, "state.json")))
+    if _st["jobs"].get("orphan2", {}).get("state") not in ("running", None):
+        break
+    time.sleep(0.5)
+_ev = [e for e in _st.get("inbox", []) if e.get("job") == "orphan2"]
+ck("a command whose wrapper was SIGKILLed still finishes cleanly",
+   _st["jobs"].get("orphan2", {}).get("state") == "done", str(_st["jobs"].get("orphan2", {}).get("state")))
+ck("and its report carries both streams nobody saw",
+   len(_ev) == 1 and "RESULT" in (_ev[0].get("log_tail") or "") and "TRACE" in (_ev[0].get("log_tail") or ""),
+   str([e.get("log_tail") for e in _ev])[:160])
+sandbox.kill_watchers(cc)
+shutil.rmtree(home, ignore_errors=True)
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

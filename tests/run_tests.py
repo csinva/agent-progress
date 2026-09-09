@@ -66,7 +66,8 @@ print("=== output fidelity ===")
 r = ex("printf 'a\\nb\\nc\\n'")
 ck("stdout exact", r.stdout == "a\nb\nc\n", repr(r.stdout))
 r = ex("printf 'out\\n'; printf 'err\\n' >&2")
-ck("stderr captured", "err" in r.stdout, repr(r.stdout))
+ck("stderr comes back on stderr, not folded into stdout",
+   r.stdout == "out\n" and r.stderr.strip() == "err", repr((r.stdout, r.stderr)))
 r = ex("printf 'no trailing newline'")
 ck("no trailing newline preserved", r.stdout == "no trailing newline", repr(r.stdout))
 # octal, not \xNN: hex escapes are a bash extension, and /bin/sh is dash on

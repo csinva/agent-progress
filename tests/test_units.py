@@ -678,6 +678,17 @@ rep = cc.format_report(ev)
 ck("the relaunch line Claude is given keeps a compound command whole",
    "-- 'echo starting; sleep 60; echo never'" in rep, rep[-200:])
 
+print()
+print("=== set stays with the work; shopt and trap leave the command alone ===")
+cfg = cc.load_config()
+v = cc.classify_command("set -e; python train.py; echo after", {}, cfg)
+ck("set -e is neither a prefix nor a blocker", v["track"] and v.get("prefix") == "" and v.get("body", "").startswith("set -e"), str(v))
+v = cc.classify_command("set -o pipefail && python train.py | tee log", {}, cfg)
+ck("set -o pipefail likewise", v["track"] and v.get("prefix") == "", str(v))
+ck("shopt leaves the command alone", not cc.classify_command("shopt -s globstar && python train.py", {}, cfg)["track"])
+ck("trap leaves the command alone", not cc.classify_command("trap 'echo bye' EXIT; python train.py", {}, cfg)["track"])
+ck("ulimit as a leading line is a prefix", cc.classify_command("ulimit -n 4096 && python train.py", {}, cfg).get("prefix") == "ulimit -n 4096 && ")
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

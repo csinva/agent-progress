@@ -1645,7 +1645,10 @@ AUTO_TRACK_IGNORE = [
     # never re-wrap ourselves. The path prefix matters: the wrapper emits an
     # absolute path, so a rule anchored on the bare name would not match the
     # very command it exists to recognise.
-    r"(?:^|[;&|]\s*)(?:sudo\s+)?(?:\S*/)?agent[-_]progress\b",
+    # the launcher, at a command position, by bare name or by path - but not a
+    # path that merely passes through a directory of that name, and never the
+    # value of an assignment (`J=/tmp/agent-progress-x/out && ...`)
+    r"(?:^|[;&|]\s*)(?:sudo\s+)?(?:[^\s=]*/)?agent[-_]progress\b",
     r"\bagent_progress\.py\b",
     # the documented way to say "not this one": the hook cannot see a variable
     # set for the command, but it can see it written in front of the command
@@ -1700,6 +1703,113 @@ HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w{1,40})\1[\s\S]{0,8000}?^\2[ \t]*$", re
 SEPARATORS = re.compile(r"[\n;]|&&|\|\||\|")
 
 
+SCAN_CAP = 200000      # a command longer than this is scanned at both ends
+
+
+def scan_shell(text):
+    """The top-level segments of one shell line, as (start, end, separator,
+    stripped) - `stripped` being the segment with any heredoc body blanked.
+
+    Cutting on `;`, `&&`, `|` and newlines without looking at quotes made a
+    line of Python inside `python -c "..."` into a shell segment of its own,
+    and `rng=np.random.RandomState(0)` into a shell assignment. Quotes,
+    backslashes and heredoc bodies are honoured here; nothing inside them
+    separates. Bounded, so a pathological command costs little."""
+    text = text or ""
+    n = min(len(text), SCAN_CAP)
+    segs = []
+    i = start = 0
+    single = double = False
+    pending = []           # heredoc terminators announced on this line
+    body_spans = []
+    while i < n:
+        ch = text[i]
+        if single:
+            if ch == "'":
+                single = False
+            i += 1
+            continue
+        if double:
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == '"':
+                double = False
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if ch == "'":
+            single = True
+            i += 1
+            continue
+        if ch == '"':
+            double = True
+            i += 1
+            continue
+        if ch == "<" and text.startswith("<<", i):
+            m = re.match(r"<<-?\s*(['\"]?)(\w{1,40})\1", text[i:i + 60])
+            if m:
+                pending.append((m.group(2), text.startswith("<<-", i)))
+                i += m.end()
+                continue
+        if ch == "\n":
+            if pending:
+                # the bodies follow, one after another, each closed by its word
+                j = i + 1
+                for word, dash in pending:
+                    bstart = j
+                    while j < n:
+                        k = text.find("\n", j)
+                        line = text[j:k if k != -1 else n]
+                        if (line.lstrip("\t") if dash else line).rstrip() == word:
+                            break
+                        j = (k + 1) if k != -1 else n
+                    body_spans.append((bstart, j))
+                    k = text.find("\n", j)
+                    j = (k + 1) if k != -1 else n
+                pending = []
+                i = j
+                # the newline that closed the last body ends the segment
+                segs.append((start, i, "\n"))
+                start = i
+                continue
+            segs.append((start, i, "\n"))
+            i += 1
+            start = i
+            continue
+        if ch == ";":
+            segs.append((start, i, ";"))
+            i += 1
+            start = i
+            continue
+        if ch == "&" and text.startswith("&&", i):
+            segs.append((start, i, "&&"))
+            i += 2
+            start = i
+            continue
+        if ch == "|":
+            if text.startswith("||", i):
+                segs.append((start, i, "||"))
+                i += 2
+            else:
+                segs.append((start, i, "|"))
+                i += 1
+            start = i
+            continue
+        i += 1
+    segs.append((start, n, ""))
+    out = []
+    for a, b, sep in segs:
+        piece = text[a:b]
+        for x, y in body_spans:
+            if a <= x < b:
+                piece = piece[:x - a] + " " * (min(y, b) - x) + piece[min(y, b) - a:]
+        out.append((a, b, sep, piece))
+    return out
+
+
 def command_segments(command, cap=400, most=40):
     """The separate commands in one shell line, minus any heredoc bodies.
 
@@ -1713,9 +1823,15 @@ def command_segments(command, cap=400, most=40):
     expensive, and sampled from both ends rather than the front: a command that
     writes five thousand lines of data and then runs the job keeps the job,
     which taking only the first forty segments would have thrown away."""
-    text = HEREDOC.sub(" ", command or "")
-    text = re.sub(r"\\\n", " ", text)         # a continuation line is the same line
-    parts = [seg.strip()[:cap] for seg in SEPARATORS.split(text) if seg.strip()]
+    text = re.sub(r"\\\n", " ", command or "")   # a continuation line is the same line
+    if len(text) > SCAN_CAP:
+        # too long to read whole: the head, and the tail, where a command that
+        # writes a great deal of data and then runs the job keeps the job
+        half = SCAN_CAP // 2
+        scanned = scan_shell(text[:half]) + scan_shell(text[-half:])
+    else:
+        scanned = scan_shell(text)
+    parts = [stripped.strip()[:cap] for _a, _b, _sep, stripped in scanned if stripped.strip()]
     if len(parts) <= most:
         return parts
     half = most // 2
@@ -1725,7 +1841,7 @@ def command_segments(command, cap=400, most=40):
 _SHELL_STATE = re.compile(
     r"\s*(?:cd|pushd|popd|export|source|\.|alias|unalias|unset|nohup|disown|"
     r"shopt|trap|ulimit|umask)(?:\s|$)"
-    r"|\s*[A-Za-z_][A-Za-z0-9_]*=\S*\s*$")
+    r"|\s*[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|\$\([^)]*\)|`[^`]*`|\S)*\s*$")
 # `source` and `.` are deliberately not here: what a sourced file defines -
 # functions, unexported variables - has to be in the shell that runs the work,
 # and the work runs in the wrapper's own shell. Such a command is left whole.
@@ -1734,6 +1850,13 @@ _SHELL_STATE = re.compile(
 # to `cd` as arguments.
 _LEADING_STATE = re.compile(
     r"\A(\s*(?:cd|pushd|export|ulimit|umask)(?:\s[^;&|\n\'\"`$()\\]*)?(?:&&|;|\n)\s*)")
+# `J=~/work/tmp && ...`: a plain assignment, literal value, that the rest of
+# the line refers to as $J. It stays in the caller's shell, where later
+# commands expect it, and is restated inside the wrapper, where the work runs
+# in a shell of its own and would otherwise find $J empty. Only a value with
+# nothing to expand or quote: anything else leaves the command alone.
+_LEADING_ASSIGN = re.compile(
+    r"\A(\s*([A-Za-z_][A-Za-z0-9_]*=[^;&|\n\'\"`$()\\ \t]*)\s*(?:&&|;|\n)\s*)")
 
 
 # `set -e`, `set -o pipefail`: these change how the *rest of the line* runs,
@@ -1743,30 +1866,106 @@ _LEADING_STATE = re.compile(
 # off either way, so a command containing one runs untouched.
 
 
-def split_shell_prefix(command):
-    """(prefix, body): the leading `cd`s and `export`s that have to stay in the
-    caller's shell, and the command left to wrap. `body` is None when a command
-    that acts on the shell sits anywhere else, or backgrounds itself: those
-    cannot be wrapped at all.
+_STATE_WORDS = re.compile(r"\s*(?:cd|pushd|popd|export|ulimit|umask)(?:\s|$)")
+_LITERAL_ASSIGN = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_]*=[^;&|\n\'\"`$()\\ \t]*)\s*$")
 
-    A prefix segment with a quote, a variable or a substitution in it is not
-    taken - splitting on separators cannot see inside those, and a `cd` cut in
-    half would break the command instead of tracking it."""
+
+def _setup_segment(stripped):
+    """Is this segment something that belongs outside the wrapper, in the
+    caller's own shell, and can safely go there? A `cd` or `export` with a
+    plain argument; a literal assignment; or a trivial command - mkdir, git
+    commit, echo, cat - that runs before the work and is not the work."""
+    if _LITERAL_ASSIGN.match(stripped):
+        return "assign"
+    if _STATE_WORDS.match(stripped):
+        return "state" if not re.search(r"[\'\"`$()\\]", stripped) else None
+    if _SHELL_STATE.match(stripped):
+        # `source lib.sh`, `alias`, `unset`, `trap`: what these do has to be
+        # in the shell that runs the work, so they can be neither setup nor
+        # wrapped - the line is left alone
+        return None
+    for rx in AUTO_TRACK_IGNORE:
+        if rx.lstrip().startswith("^") and _safe_search(rx, stripped):
+            return "trivial"
+    return None
+
+
+def split_shell_prefix(command):
+    """(prefix, body, suffix): what stays in the caller's shell before the
+    work, the work itself, and what stays in the caller's shell after it.
+    `body` is None when the line cannot be cut that way - a command that acts
+    on the shell in the middle of the work, one that backgrounds itself.
+
+    The prefix is setup: `cd`, `export`, a literal assignment, a trivial
+    command. All of it runs untouched where it always did, and an assignment
+    the work refers to is restated at the front of the body, since the work
+    runs in a shell of its own. The suffix is a trailing `cd` or assignment,
+    which has to reach the caller's shell after the work; it runs after the
+    wrapper returns, as it would have. Everything is cut on separators the
+    scanner found outside quotes and heredocs, and the pieces are the
+    original text, so nothing is rewritten but the seam."""
     text = command or ""
-    prefix = ""
-    while True:
-        m = _LEADING_STATE.match(text)
-        if not m:
+    if len(text) > SCAN_CAP:
+        return "", text, ""              # too long to cut safely: wrapped whole
+    segs = scan_shell(text)
+    if not segs:
+        return "", None, ""
+    # leading setup
+    i = 0
+    restate = []
+    while i < len(segs) - 1:
+        a, b, sep, stripped = segs[i]
+        if sep not in ("&&", ";", "\n"):
             break
-        prefix += m.group(1)
-        text = text[m.end():]
-    body = text
+        kind = _setup_segment(stripped)
+        if not kind:
+            break
+        if kind == "assign":
+            restate.append(stripped.strip())
+        i += 1
+    if i >= len(segs):
+        return text, None, ""
+    body_start = segs[i][0]
+    while body_start < len(text) and text[body_start] in " \t":
+        body_start += 1                  # the space after a separator is the seam's
+    # trailing state
+    j = len(segs)
+    while j - 1 > i:
+        a, b, sep, stripped = segs[j - 1]
+        prev_sep = segs[j - 2][2]
+        kind = _setup_segment(stripped)
+        if kind in ("state", "assign") and prev_sep in ("&&", ";", "\n"):
+            j -= 1
+            continue
+        break
+    body_end = segs[j - 1][1] if j - 1 >= i else segs[i][1]
+    while body_end > body_start and text[body_end - 1] in " \t":
+        body_end -= 1                    # and the space before one is the seam's too
+    prefix = text[:body_start]
+    body = text[body_start:body_end]
+    suffix = text[body_end:]
     if not body.strip():
-        return prefix, None
-    for seg in command_segments(body) or [body]:
-        if _SHELL_STATE.match(seg):
-            return prefix, None
-    return prefix, body
+        return prefix, None, suffix
+    hoist = []
+    for _a, _b, _sep, stripped in segs[i:j]:
+        if _LITERAL_ASSIGN.match(stripped):
+            # `... && S=/tmp/x && uv run $S/a.py`: a literal assignment in the
+            # middle of the work. Its value is the same whenever it is
+            # evaluated, and a plain (unexported) variable reaches no child
+            # process, so setting it once more in the caller's shell before
+            # the wrapper changes nothing the work can see - and leaves it
+            # set afterwards, where later commands expect it. An `export`
+            # is different: it does reach child processes, so hoisting one
+            # would change what the earlier commands saw. It stays a blocker.
+            hoist.append(stripped.strip())
+            continue
+        if _SHELL_STATE.match(stripped):
+            return prefix, None, suffix
+    if hoist:
+        prefix = prefix + "; ".join(hoist) + "; "
+    if restate:
+        body = "; ".join(restate) + "; " + body
+    return prefix, body, suffix
 
 
 def command_for_display(command):
@@ -1825,15 +2024,15 @@ def classify_command(command, tool_input=None, cfg=None):
     # else, the command runs untouched. And a command that backgrounds itself
     # with `&` returns at once, before the wrapper has anything to watch,
     # while its output goes to a log the wrapper then deletes.
-    prefix, body = split_shell_prefix(command)
+    prefix, body, suffix = split_shell_prefix(command)
     if body is None:
         result["why"] = "part of it changes the shell it runs in, or leaves it"
         return result
-    last = re.sub(r"(?:^|\s)#[^\n]*$", "", head.rstrip().split("\n")[-1])
+    last = re.sub(r"(?:^|\s)#[^\n]*$", "", body.rstrip().split("\n")[-1])
     if re.search(r"(?<![&|>])&\s*$", last):
         result["why"] = "it puts itself in the background"
         return result
-    result["prefix"], result["body"] = prefix, body
+    result["prefix"], result["body"], result["suffix"] = prefix, body, suffix
     result["name"] = suggest_job_name(body[:2000])
     segments = command_segments(body) or [body[:2000]]
 

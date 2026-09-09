@@ -574,6 +574,56 @@ ck("rule matching is exact about the prefix", not cc.rule_allows("python3x train
    and cc.rule_allows("python3", ["Bash(python3:*)"]) and cc.rule_allows("make", ["Bash(make)"]) and not cc.rule_allows("make x", ["Bash(make)"]))
 shutil.rmtree(_rh, ignore_errors=True); shutil.rmtree(_rp, ignore_errors=True)
 
+print()
+print("=== set a variable, then do the work: wrapped, and the variable survives ===")
+_w = tempfile.mkdtemp(prefix="agent-progress-assign-")
+_env = dict(os.environ, AGENT_PROGRESS_HOME=os.path.join(_w, "st"), AGENT_PROGRESS_NOTIFY="false")
+subprocess.run([sys.executable, ENGINE, "config", "--set", "auto_track_after_seconds=60"], capture_output=True, env=_env)
+_cmd = ("cd %s && J=%s/tmp && mkdir -p $J && cat > $J/a.py <<'EOF'\nimport os, sys\nprint('ran', sys.argv[1:])\nEOF\n"
+        "python3 $J/a.py one two" % (_w, _w))
+r = subprocess.run([sys.executable, os.path.join(HOOKS, "auto_track.py")],
+                   input=json.dumps({"tool_name": "Bash", "tool_input": {"command": _cmd, "timeout": 600000}, "session_id": "as", "cwd": _w}),
+                   capture_output=True, text=True, env=_env)
+_wrapped = json.loads(r.stdout)["hookSpecificOutput"]["updatedInput"]["command"] if r.stdout.strip() else None
+ck("the command is wrapped", _wrapped is not None and "exec --name" in _wrapped, str(_wrapped)[:100])
+def _run(c):
+    return subprocess.run(["/bin/bash", "-c", c + '\necho "__after J=$J rc=$?"'], cwd="/", capture_output=True, text=True, env=_env)
+_a, _b = _run(_cmd), _run(_wrapped or _cmd)
+ck("output, exit code and the variable afterwards are identical to the raw command",
+   _a.stdout == _b.stdout and _a.stderr == _b.stderr and "J=%s/tmp" % _w in _b.stdout, "%r vs %r" % (_a.stdout[-80:], _b.stdout[-80:]))
+shutil.rmtree(_w, ignore_errors=True)
+
+print()
+print("=== the shapes a real session used: setup, work, then more shell ===")
+_w = tempfile.mkdtemp(prefix="agent-progress-shapes-")
+os.makedirs(os.path.join(_w, "sub"))
+open(os.path.join(_w, "train.py"), "w").write("import os,sys\nprint('ran', sys.argv[1:], os.path.basename(os.getcwd()))\n"
+                                              "sys.exit(int(sys.argv[1]) if sys.argv[1:] and sys.argv[1].isdigit() else 0)\n")
+_env = dict(os.environ, AGENT_PROGRESS_HOME=os.path.join(_w, "st"), AGENT_PROGRESS_NOTIFY="false")
+subprocess.run([sys.executable, ENGINE, "config", "--set", "auto_track_after_seconds=60"], capture_output=True, env=_env)
+def _hook(cmd):
+    r = subprocess.run([sys.executable, os.path.join(HOOKS, "auto_track.py")],
+                       input=json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd, "timeout": 600000}, "session_id": "sh", "cwd": _w}),
+                       capture_output=True, text=True, env=_env)
+    return json.loads(r.stdout)["hookSpecificOutput"]["updatedInput"]["command"] if r.stdout.strip() else None
+def _run(c):
+    return subprocess.run(["/bin/bash", "-c", c + '\n__rc=$?; echo "__END pwd=$(basename "$(pwd)") S=$S rc=$__rc"'],
+                          cwd=_w, capture_output=True, text=True, env=_env)
+_T = os.path.join(_w, "train.py")
+for label, cmd, wrapped_expected in (
+        ("commit, then S=..., then the work", "git init -q . 2>/dev/null; S=%s && python3 $S 3" % _T, True),
+        ("edit with a heredoc, then S=..., then the work",
+         "cat > %s/e.py <<'EOF'\nprint('edited; ok && fine')\nEOF\npython3 %s/e.py && S=%s && python3 $S 2" % (_w, _w, _T), True),
+        ("the work, then cd", "python3 %s 4; cd sub" % _T, True),
+        ("python -c with assignment lines", "python3 -c \"\nrng=1\nd=dict(a=1)\nprint('inline', rng, d)\n\"", True),
+        ("cd in the middle is left alone", "python3 %s 0 && cd sub && python3 %s 0" % (_T, _T), False)):
+    w = _hook(cmd)
+    ck("%s: %s" % (label, "wrapped" if wrapped_expected else "untouched"), (w is not None) == wrapped_expected, str(w)[:120])
+    a, b = _run(cmd), _run(w or cmd)
+    ck("  and runs identically, shell state included", (a.stdout, a.stderr, a.returncode) == (b.stdout, b.stderr, b.returncode),
+       "%r vs %r" % (a.stdout[-90:], b.stdout[-90:]))
+shutil.rmtree(_w, ignore_errors=True)
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

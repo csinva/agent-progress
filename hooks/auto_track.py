@@ -114,6 +114,7 @@ def main():
                                        cwd=data.get("cwd"))
         if wrapped is None:
             return 0        # the user's allow rules would not match any wrapper: run it as is
+        wrapped += verdict.get("suffix", "")   # a trailing cd, back in the caller's shell
         updated = dict(tool_input, command=wrapped)
         emit({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",

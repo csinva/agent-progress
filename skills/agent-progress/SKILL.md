@@ -9,7 +9,9 @@ description: Run and track any long-running job with a progress bar in the Claud
 minutes to days. Your involvement is almost entirely **up front**:
 
 1. Decide **how this particular job's progress can be observed**.
-2. Give a rough estimate of how long it will take.
+2. Give a rough estimate of how long it will take - on the command line, as
+   `AGENT_PROGRESS_ETA=<duration>` in front of a plain command, or `--eta` for
+   `agent-progress run`. A bar without one shows `?` for the time remaining.
 3. Launch it.
 
 After that a background watcher does the work. It re-observes the job on a slow
@@ -79,16 +81,27 @@ ends, with the command's own exit code. There is no note, because there is
 nothing to tell you - you are watching the same command you would have been
 watching anyway. Putting something in the background is your decision, not the
 plugin's.
-- **Give it an estimate if it is worth one.** The hook cannot guess a duration -
-  that is the one thing only you can supply:
+- **Give it an estimate, before it starts.** The hook cannot guess a duration -
+  that is the one thing only you can supply - and once a foreground command is
+  running you cannot reach it. So put the estimate on the command line itself,
+  every time you run something that will take more than a minute:
+
+  ```bash
+  AGENT_PROGRESS_ETA=40m python train.py --epochs 50
+  AGENT_PROGRESS_ETA=15m AGENT_PROGRESS_NAME=eval uv run python eval.py
+  ```
+
+  That is an ordinary shell line - the variable reaches the command and means
+  nothing to it - and the hook reads it as the estimate for the bar, and as
+  reason enough to track the command. A bar with no estimate shows `?` where
+  the time remaining should be; do not let one run that way. Rough is fine:
+  the bar measures the job as it goes and corrects your figure. If you only
+  find out it is long once it is running detached, or after it has been
+  tracked without one:
 
   ```bash
   agent-progress update <id> --eta 40m --note "what it is doing"
   ```
-
-  Judge whether it is worth doing. A job that will be over in a minute never
-  reaches the statusline anyway, so leave it alone and carry on. Spend the
-  estimate on things that will actually run for a while.
 - **Check what it is watching.** Nothing picks a monitor for it, so progress comes
   from reading markers in the log. If the job instead writes files, grows one
   file, or prints stage names, say so:

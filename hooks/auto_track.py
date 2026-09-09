@@ -111,7 +111,7 @@ def main():
         # what gets the bar.
         wrapped = cc.wrap_within_rules(verdict.get("prefix", ""), verdict.get("body") or command,
                                        verdict["name"], cfg["auto_track_after_seconds"],
-                                       cwd=data.get("cwd"))
+                                       cwd=data.get("cwd"), eta=verdict.get("eta"))
         if wrapped is None:
             return 0        # the user's allow rules would not match any wrapper: run it as is
         wrapped += verdict.get("suffix", "")   # a trailing cd, back in the caller's shell

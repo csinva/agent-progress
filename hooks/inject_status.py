@@ -348,6 +348,17 @@ def main():
         # A fresh install whose ~/.local/bin is not on PATH yet: every
         # `agent-progress ...` the skill suggests would fail with "command not
         # found". One line, once, saying what to type instead.
+        # The one thing the plugin cannot do for itself is estimate how long
+        # a command will take. Said here, in the model's context, on every
+        # session start - startup, resume, clear, compact all rebuild it -
+        # because a skill is opened only when the model chooses to, and a
+        # bar with no estimate shows nothing where the time remaining goes.
+        if cfg["auto_track"] != "off":
+            emit(event, "agent-progress: before running any command likely to take more than "
+                        "a minute, put your estimate of its duration on the command line: "
+                        "AGENT_PROGRESS_ETA=<duration> <command>  (for example "
+                        "AGENT_PROGRESS_ETA=20m python train.py). Rough is fine; the bar "
+                        "corrects it. Without one the bar shows no time remaining.")
         try:
             if not cc.launcher_is_on_path():
                 emit(event, "The agent-progress plugin is installed, but `agent-progress` is "

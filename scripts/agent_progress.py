@@ -2048,6 +2048,14 @@ def classify_command(command, tool_input=None, cfg=None):
         result["why"] = "it puts itself in the background"
         return result
     result["prefix"], result["body"], result["suffix"] = prefix, body, suffix
+    hints = hints_in_command(body)
+    if hints.get("name"):
+        result["name"] = hints["name"]
+    if hints.get("eta"):
+        result["eta"] = hints["eta"]
+        result.update(track=True, signal="estimate",
+                      why="it was given an estimate of %s" % hints["eta"])
+        return result
     result["name"] = suggest_job_name(body[:2000])
     segments = command_segments(body) or [body[:2000]]
 
@@ -2190,7 +2198,7 @@ def _interpreter_ok(tok):
         return False
 
 
-def wrap_within_rules(prefix, body, name, after, cwd=None):
+def wrap_within_rules(prefix, body, name, after, cwd=None, eta=None):
     """The wrapped command, in the form the user's allow rules are most likely
     to match.
 
@@ -2202,7 +2210,7 @@ def wrap_within_rules(prefix, body, name, after, cwd=None):
     no form of the wrapper, the command runs untouched: a bar is worth less
     than the command, and far less than the user's permission settings
     meaning what they say. None means leave it alone."""
-    plain = prefix + wrap_command(body, name, after=after)
+    plain = prefix + wrap_command(body, name, after=after, eta=eta)
     candidates = []
     engine = os.path.abspath(__file__)
     try:
@@ -2211,10 +2219,10 @@ def wrap_within_rules(prefix, body, name, after, cwd=None):
         tok = body.split()[0] if body.split() else ""
     base = os.path.basename(tok)
     if base.startswith("python") and _interpreter_ok(tok):
-        candidates.append(prefix + wrap_command(body, name, after=after,
+        candidates.append(prefix + wrap_command(body, name, after=after, eta=eta,
                                                 launcher="%s %s" % (tok, shlex.quote(engine))))
     elif base in ("bash", "sh", "zsh") and shutil.which(tok):
-        candidates.append(prefix + "%s -c %s" % (tok, shlex.quote(wrap_command(body, name, after=after))))
+        candidates.append(prefix + "%s -c %s" % (tok, shlex.quote(wrap_command(body, name, after=after, eta=eta))))
     candidates.append(plain)
     rules = permission_allow_rules(cwd)
     if rules and rule_allows(prefix + body, rules):
@@ -2225,7 +2233,31 @@ def wrap_within_rules(prefix, body, name, after, cwd=None):
     return candidates[0]
 
 
-def wrap_command(command, name, launcher=None, after=None):
+# Claude cannot reach a foreground command once it has started, and the hook
+# cannot guess how long a command will take. So the estimate travels with the
+# command: `AGENT_PROGRESS_ETA=40m python train.py` is an ordinary shell line
+# - the variable reaches the command and means nothing to it - and the hook
+# reads it as the estimate for the bar. `AGENT_PROGRESS_NAME=` names the job.
+_HINT = re.compile(r"(?:^|[;&|]\s*|\s)AGENT_PROGRESS_(ETA|NAME)=([^\s;&|'\"`$()]+)")
+
+
+def hints_in_command(command):
+    """{'eta': seconds, 'name': str} for whatever hints the command carries."""
+    out = {}
+    for key, val in _HINT.findall(command or ""):
+        if key == "ETA":
+            try:
+                secs = parse_duration(val)
+            except SystemExit:
+                continue            # not a duration: no estimate, and no fuss
+            if secs:
+                out["eta"] = val
+        elif key == "NAME":
+            out["name"] = slug(val)
+    return out
+
+
+def wrap_command(command, name, launcher=None, after=None, eta=None):
     """The tracked form of a command.
 
     The original is passed as a single quoted string, never interpolated raw:
@@ -2239,6 +2271,8 @@ def wrap_command(command, name, launcher=None, after=None):
     # wrapper runs the command and waits for it either way; whether that happens
     # in the foreground is the caller's business.
     opts = "" if after is None else " --after %s" % shlex.quote(str(after))
+    if eta:
+        opts += " --eta %s" % shlex.quote(str(eta))
     return "%s exec --name %s%s --shell %s" % (
         launcher, shlex.quote(name), opts, shlex.quote(command))
 
@@ -4379,6 +4413,7 @@ def _register(command, name, log, exitf, pid, started, cfg, args):
     with the command's own exit code. All this adds is a job record and a
     watcher, so a bar can appear in the statusline. Deciding to put something in
     the background is the caller's business, not this plugin's."""
+    eta = parse_duration(getattr(args, "eta", None))
     with state_rw() as st:
         jid = new_id(st, name)
         st["jobs"][jid] = {
@@ -4387,7 +4422,8 @@ def _register(command, name, log, exitf, pid, started, cfg, args):
             "unit": "it", "total": None, "total_locked": False, "step": None,
             "units": None, "pct": None, "state": "running", "exit_code": None,
             "started": started, "updated": time.time(), "ended": None,
-            "eta_end": None, "eta_prior_s": None, "note": None, "pattern": None,
+            "eta_end": (started + eta) if eta else None, "eta_prior_s": eta,
+            "note": None, "pattern": None,
             "monitor": {"kind": "auto"}, "interval_override": None,
             "est_total_s": None, "initial_est_total_s": None,
             "log_offset": 0, "force_show": False, "auto_launched": True,
@@ -5298,6 +5334,7 @@ def build_parser():
     sp = sub.add_parser("exec", help="run a command, tracking it only if it proves slow")
     sp.add_argument("--after", help="start tracking after this long (default: config)")
     sp.add_argument("--name", help="job name if it does get tracked")
+    sp.add_argument("--eta", help="how long you expect it to take, if it does get tracked")
     sp.add_argument("--shell", help="the command, as one string, run with bash -c (sh if there is no bash)")
     sp.add_argument("--cwd", help="working directory for the command")
     sp.add_argument("--desc", help="human description of the job")

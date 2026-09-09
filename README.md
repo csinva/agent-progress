@@ -447,6 +447,15 @@ agent-progress config --set auto_track_ignore='^\./scripts/quick'
 AGENT_PROGRESS_NO_AUTO=1 <command>                         # just this once
 ```
 
+The one thing the hook cannot supply is how long the command will take, so
+Claude is asked - once, at session start - to put its estimate on any command
+likely to run more than a minute: `AGENT_PROGRESS_ETA=20m python train.py`. That
+is an ordinary shell line (the variable reaches the command and means nothing
+to it); the hook reads it as the bar's estimate, and as reason enough to track
+the command. `AGENT_PROGRESS_NAME=eval` names the job. Without an estimate the
+bar shows `?` where the time remaining goes until the job's own progress can be
+measured.
+
 Nothing is ever silently allowed past a permission prompt: the rewritten command
 still goes through the normal approval flow. It is also kept within your allow
 rules: Claude Code checks the rewritten command, so `Bash(python3:*)` would stop

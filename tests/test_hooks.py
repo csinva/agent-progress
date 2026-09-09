@@ -498,7 +498,8 @@ _env_on = dict(_env_off, PATH=_bin + os.pathsep + _off)
 r = subprocess.run([sys.executable, STATUS, "SessionStart"], input=json.dumps({"session_id": "fresh2"}),
                    capture_output=True, text=True, env=_env_on)
 _d = json.loads(r.stdout) if r.stdout.strip() else {}
-ck("with it on PATH, no launcher advice is given", "hookSpecificOutput" not in _d, r.stdout[:120])
+ck("with it on PATH, no launcher advice is given",
+   "not on PATH" not in _d.get("hookSpecificOutput", {}).get("additionalContext", ""), r.stdout[:160])
 r = subprocess.run([sys.executable, ENGINE, "doctor"], capture_output=True, text=True, env=_env_off)
 ck("doctor says the launcher is off PATH and what to use", "NOT on PATH" in r.stdout and "~/.local/bin/agent-progress" in r.stdout,
    r.stdout[-300:])
@@ -532,7 +533,8 @@ r = subprocess.run(["bash", os.path.join(ROOT, "scripts", "install-statusline.sh
 wired = json.load(open(os.path.join(_h, ".claude", "settings.json")))["statusLine"]["command"]
 ck("the installer wires the interpreter by full path", wired.startswith('"/') and "agent_progress.py" in wired, wired[:80])
 objs, d = _start({"session_id": "u3"}, env=dict(_env, PATH=os.path.join(_h, ".local", "bin") + os.pathsep + _off))
-ck("after installing, session start is silent", not objs, str(objs)[:120])
+ck("after installing, session start has nothing to tell the person", "systemMessage" not in d, str(objs)[:120])
+ck("but still asks Claude for estimates", "AGENT_PROGRESS_ETA" in d.get("hookSpecificOutput", {}).get("additionalContext", ""), str(d)[:160])
 shutil.rmtree(_h, ignore_errors=True)
 
 print()
@@ -643,6 +645,33 @@ ck("the installer sets refreshInterval", _sl.get("refreshInterval") == 1, str(_s
 r = subprocess.run([sys.executable, ENGINE, "doctor"], capture_output=True, text=True, env=_env)
 ck("and doctor is satisfied", "refreshed every second" in r.stdout, r.stdout[-200:])
 shutil.rmtree(_h, ignore_errors=True)
+
+print()
+print("=== the estimate travels with the command ===")
+_w = tempfile.mkdtemp(prefix="agent-progress-eta-")
+_env = dict(os.environ, AGENT_PROGRESS_HOME=os.path.join(_w, "st"), AGENT_PROGRESS_NOTIFY="false", CLAUDE_CODE_SESSION_ID="eta")
+subprocess.run([sys.executable, ENGINE, "config", "--set", "auto_track_after_seconds=0.3"], capture_output=True, env=_env)
+def _hook(cmd):
+    r = subprocess.run([sys.executable, os.path.join(HOOKS, "auto_track.py")],
+                       input=json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}, "session_id": "eta", "cwd": _w}),
+                       capture_output=True, text=True, env=_env)
+    return json.loads(r.stdout)["hookSpecificOutput"]["updatedInput"]["command"] if r.stdout.strip() else None
+w = _hook("AGENT_PROGRESS_ETA=10m python3 -c 'import time; time.sleep(1)'")
+ck("a command with an estimate is tracked because of it", w is not None and "--eta 10m" in w, str(w)[:160])
+subprocess.run(["/bin/bash", "-c", w], capture_output=True, env=_env, timeout=60)
+_jobs = json.load(open(os.path.join(_w, "st", "state.json")))["jobs"]
+_j = list(_jobs.values())[0]
+ck("and the job records it", _j.get("eta_prior_s") == 600 and _j.get("eta_end"), str({k: _j.get(k) for k in ("id", "eta_prior_s", "eta_end")}))
+w = _hook("AGENT_PROGRESS_ETA=2h AGENT_PROGRESS_NAME=evalrun uv run python eval.py")
+ck("a name hint names the job", w is not None and "--name evalrun" in w and "--eta 2h" in w, str(w)[:160])
+w = _hook("cd %s && AGENT_PROGRESS_ETA=5m python3 -c 'print(1)'" % _w)
+ck("the hint is read after a setup prefix too", w is not None and "--eta 5m" in w, str(w)[:160])
+ck("a hint that is not a duration is ignored, and the command untouched",
+   _hook("AGENT_PROGRESS_ETA=soon python3 -c 'print(1)'") is None)
+r = subprocess.run(["/bin/bash", "-c", "AGENT_PROGRESS_ETA=10m python3 -c 'import os; print(os.environ.get(\"AGENT_PROGRESS_ETA\"))'"],
+                   capture_output=True, text=True)
+ck("the variable is an ordinary one to the command", r.stdout.strip() == "10m")
+shutil.rmtree(_w, ignore_errors=True)
 
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:

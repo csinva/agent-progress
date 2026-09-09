@@ -670,7 +670,7 @@ def session_is_new(session_id, st=None):
 
 
 def statusline_wired():
-    return statusline_status()[0] == "ok"
+    return statusline_status()[0] in ("ok", "static")
 
 
 def statusline_status():
@@ -684,22 +684,26 @@ def statusline_status():
     that it runs a different copy of the engine than this one."""
     try:
         with open(os.path.join(HOME, ".claude", "settings.json")) as f:
-            cmd = (json.load(f).get("statusLine") or {}).get("command") or ""
+            sl = json.load(f).get("statusLine") or {}
+            cmd = sl.get("command") or ""
     except Exception:
         return "none", None
     if "agent_progress" not in cmd:
         return "none", None
     m = re.search(r'"([^"]*agent_progress\.py)"', cmd) or re.search(r"(\S*agent_progress\.py)", cmd)
     wired = m.group(1) if m else None
-    if not wired:
-        return "ok", None
-    if not os.path.exists(wired):
+    if wired and not os.path.exists(wired):
         return "missing", wired
     try:
-        if os.path.realpath(wired) != os.path.realpath(os.path.abspath(__file__)):
+        if wired and os.path.realpath(wired) != os.path.realpath(os.path.abspath(__file__)):
             return "other", wired
     except OSError:
         pass
+    if not sl.get("refreshInterval"):
+        # Wired, but Claude Code will only re-run it when a message arrives:
+        # the bar cannot move while a command runs. An install from before
+        # the installer set refreshInterval, or a hand-written setting.
+        return "static", wired
     return "ok", wired
 
 
@@ -716,6 +720,10 @@ def statusline_advice():
     if kind == "other":
         return ("agent-progress: the statusline runs another copy of the plugin (%s), not "
                 "this one. If that is not intended, run:  %s" % (where, installer))
+    if kind == "static":
+        return ("agent-progress: the statusline is wired but has no refreshInterval, so a bar "
+                "cannot move while a command runs. Run once, then restart Claude Code:  %s"
+                % installer)
     return None
 
 
@@ -1507,6 +1515,13 @@ def job_visible(job, cfg, now=None):
     job that was estimated at 90s and is still going at 5 minutes shows up."""
     now = now or time.time()
     if job.get("force_show"):
+        return True
+    if job.get("auto_launched"):
+        # It exists because it outlived the auto-track threshold: it has
+        # already proven itself long. Holding it back for the two-minute floor
+        # as well left most tracked commands with no bar at all - a job that
+        # ran ninety seconds was never shown, one that ran four minutes was
+        # shown for two - which is the one complaint the bar exists to answer.
         return True
     if job.get("state") in ("failed", "stalled"):
         return True          # a crash is always worth showing, however short the job
@@ -5221,7 +5236,9 @@ def cmd_doctor(args):
         print("session    : %s - started with the plugin loaded" % sid[:8])
     kind, where = statusline_status()
     print("statusline : %s" % {
-        "ok": "wired into settings.json",
+        "ok": "wired into settings.json, refreshed every second",
+        "static": "wired, but without refreshInterval - the bar cannot move while a command "
+                  "runs; run scripts/install-statusline.sh again, then restart Claude Code",
         "none": "NOT wired - run scripts/install-statusline.sh, then restart Claude Code",
         "missing": "wired to %s, which does not exist - run scripts/install-statusline.sh" % where,
         "other": "wired to a different copy of the engine: %s" % where}[kind])

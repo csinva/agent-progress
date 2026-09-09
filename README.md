@@ -60,7 +60,10 @@ git clone https://github.com/csinva/agent-progress ~/.claude/skills/agent-progre
 ```
 
 Claude Code auto-loads anything in `~/.claude/skills/` as a plugin. The install
-script wires the statusline and installs an `agent-progress` command into
+script wires the statusline - with `refreshInterval: 1`, which matters: without
+it Claude Code re-runs the statusline only when a message arrives, so a bar
+would sit unchanged for the whole of a foreground command and appear only once
+it had finished - and installs an `agent-progress` command into
 `~/.local/bin`; it backs up `~/.claude/settings.json` first, and `--uninstall`
 reverts it. Restart Claude Code afterwards. If `~/.local/bin` is not on your
 `PATH` the script says so and everything still works by full path - Claude is
@@ -426,8 +429,10 @@ short. `defer` pays nothing up front and fills the estimate in afterwards.
 
 Two more things kept cheap:
 
-- A job tracked below the two-minute statusline floor is recorded but never
-  shown, and Claude is told only not to re-launch it.
+- A job started with `run` or `start` and estimated under the two-minute
+  statusline floor is recorded but not shown (`--force-show` pins it). A job
+  tracked automatically is shown from the moment it is tracked: it has already
+  outlived the threshold, which is the clutter guard.
 - Job status used to be re-sent to Claude on every prompt. It now goes out only
   when the picture changes — a job appears, finishes, or gains an estimate — and
   otherwise at most once per `context_min_interval_seconds` (default 5 minutes).

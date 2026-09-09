@@ -57,6 +57,11 @@ else:
         # rather than a terminal may not have the same PATH as this shell
         "command": '"%s" "%s" statusline' % (py, engine),
         "padding": 0,
+        # Without this, Claude Code re-runs the statusline only when a message
+        # arrives - once or twice during a whole command - so a bar registered
+        # twenty seconds into a run was never drawn until the run had ended.
+        # Re-run every second and the bar moves while the command runs.
+        "refreshInterval": 1,
     }
     print("statusLine wired to %s" % engine)
 

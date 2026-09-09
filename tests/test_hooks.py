@@ -624,6 +624,26 @@ for label, cmd, wrapped_expected in (
        "%r vs %r" % (a.stdout[-90:], b.stdout[-90:]))
 shutil.rmtree(_w, ignore_errors=True)
 
+print()
+print("=== a statusline that is wired but never refreshed is explained ===")
+_h = tempfile.mkdtemp(prefix="agent-progress-static-")
+os.makedirs(os.path.join(_h, ".claude"))
+_env = dict(os.environ, HOME=_h, AGENT_PROGRESS_HOME=os.path.join(_h, "state"))
+with open(os.path.join(_h, ".claude", "settings.json"), "w") as f:
+    json.dump({"statusLine": {"type": "command", "command": 'python3 "%s" statusline' % ENGINE}}, f)
+r = subprocess.run([sys.executable, STATUS, "SessionStart"], input=json.dumps({"session_id": "st1", "source": "startup"}),
+                   capture_output=True, text=True, env=_env)
+_d = json.loads(r.stdout) if r.stdout.strip() else {}
+ck("an install without refreshInterval is told the bar cannot move", "refreshInterval" in _d.get("systemMessage", ""), repr(_d)[:160])
+r = subprocess.run([sys.executable, ENGINE, "doctor"], capture_output=True, text=True, env=_env)
+ck("doctor says the same", "without refreshInterval" in r.stdout, r.stdout[-300:])
+r = subprocess.run(["bash", os.path.join(ROOT, "scripts", "install-statusline.sh")], capture_output=True, text=True, env=_env)
+_sl = json.load(open(os.path.join(_h, ".claude", "settings.json")))["statusLine"]
+ck("the installer sets refreshInterval", _sl.get("refreshInterval") == 1, str(_sl))
+r = subprocess.run([sys.executable, ENGINE, "doctor"], capture_output=True, text=True, env=_env)
+ck("and doctor is satisfied", "refreshed every second" in r.stdout, r.stdout[-200:])
+shutil.rmtree(_h, ignore_errors=True)
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

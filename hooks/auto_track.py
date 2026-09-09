@@ -109,9 +109,17 @@ def main():
         # A leading `cd repo &&` or `export X=1 &&` stays in front, in the
         # caller's own shell, where its effect belongs; the work after it is
         # what gets the bar.
+        # The tool's timeout is an upper bound the caller chose; Claude Code's
+        # default, when none is given, is two minutes. Either is a better
+        # first estimate than none, and the bar says which kind it is.
+        try:
+            bound = int(float(tool_input.get("timeout") or 120000) / 1000)
+        except (TypeError, ValueError):
+            bound = 120
         wrapped = cc.wrap_within_rules(verdict.get("prefix", ""), verdict.get("body") or command,
                                        verdict["name"], cfg["auto_track_after_seconds"],
-                                       cwd=data.get("cwd"), eta=verdict.get("eta"))
+                                       cwd=data.get("cwd"), eta=verdict.get("eta"),
+                                       bound="%ds" % bound)
         if wrapped is None:
             return 0        # the user's allow rules would not match any wrapper: run it as is
         wrapped += verdict.get("suffix", "")   # a trailing cd, back in the caller's shell

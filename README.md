@@ -452,9 +452,14 @@ Claude is asked - once, at session start - to put its estimate on any command
 likely to run more than a minute: `AGENT_PROGRESS_ETA=20m python train.py`. That
 is an ordinary shell line (the variable reaches the command and means nothing
 to it); the hook reads it as the bar's estimate, and as reason enough to track
-the command. `AGENT_PROGRESS_NAME=eval` names the job. Without an estimate the
-bar shows `?` where the time remaining goes until the job's own progress can be
-measured.
+the command. `AGENT_PROGRESS_NAME=eval` names the job. When no estimate is
+given, the bar still has one: what the same command, or a job of the same
+name, took on earlier runs (the plugin keeps the last ten durations per name);
+failing that, the Bash tool's timeout as an upper bound, drawn as `≤`; failing
+that, what tracked jobs typically take. Each is marked for what it is - `~` for
+a guess, `≤` for a bound, nothing for a measurement - and `agent-progress ls
+--json` reports the source. A measured rate from the job's own progress
+replaces any of them as it arrives.
 
 Nothing is ever silently allowed past a permission prompt: the rewritten command
 still goes through the normal approval flow. It is also kept within your allow

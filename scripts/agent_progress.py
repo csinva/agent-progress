@@ -568,7 +568,19 @@ def _prune_sessions(st):
         st["sessions"] = fresh
 
 
+def _remember_finished(st):
+    """Every job that has finished since the last write leaves its duration
+    in the per-name history, whoever closed it - the wrapper, the watcher,
+    the reaper, a hand. The record itself may be replaced by the next run of
+    the same name; the figure stays."""
+    for job in list((st.get("jobs") or {}).values()):
+        if isinstance(job, dict) and job.get("state") == "done" and not job.get("history_kept"):
+            remember_duration(st, re.sub(r"-\d+$", "", job.get("id") or "") or "job", job)
+            job["history_kept"] = True
+
+
 def _prune(st):
+    _remember_finished(st)
     _sweep_temp_files()
     _prune_sessions(st)
     _prune_finished(st)
@@ -756,6 +768,33 @@ def new_id(st, name):
     while "%s-%d" % (base, n) in st["jobs"]:
         n += 1
     return "%s-%d" % (base, n)
+
+
+HISTORY_RUNS = 10       # durations kept per job name
+HISTORY_NAMES = 200     # names kept
+
+
+def remember_duration(st, base, job):
+    """Keep how long a finished job took, by name, when its record is about
+    to be replaced by the next run of the same name. Without this the state
+    held only the latest run of `train`, and the estimate for the next one
+    could only ever be that single figure."""
+    if job.get("state") != "done" or not job.get("started") or not job.get("ended"):
+        return
+    dur = job["ended"] - job["started"]
+    if dur < 5:
+        return
+    hist = st.setdefault("history", {})
+    if not isinstance(hist, dict):
+        hist = st["history"] = {}
+    runs = hist.setdefault(base, [])
+    if not isinstance(runs, list):
+        runs = hist[base] = []
+    runs.append(round(dur, 1))
+    del runs[:-HISTORY_RUNS]
+    if len(hist) > HISTORY_NAMES:
+        for k in list(hist)[:len(hist) - HISTORY_NAMES]:
+            hist.pop(k, None)
 
 
 def resolve(st, ref, mutating=False, any_session=False, flag="--any-session"):
@@ -1030,6 +1069,74 @@ def _measured_rate(job, now, cfg):
     return (s1 - s0) / (t1 - t0), len(win) - 1
 
 
+PRIOR_SOURCES = ("claude", "history", "bound", "typical", "scheduler")
+
+
+def _median(xs):
+    xs = sorted(xs)
+    return xs[len(xs) // 2] if xs else None
+
+
+def _strip_hints(cmd):
+    """The command without its AGENT_PROGRESS_* hints, so two runs that
+    differ only in the estimate given still count as the same command."""
+    return re.sub(r"(?:^|\s)AGENT_PROGRESS_(?:ETA|NAME)=[^\s;&|'\"`$()]*", " ", cmd or "").strip()
+
+
+def history_prior(st, cmd=None, name=None):
+    """(seconds, source, n): what earlier runs say this will take.
+
+    A bar with no estimate shows nothing where the time remaining goes, and
+    the plugin has usually seen this exact command finish before - a training
+    script is run again and again while it is being worked on. The median of
+    those runs is a better guess than anything but a fresh figure from
+    Claude. Same command first; then any job of the same name."""
+    jobs = [j for j in (st.get("jobs") or {}).values()
+            if isinstance(j, dict) and j.get("state") == "done"
+            and j.get("started") and j.get("ended") and j["ended"] - j["started"] >= 5]
+    key = _strip_hints(cmd) if cmd else None
+    exact = [j["ended"] - j["started"] for j in jobs if key and _strip_hints(j.get("cmd")) == key]
+    base = re.sub(r"-\d+$", "", name or "") or None
+    kept = (st.get("history") or {}).get(base) if base and isinstance(st.get("history"), dict) else None
+    byname = [x for x in (kept or []) if isinstance(x, (int, float)) and x > 0]
+    # The kept history holds every finished run of this name, including the
+    # ones whose records are still here; several of those beat one exact
+    # match of the command text, and one exact match beats one by name.
+    if len(byname) >= 2:
+        return _median(byname), "history", len(byname)
+    if exact:
+        return _median(exact), "history", len(exact)
+    if byname:
+        return _median(byname), "history", len(byname)
+    return None, None, 0
+
+
+def typical_prior(st):
+    """The median of every tracked job that finished: a last resort with a
+    label that says so, better than a blank when it is all there is."""
+    durs = [j["ended"] - j["started"] for j in (st.get("jobs") or {}).values()
+            if isinstance(j, dict) and j.get("state") == "done" and j.get("auto_launched")
+            and j.get("started") and j.get("ended") and j["ended"] - j["started"] >= 5]
+    if len(durs) >= 3:
+        return _median(durs), "typical", len(durs)
+    return None, None, 0
+
+
+def choose_prior(st, cmd=None, name=None, eta=None, bound=None):
+    """(seconds, source, n) for a job that is starting. Claude's figure wins;
+    then what the same command took before; then the tool's timeout, which
+    is an upper bound the caller chose; then what tracked jobs typically
+    take. None only when there is nothing whatever to go on."""
+    if eta:
+        return eta, "claude", 0
+    secs, src, n = history_prior(st, cmd, name)
+    if secs:
+        return secs, src, n
+    if bound:
+        return bound, "bound", 0
+    return typical_prior(st)
+
+
 def estimate(job, now=None, cfg=None):
     """Fuse Claude's prior ETA with the rate measured from the log.
 
@@ -1092,7 +1199,8 @@ def estimate(job, now=None, cfg=None):
     elif measured_rem is not None:
         remaining, source = measured_rem, "measured"
     elif prior_rem is not None:
-        remaining, source = prior_rem, "claude"
+        remaining = prior_rem
+        source = job.get("eta_prior_source") or "claude"
     else:
         remaining, source = None, None
 
@@ -1383,9 +1491,13 @@ def render_line(job, cfg, width=None, now=None):
         if cfg["show_clock"]:
             # tqdm's signature elapsed<remaining pair
             rem = fmt_dur(e["remaining"]) if e["remaining"] is not None else "?"
-            mark = "~" if e["source"] in ("claude", "blend") else ""
+            # `~` for a guess, `\u2264` for an upper bound the caller set; nothing for
+            # a measurement
+            mark = ("\u2264" if e["source"] == "bound"
+                    else "~" if e["source"] in ("claude", "history", "typical", "blend", "scheduler")
+                    else "")
             parts.append(paint("%s<%s%s" % (fmt_dur(e["elapsed"]), mark, rem),
-                               "warn" if e["source"] == "claude" else "text", color))
+                               "warn" if e["source"] in ("claude", "typical", "bound") else "text", color))
         if cfg["show_rate"] and e["rate"] and job.get("total"):
             parts.append(paint(fmt_rate(e["rate"], unit or "it"), "dim", color))
         if cfg["show_eta_clock"] and e["eta_wall"]:
@@ -1500,7 +1612,11 @@ def render_block(job, cfg, width):
     if e["source"]:
         bits.append("eta: " + {"measured": "measured from log",
                                "claude": "Claude's estimate",
-                               "blend": "blended (%d obs)" % e["nobs"]}[e["source"]])
+                               "history": "from %s earlier run(s)" % (job.get("eta_prior_n") or "earlier"),
+                               "bound": "the tool's timeout, an upper bound",
+                               "typical": "what tracked jobs typically take",
+                               "scheduler": "the scheduler's time limit",
+                               "blend": "blended (%d obs)" % e["nobs"]}.get(e["source"], e["source"]))
     if job.get("log"):
         bits.append(job["log"])
     sub = paint("   " + "  ·  ".join(bits), "dim", color)
@@ -2198,7 +2314,7 @@ def _interpreter_ok(tok):
         return False
 
 
-def wrap_within_rules(prefix, body, name, after, cwd=None, eta=None):
+def wrap_within_rules(prefix, body, name, after, cwd=None, eta=None, bound=None):
     """The wrapped command, in the form the user's allow rules are most likely
     to match.
 
@@ -2210,7 +2326,7 @@ def wrap_within_rules(prefix, body, name, after, cwd=None, eta=None):
     no form of the wrapper, the command runs untouched: a bar is worth less
     than the command, and far less than the user's permission settings
     meaning what they say. None means leave it alone."""
-    plain = prefix + wrap_command(body, name, after=after, eta=eta)
+    plain = prefix + wrap_command(body, name, after=after, eta=eta, bound=bound)
     candidates = []
     engine = os.path.abspath(__file__)
     try:
@@ -2219,10 +2335,10 @@ def wrap_within_rules(prefix, body, name, after, cwd=None, eta=None):
         tok = body.split()[0] if body.split() else ""
     base = os.path.basename(tok)
     if base.startswith("python") and _interpreter_ok(tok):
-        candidates.append(prefix + wrap_command(body, name, after=after, eta=eta,
+        candidates.append(prefix + wrap_command(body, name, after=after, eta=eta, bound=bound,
                                                 launcher="%s %s" % (tok, shlex.quote(engine))))
     elif base in ("bash", "sh", "zsh") and shutil.which(tok):
-        candidates.append(prefix + "%s -c %s" % (tok, shlex.quote(wrap_command(body, name, after=after, eta=eta))))
+        candidates.append(prefix + "%s -c %s" % (tok, shlex.quote(wrap_command(body, name, after=after, eta=eta, bound=bound))))
     candidates.append(plain)
     rules = permission_allow_rules(cwd)
     if rules and rule_allows(prefix + body, rules):
@@ -2257,7 +2373,7 @@ def hints_in_command(command):
     return out
 
 
-def wrap_command(command, name, launcher=None, after=None, eta=None):
+def wrap_command(command, name, launcher=None, after=None, eta=None, bound=None):
     """The tracked form of a command.
 
     The original is passed as a single quoted string, never interpolated raw:
@@ -2273,6 +2389,8 @@ def wrap_command(command, name, launcher=None, after=None, eta=None):
     opts = "" if after is None else " --after %s" % shlex.quote(str(after))
     if eta:
         opts += " --eta %s" % shlex.quote(str(eta))
+    if bound and not eta:
+        opts += " --bound %s" % shlex.quote(str(bound))
     return "%s exec --name %s%s --shell %s" % (
         launcher, shlex.quote(name), opts, shlex.quote(command))
 
@@ -3985,6 +4103,11 @@ def cmd_run(args):
     with state_rw() as st:
         job = _new_job(args, cmd=cmd, log=log, exit_file=exitf, pid=proc.pid)
         job["id"] = jid
+        if not job.get("eta_prior_s"):
+            secs, src, n = choose_prior(st, cmd=cmd, name=jid)
+            if secs:
+                job["eta_end"], job["eta_prior_s"] = job["started"] + secs, secs
+                job["eta_prior_source"], job["eta_prior_n"] = src, n
         st["jobs"][jid] = job
     wpid = spawn_watcher(jid)
     with state_rw() as st:
@@ -4413,9 +4536,11 @@ def _register(command, name, log, exitf, pid, started, cfg, args):
     with the command's own exit code. All this adds is a job record and a
     watcher, so a bar can appear in the statusline. Deciding to put something in
     the background is the caller's business, not this plugin's."""
-    eta = parse_duration(getattr(args, "eta", None))
     with state_rw() as st:
         jid = new_id(st, name)
+        eta, eta_src, eta_n = choose_prior(
+            st, cmd=command, name=jid, eta=parse_duration(getattr(args, "eta", None)),
+            bound=parse_duration(getattr(args, "bound", None)))
         st["jobs"][jid] = {
             "id": jid, "desc": args.desc, "cmd": command, "log": log,
             "exit_file": exitf, "pid": pid, "host": HOST,
@@ -4423,6 +4548,7 @@ def _register(command, name, log, exitf, pid, started, cfg, args):
             "units": None, "pct": None, "state": "running", "exit_code": None,
             "started": started, "updated": time.time(), "ended": None,
             "eta_end": (started + eta) if eta else None, "eta_prior_s": eta,
+            "eta_prior_source": eta_src, "eta_prior_n": eta_n,
             "note": None, "pattern": None,
             "monitor": {"kind": "auto"}, "interval_override": None,
             "est_total_s": None, "initial_est_total_s": None,
@@ -5335,6 +5461,7 @@ def build_parser():
     sp.add_argument("--after", help="start tracking after this long (default: config)")
     sp.add_argument("--name", help="job name if it does get tracked")
     sp.add_argument("--eta", help="how long you expect it to take, if it does get tracked")
+    sp.add_argument("--bound", help="an upper bound on how long it may run - the tool's timeout")
     sp.add_argument("--shell", help="the command, as one string, run with bash -c (sh if there is no bash)")
     sp.add_argument("--cwd", help="working directory for the command")
     sp.add_argument("--desc", help="human description of the job")

@@ -735,6 +735,39 @@ ck("a cd in the middle of the work leaves the line alone", body is None)
 v = cc.classify_command("python3 -c \"\nrng=1\nd=dict(a=1)\nprint(rng)\n\"", {"timeout": 600000}, cfg)
 ck("python assignments inside -c are not shell state", v["track"], v["why"])
 
+print()
+print("=== every bar has an estimate: Claude's, then history, then a bound, then typical ===")
+_now = time.time()
+def _done(jid, cmd, dur, auto=True):
+    return {"id": jid, "state": "done", "cmd": cmd, "started": _now - dur - 100, "ended": _now - 100, "auto_launched": auto}
+st = {"jobs": {}, "history": {}}
+ck("with nothing to go on there is no prior", cc.choose_prior(st, cmd="python x.py", name="x") == (None, None, 0))
+ck("Claude's figure wins outright", cc.choose_prior(st, cmd="python x.py", name="x", eta=600, bound=1200) == (600, "claude", 0))
+ck("with no history, the tool's timeout is the bound", cc.choose_prior(st, cmd="python x.py", name="x", bound=1200) == (1200, "bound", 0))
+st["jobs"]["x"] = _done("x", "python x.py", 300)
+cc._remember_finished(st)
+ck("a finished job leaves its duration in the history by name", st["history"].get("x") == [300.0], str(st.get("history")))
+ck("and is not counted twice", (cc._remember_finished(st), st["history"]["x"])[1] == [300.0])
+secs, src, n = cc.choose_prior(st, cmd="python x.py", name="x", bound=1200)
+ck("history beats the bound", (secs, src, n) == (300.0, "history", 1), str((secs, src, n)))
+st["history"]["x"] = [300.0, 340.0, 280.0]
+ck("several runs by name give their median", cc.choose_prior(st, cmd="python other.py", name="x-3")[0] == 300.0)
+ck("the estimate strips the hint from the command text when matching",
+   cc._strip_hints("AGENT_PROGRESS_ETA=5m python x.py") == "python x.py")
+st = {"jobs": {k: _done(k, "cmd %s" % k, d) for k, d in (("a", 40), ("b", 60), ("c", 50))}}
+cc._remember_finished(st)
+ck("three finished tracked jobs give a typical figure for a stranger", cc.choose_prior(st, cmd="new", name="new") == (50, "typical", 3), str(cc.choose_prior(st, cmd="new", name="new")))
+st["jobs"]["z"] = {"id": "z", "state": "running", "started": _now - 30, "eta_end": _now + 90, "eta_prior_s": 120, "eta_prior_source": "bound", "samples": []}
+e = cc.estimate(st["jobs"]["z"], _now)
+ck("the estimator reports the prior's source", e["source"] == "bound" and abs(e["remaining"] - 90) < 1, str(e["source"]))
+line = cc.render_line(st["jobs"]["z"], dict(cc.load_config(), color=False), width=100)
+ck("and a bound is drawn as an upper bound", re.search(r"<\u226401:(29|30)", line) is not None, line)
+st["jobs"]["z"]["eta_prior_source"] = "history"
+ck("a history figure as a guess", re.search(r"<~01:(29|30)", cc.render_line(st["jobs"]["z"], dict(cc.load_config(), color=False), width=100)) is not None)
+hist = {"history": {"n%d" % i: [1.0] for i in range(cc.HISTORY_NAMES + 5)}, "jobs": {}}
+cc.remember_duration(hist, "late", {"state": "done", "started": 10, "ended": 70})
+ck("the history is bounded by name", len(hist["history"]) <= cc.HISTORY_NAMES, str(len(hist["history"])))
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

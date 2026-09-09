@@ -93,9 +93,11 @@ plugin's.
 
   That is an ordinary shell line - the variable reaches the command and means
   nothing to it - and the hook reads it as the estimate for the bar, and as
-  reason enough to track the command. A bar with no estimate shows `?` where
-  the time remaining should be; do not let one run that way. Rough is fine:
-  the bar measures the job as it goes and corrects your figure. If you only
+  reason enough to track the command. Rough is fine: the bar measures the job
+  as it goes and corrects your figure. If you give none, the bar falls back to
+  what the same command took on earlier runs, then to the tool's timeout as an
+  upper bound (drawn as `≤`), then to what tracked jobs typically take - each
+  marked for what it is. Your figure is still the best first frame, so give one. If you only
   find out it is long once it is running detached, or after it has been
   tracked without one:
 

@@ -673,6 +673,38 @@ r = subprocess.run(["/bin/bash", "-c", "AGENT_PROGRESS_ETA=10m python3 -c 'impor
 ck("the variable is an ordinary one to the command", r.stdout.strip() == "10m")
 shutil.rmtree(_w, ignore_errors=True)
 
+print()
+print("=== a tracked command always has an estimate on its bar ===")
+_w = tempfile.mkdtemp(prefix="agent-progress-bound-")
+_env = dict(os.environ, AGENT_PROGRESS_HOME=os.path.join(_w, "st"), AGENT_PROGRESS_NOTIFY="false", CLAUDE_CODE_SESSION_ID="bd")
+subprocess.run([sys.executable, ENGINE, "config", "--set", "auto_track_after_seconds=0.3"], capture_output=True, env=_env)
+def _hook(cmd, timeout=None):
+    ti = {"command": cmd}
+    if timeout:
+        ti["timeout"] = timeout
+    r = subprocess.run([sys.executable, os.path.join(HOOKS, "auto_track.py")],
+                       input=json.dumps({"tool_name": "Bash", "tool_input": ti, "session_id": "bd", "cwd": _w}),
+                       capture_output=True, text=True, env=_env)
+    return json.loads(r.stdout)["hookSpecificOutput"]["updatedInput"]["command"] if r.stdout.strip() else None
+w = _hook("python3 -c 'import time; time.sleep(6)' # train.py", timeout=300000)
+ck("the tool's timeout travels as a bound", w is not None and "--bound 300s" in w, str(w)[:160])
+p = subprocess.Popen(["/bin/bash", "-c", w], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_env)
+time.sleep(1.5)
+_j = [j for j in json.load(open(os.path.join(_w, "st", "state.json")))["jobs"].values() if j["state"] == "running"][0]
+ck("a first run with no hint still has an estimate: the bound", _j.get("eta_prior_source") == "bound" and _j.get("eta_prior_s") == 300, str((_j.get("eta_prior_source"), _j.get("eta_prior_s"))))
+r = subprocess.run([sys.executable, ENGINE, "statusline", "--width", "110"], input=json.dumps({"session_id": "bd"}), capture_output=True, text=True, env=_env)
+ck("and the bar shows it as an upper bound", "<\u2264" in re.sub(r"\x1b\[[0-9;]*m", "", r.stdout), r.stdout[:120])
+p.wait(timeout=60)
+w = _hook("python3 -c 'import time; time.sleep(6)' # train.py", timeout=300000)
+p = subprocess.Popen(["/bin/bash", "-c", w], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=_env)
+time.sleep(1.5)
+_j = [j for j in json.load(open(os.path.join(_w, "st", "state.json")))["jobs"].values() if j["state"] == "running"][0]
+ck("the second run of the same command estimates from the first", _j.get("eta_prior_source") == "history" and 5 <= (_j.get("eta_prior_s") or 0) <= 9, str((_j.get("eta_prior_source"), _j.get("eta_prior_s"))))
+p.wait(timeout=60)
+w = _hook("python3 train.py --epochs 3")
+ck("with no timeout given, Claude Code's two-minute default is the bound", w is not None and "--bound 120s" in w, str(w)[-60:])
+shutil.rmtree(_w, ignore_errors=True)
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

@@ -1042,6 +1042,28 @@ ck("and its report carries both streams nobody saw",
 sandbox.kill_watchers(cc)
 shutil.rmtree(home, ignore_errors=True)
 
+print()
+print("=== progress printed to stderr still moves the bar ===")
+home, renv = reap_home()
+subprocess.run([sys.executable, ENGINE, "config", "--set", "min_interval_seconds=1"], capture_output=True, env=renv)
+_cmd = ("python3 -c \"import sys,time\nfor i in range(1,7):\n    print('epoch %d/6' % i, file=sys.stderr, flush=True); "
+        "time.sleep(1)\nprint('done', flush=True)\"")
+wr = subprocess.Popen([sys.executable, ENGINE, "exec", "--name", "tq", "--after", "0.3", "--keep-log", "--shell", _cmd],
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=renv)
+time.sleep(1.5)
+subprocess.run([sys.executable, ENGINE, "update", "tq", "--interval", "1s", "--quiet"], capture_output=True, env=renv)
+deadline = time.time() + 20
+while time.time() < deadline and (json.load(open(os.path.join(home, "state.json")))["jobs"]["tq"].get("step") or 0) < 4:
+    time.sleep(0.5)
+ck("a tqdm-style bar on stderr is read as progress",
+   (json.load(open(os.path.join(home, "state.json")))["jobs"]["tq"].get("step") or 0) >= 4,
+   str(json.load(open(os.path.join(home, "state.json")))["jobs"]["tq"].get("step")))
+wr.wait(timeout=30)
+r = subprocess.run([sys.executable, ENGINE, "log", "tq", "-n", "3"], capture_output=True, text=True, env=renv)
+ck("`log` shows the stderr beside the log", "--- stderr ---" in r.stdout and "epoch 6/6" in r.stdout, r.stdout[-160:])
+sandbox.kill_watchers(cc)
+shutil.rmtree(home, ignore_errors=True)
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

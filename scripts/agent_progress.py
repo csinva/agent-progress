@@ -1924,7 +1924,8 @@ def launcher_is_on_path():
 
 def permission_allow_rules(cwd=None):
     """The user's Bash allow rules, from every settings file Claude Code reads."""
-    files = [os.path.join(HOME, ".claude", "settings.json")]
+    files = [os.path.join(HOME, ".claude", "settings.json"),
+             os.path.join(HOME, ".claude", "settings.local.json")]
     if cwd:
         files += [os.path.join(cwd, ".claude", "settings.json"),
                   os.path.join(cwd, ".claude", "settings.local.json")]
@@ -2872,14 +2873,32 @@ def parse_probe_output(out, known_total=None):
     return parse_progress(out, None, known_total)   # fall back to the generic parser
 
 
-def tail_job_log(job, max_bytes=262144):
-    """Incremental read of the job's log, remembering the offset in job state."""
+def job_output_files(job):
+    """The files a job's output lands in: its log, and for a wrapped command
+    the stderr file beside it. Progress bars - tqdm above all - print to
+    stderr, so a watcher that read only the log saw a training run as silent."""
     log = job.get("log")
-    if not log or not os.path.exists(log):
-        return ""
-    text, new_off = read_tail(log, job.get("log_offset") or 0, max_bytes)
-    job["log_offset"] = new_off
-    return text
+    if not log:
+        return []
+    files = [log]
+    if job.get("auto_launched") and os.path.isfile(log + ".err"):
+        files.append(log + ".err")
+    return files
+
+
+def tail_job_log(job, max_bytes=262144):
+    """Incremental read of the job's output, remembering the offsets in job
+    state. Both streams of a wrapped command, stdout first."""
+    parts = []
+    for path in job_output_files(job):
+        if not os.path.exists(path):
+            continue
+        key = "err_offset" if path.endswith(".err") else "log_offset"
+        text, new_off = read_tail(path, job.get(key) or 0, max_bytes)
+        job[key] = new_off
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
 
 
 def _size_of(path):
@@ -3224,12 +3243,15 @@ def revive_stalled(session_id=None, now=None):
     def woke(job):
         if job.get("state") != "stalled" or not job.get("log"):
             return False
-        try:
-            st_ = os.stat(job["log"])
-        except OSError:
-            return False
         since = job.get("ended") or job.get("updated") or 0
-        return st_.st_mtime > since or (job.get("size_bytes") or 0) < st_.st_size
+        for path in job_output_files(job):
+            try:
+                st_ = os.stat(path)
+            except OSError:
+                continue
+            if st_.st_mtime > since:
+                return True
+        return False
     candidates = [jid for jid, job in snapshot["jobs"].items()
                   if isinstance(job, dict) and woke(job) and job_belongs_here(job, session_id)]
     if not candidates:
@@ -3425,7 +3447,7 @@ def _watch_loop(args):
             # Output is life, whether or not any of it parsed as progress. A
             # job watched by time alone, or one printing nothing the patterns
             # know, was being called stalled while its log grew by the second.
-            size = _size_of(job.get("log"))
+            size = sum(_size_of(p) or 0 for p in job_output_files(job)) or None
             if size is not None and size != last_size:
                 if last_size is not None:
                     idle_since = now
@@ -4420,6 +4442,15 @@ def cmd_log(args):
     text, _ = read_tail(log, 0, max_bytes=args.bytes)
     lines = [ln for ln in text.splitlines() if ln.strip()]
     print("\n".join(lines[-args.lines:]))
+    err = log + ".err"
+    if job.get("auto_launched") and os.path.isfile(err):
+        # a wrapped command's stderr - the traceback, the progress bar - is
+        # beside its log, and asking for the log means asking for both
+        etext, _ = read_tail(err, 0, max_bytes=args.bytes)
+        elines = [ln for ln in etext.splitlines() if ln.strip()]
+        if elines:
+            print("--- stderr ---")
+            print("\n".join(elines[-args.lines:]))
     return 0
 
 
@@ -5055,7 +5086,7 @@ def build_parser():
     sp.add_argument("--cwd", help="working directory for the command")
     sp.add_argument("--desc", help="human description of the job")
     sp.add_argument("--keep-log", action="store_true",
-                    help="keep the capture file even if no job was created")
+                    help="keep the captured output (the log, and a .err file beside it with stderr) after the command ends")
     sp.add_argument("command", nargs=argparse.REMAINDER,
                     help="-- the command to run, if not given with --shell")
     sp.set_defaults(fn=cmd_exec)

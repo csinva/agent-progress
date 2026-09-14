@@ -768,6 +768,35 @@ hist = {"history": {"n%d" % i: [1.0] for i in range(cc.HISTORY_NAMES + 5)}, "job
 cc.remember_duration(hist, "late", {"state": "done", "started": 10, "ended": 70})
 ck("the history is bounded by name", len(hist["history"]) <= cc.HISTORY_NAMES, str(len(hist["history"])))
 
+print()
+print("=== past its estimate, a job is re-estimated, and the old figure stays visible ===")
+ck("under the estimate nothing changes", cc.revised_total(34, 20) == (34.0, 0))
+ck("at the estimate it grows by half", cc.revised_total(34, 34) == (51.0, 1))
+ck("and again each time the clock catches it", cc.revised_total(34, 51)[1] == 2 and abs(cc.revised_total(34, 51)[0] - 76.5) < 1e-9)
+ck("a missing prior gives nothing", cc.revised_total(None, 50) == (None, 0))
+ck("a runaway job is bounded", cc.revised_total(1, 10 ** 12)[1] <= 40)
+_now = time.time(); _cfg = dict(cc.load_config(), color=False)
+def _job(elapsed, **extra):
+    j = {"id": "j", "state": "running", "started": _now - elapsed, "eta_end": _now - elapsed + 34, "eta_prior_s": 34,
+         "initial_est_total_s": 34, "eta_prior_source": "claude", "samples": []}
+    j.update(extra); return j
+e = cc.estimate(_job(20), _now, _cfg)
+ck("before the estimate: Claude's figure, no revision", e["source"] == "claude" and e["revisions"] == 0)
+e = cc.estimate(_job(40), _now, _cfg)
+ck("past it: revised, with time remaining rather than none", e["source"] == "revised" and e["revisions"] == 1 and abs(e["remaining"] - 11) < 0.5, str((e["source"], e["remaining"])))
+ck("and the bar falls back from its ceiling", cc.estimate(_job(33), _now, _cfg)["frac"] > 0.95 > cc.estimate(_job(34), _now, _cfg)["frac"])
+ck("then climbs again", cc.estimate(_job(50), _now, _cfg)["frac"] > cc.estimate(_job(40), _now, _cfg)["frac"])
+line = re.sub(r"\s+", " ", cc.render_line(_job(40), _cfg, width=120))
+ck("the bar shows the new figure beside the old one", "est 51s (was 34s)" in line and "<~00:1" in line, line)
+line = re.sub(r"\s+", " ", cc.render_line(_job(60), _cfg, width=120))
+ck("to the second, not rounded to a minute", "est 1m16s (was 34s)" in line, line)
+ck("and no longer says merely 'past estimate'", "past estimate" not in line)
+m = _job(60, total=100, units=50.0, step=50, samples=[[_now - 60, 0.0], [_now - 30, 25.0], [_now, 50.0]])
+e = cc.estimate(m, _now, _cfg)
+ck("measured progress past the estimate wins outright, unrevised", e["source"] == "measured" and e["revisions"] == 0 and abs(e["remaining"] - 60) < 5, str((e["source"], e["revisions"], e["remaining"])))
+d = _job(60, state="done", ended=_now - 1)
+ck("a finished job is not revised", cc.estimate(d, _now, _cfg)["revisions"] == 0)
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

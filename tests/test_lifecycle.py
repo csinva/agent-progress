@@ -1064,6 +1064,40 @@ ck("`log` shows the stderr beside the log", "--- stderr ---" in r.stdout and "ep
 sandbox.kill_watchers(cc)
 shutil.rmtree(home, ignore_errors=True)
 
+print()
+print("=== a live job past its estimate readjusts, and the record says so ===")
+home, renv = reap_home()
+renv = dict(renv, CLAUDE_CODE_SESSION_ID="rv")
+subprocess.run([sys.executable, ENGINE, "run", "--name", "slow", "--eta", "3s", "--force-show", "--", "sleep", "16"],
+               capture_output=True, env=renv)
+subprocess.run([sys.executable, ENGINE, "update", "slow", "--interval", "1s", "--quiet"], capture_output=True, env=renv)
+_pcts, _texts = [], []
+for _ in range(13):
+    time.sleep(1)
+    r = subprocess.run([sys.executable, ENGINE, "statusline", "--width", "120"], input=json.dumps({"session_id": "rv"}),
+                       capture_output=True, text=True, env=renv)
+    _line = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout)
+    _m = re.search(r"(\d+)%", _line)
+    if _m:
+        _pcts.append(int(_m.group(1))); _texts.append(_line)
+ck("the bar keeps a time remaining the whole way", all("<~" in t or "<\u2264" in t for t in _texts[3:]), str([t[40:90] for t in _texts[3:6]]))
+ck("the new estimate is shown with the old one", any("(was 3s)" in t for t in _texts), str([t[60:110] for t in _texts[-3:]]))
+ck("the bar falls back at least twice as the estimate is revised", sum(1 for a, b in zip(_pcts, _pcts[1:]) if b < a - 10) >= 2, str(_pcts))
+_j = [j for j in records(home) if j.get("id") == "slow"][0]
+ck("the watcher records each revision", (_j.get("eta_revisions_n") or 0) >= 2 and len(_j.get("eta_revisions") or []) >= 2, str(_j.get("eta_revisions")))
+ck("every level is logged, from the same starting figure",
+   all(x["was"] == 3 for x in _j.get("eta_revisions") or []) and [x["to"] for x in _j["eta_revisions"]] == sorted(x["to"] for x in _j["eta_revisions"]), str(_j.get("eta_revisions")))
+r = subprocess.run([sys.executable, ENGINE, "ls", "--json"], capture_output=True, text=True, env=renv)
+_d = json.loads(r.stdout)[0]
+ck("ls --json names the source and the count", _d["eta_source"] == "revised" and _d["eta_revisions"] >= 2, str((_d["eta_source"], _d["eta_revisions"])))
+for pid in (_j.get("pid"), _j.get("watcher_pid")):
+    try:
+        os.kill(int(pid), signal.SIGKILL)
+    except (OSError, TypeError, ValueError):
+        pass
+sandbox.kill_watchers(cc)
+shutil.rmtree(home, ignore_errors=True)
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

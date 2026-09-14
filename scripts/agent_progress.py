@@ -1137,6 +1137,26 @@ def choose_prior(st, cmd=None, name=None, eta=None, bound=None):
     return typical_prior(st)
 
 
+REVISION_FACTOR = 1.5    # each time the job outlives its estimate, the estimate grows by this
+
+
+def revised_total(prior_total, elapsed):
+    """(total, revisions): the estimate a job carries once it has outlived
+    the one it was given. Deterministic in the prior and the elapsed time,
+    so every reader - the statusline, ls, the watcher - agrees without
+    coordination: the prior, grown by REVISION_FACTOR as many times as it
+    takes to be ahead of the clock again. 34s becomes 51s at 34s elapsed,
+    77s at 51s, 115s at 77s - the bar falls back from its ceiling and climbs
+    once more, and the number beside it says what was first thought."""
+    if not prior_total or prior_total <= 0:
+        return None, 0
+    total, k = float(prior_total), 0
+    while elapsed >= total and k < 40:
+        total *= REVISION_FACTOR
+        k += 1
+    return total, k
+
+
 def estimate(job, now=None, cfg=None):
     """Fuse Claude's prior ETA with the rate measured from the log.
 
@@ -1186,11 +1206,24 @@ def estimate(job, now=None, cfg=None):
 
     prior_rem = None
     overdue = False
+    revised = 0
     if eta_end:
         prior_rem = eta_end - now
-        if prior_rem < 0:
+        if prior_rem <= 0:
+            # The guess is blown - at the estimate, not a moment after it, so
+            # the bar never sits at its ceiling waiting to be revised. Dropping it left `?` where the time remaining
+            # goes and the bar pinned at its ceiling. Instead the estimate is
+            # revised - grown until it is ahead of the clock again - and the
+            # bar shows the new figure next to the old one.
             overdue = True
-            prior_rem = None            # a blown guess is worse than no guess
+            if measured_rem is not None:
+                prior_rem = None        # the job's own progress says how long: use that
+            else:
+                prior_total = job.get("eta_prior_s") or (eta_end - started)
+                new_total, revised = revised_total(prior_total, elapsed)
+                prior_rem = (new_total - elapsed) if new_total else None
+                if not frac_from_data and new_total:
+                    frac = min(elapsed / new_total, 0.99)
 
     if measured_rem is not None and prior_rem is not None:
         w = min(1.0, nobs / float(cfg["blend_full_at"]))
@@ -1200,7 +1233,7 @@ def estimate(job, now=None, cfg=None):
         remaining, source = measured_rem, "measured"
     elif prior_rem is not None:
         remaining = prior_rem
-        source = job.get("eta_prior_source") or "claude"
+        source = "revised" if revised else (job.get("eta_prior_source") or "claude")
     else:
         remaining, source = None, None
 
@@ -1212,7 +1245,7 @@ def estimate(job, now=None, cfg=None):
         if not job.get("total"):
             frac = None
     elif job.get("state") != "running":
-        remaining, source, overdue = 0.0, None, False
+        remaining, source, overdue, revised = 0.0, None, False, 0
         if job.get("state") == "done":
             frac = 1.0
 
@@ -1225,6 +1258,7 @@ def estimate(job, now=None, cfg=None):
         "nobs": nobs,
         "source": source,
         "overdue": overdue,
+        "revisions": revised,
         "eta_wall": (now + remaining) if remaining is not None else None,
         # the whole point of re-estimating: total duration as currently believed
         "total_est": (elapsed + remaining) if remaining is not None else None,
@@ -1243,6 +1277,19 @@ def fmt_dur(s):
     if h:
         return "%d:%02d:%02d" % (h, m, sec)
     return "%02d:%02d" % (m, sec)
+
+
+def fmt_est(s):
+    """An estimate, to the second below an hour: 34s, 1m17s, 12m, 2h05m."""
+    if s is None or not math.isfinite(s):
+        return "?"
+    s = int(max(0, round(s)))
+    if s < 60:
+        return "%ds" % s
+    if s < 3600:
+        m, sec = divmod(s, 60)
+        return "%dm%02ds" % (m, sec) if sec else "%dm" % m
+    return fmt_short(s)
 
 
 def fmt_short(s):
@@ -1494,22 +1541,27 @@ def render_line(job, cfg, width=None, now=None):
             # `~` for a guess, `\u2264` for an upper bound the caller set; nothing for
             # a measurement
             mark = ("\u2264" if e["source"] == "bound"
-                    else "~" if e["source"] in ("claude", "history", "typical", "blend", "scheduler")
+                    else "~" if e["source"] in ("claude", "history", "typical", "blend", "scheduler", "revised")
                     else "")
             parts.append(paint("%s<%s%s" % (fmt_dur(e["elapsed"]), mark, rem),
-                               "warn" if e["source"] in ("claude", "typical", "bound") else "text", color))
+                               "warn" if e["source"] in ("claude", "typical", "bound", "revised") else "text", color))
         if cfg["show_rate"] and e["rate"] and job.get("total"):
             parts.append(paint(fmt_rate(e["rate"], unit or "it"), "dim", color))
         if cfg["show_eta_clock"] and e["eta_wall"]:
             parts.append(paint("\u2192" + fmt_clock(e["eta_wall"], cfg), "dim", color))
         init, tot = job.get("initial_est_total_s"), e.get("total_est")
-        if (cfg["show_drift"] and init and tot
+        if e.get("revisions"):
+            # past the estimate it was given: the new figure, and the old one
+            # kept beside it so the drift is plain
+            parts.append(paint("est %s (was %s)" % (
+                fmt_est(tot), fmt_est(job.get("eta_prior_s") or init)), "warn", color))
+        elif (cfg["show_drift"] and init and tot
                 and abs(tot - init) / float(init) > cfg["drift_threshold"]):
             # the job is taking materially longer (or less) than first thought
             d = tot - init
             parts.append(paint("est %s (%s%s)" % (
                 fmt_short(tot), "+" if d > 0 else "-", fmt_short(abs(d))), "warn", color))
-        if e["overdue"]:
+        elif e["overdue"]:
             parts.append(paint("(past estimate)", "warn", color))
     else:
         tail = "in " + fmt_dur(e["elapsed"])
@@ -1611,6 +1663,7 @@ def render_block(job, cfg, width):
         bits.append("updates every " + fmt_short(job["interval_s"]))
     if e["source"]:
         bits.append("eta: " + {"measured": "measured from log",
+                               "revised": "re-estimated %d time(s) past the first guess" % e.get("revisions", 0),
                                "claude": "Claude's estimate",
                                "history": "from %s earlier run(s)" % (job.get("eta_prior_n") or "earlier"),
                                "bound": "the tool's timeout, an upper bound",
@@ -3818,6 +3871,20 @@ def _watch_loop(args):
                 if last_size is not None:
                     idle_since = now
                 last_size = size
+            # a blown estimate is revised on every pass, not only on a probe:
+            # the record must say what the bar says, and the revision is news
+            # worth keeping (when it happened, from what, to what)
+            e_now = estimate(job, now)
+            if e_now.get("revisions") and e_now["revisions"] != (job.get("eta_revisions_n") or 0):
+                prior = float(job.get("eta_prior_s") or 0)
+                # every level passed since the last look, not only the latest:
+                # a slow tick can find the clock two revisions ahead
+                for k in range((job.get("eta_revisions_n") or 0) + 1, e_now["revisions"] + 1):
+                    job.setdefault("eta_revisions", []).append(
+                        {"at": now, "to": round(prior * REVISION_FACTOR ** k), "was": round(prior)})
+                job["eta_revisions_n"] = e_now["revisions"]
+                job["est_total_s"] = e_now["total_est"]
+                del job["eta_revisions"][:-10]
             if due_progress:
                 # a fresh observation means a fresh total estimate
                 e = estimate(job, now)
@@ -4762,6 +4829,8 @@ def cmd_ls(args):
                 "remaining_human": fmt_short(e["remaining"]),
                 "eta_clock": fmt_clock(e["eta_wall"]),
                 "eta_source": e["source"], "overdue": e["overdue"],
+                "eta_revisions": e.get("revisions", 0),
+                "eta_revision_log": j.get("eta_revisions") or [],
                 "total_estimate_s": round(e["total_est"]) if e.get("total_est") else None,
                 "total_estimate_human": fmt_short(e.get("total_est")),
                 "initial_estimate_human": fmt_short(j.get("initial_est_total_s")),

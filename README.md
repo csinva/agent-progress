@@ -499,6 +499,14 @@ sweep rather than inventing a number.
 
 ## The estimate corrects itself
 
+When a job outlives the estimate it was given and there is no measured
+progress to go on, the estimate is not dropped - it is revised. The figure
+grows by half each time the clock catches it (34s, then 51s, then 77s), the
+bar falls back from its ceiling and climbs again, and the old figure stays
+beside the new one: `00:40<~00:11 · est 51s (was 34s)`. Each revision is
+recorded on the job, and `agent-progress ls --json` lists them. A measured
+rate, once the job's own progress can be read, replaces the revised figure.
+
 Progress is re-observed **at most once every 2 minutes, and at most once per 5%
 of the estimated total** — whichever is less often.
 

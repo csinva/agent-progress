@@ -36,8 +36,7 @@ git clone https://github.com/csinva/agent-progress ~/.claude/skills/agent-progre
 
 
 ## Features
-Because a quick run now costs nothing, the detector can afford to be broad. A
-command is caught when it is backgrounded, when it is given a timeout of two
+A command is caught when it is backgrounded, when it is given a timeout of two
 minutes or more, or when it matches one of 38 patterns — training scripts,
 `torchrun`, `accelerate`, `deepspeed`, sweeps, `spark-submit`, `terraform`,
 `ansible`, `docker build`, `rsync`, `aws s3 sync`, model downloads, `dvc`,
@@ -55,8 +54,24 @@ agent-progress autotrack 'pytest tests/'
 
 ## Custom configuration
 
-61 settings, each with a default, a type, a valid range and a one-line
-explanation:
+Presets bundle common combinations:
+
+| preset | effect |
+| --- | --- |
+| `minimal` | bar and percentage only |
+| `rich` | every field, wider bar, five jobs |
+| `tqdm` | tqdm-faithful |
+| `plain` | ascii, no color |
+| `quiet` | only jobs over ten minutes, one at a time, no notifications |
+| `guided` | ask before taking a command over (`auto_track=instruct`) |
+| `manual` | never take one over (`auto_track=off`) |
+| `eager` | start tracking from the first second |
+
+```bash
+agent-progress config --preset minimal
+```
+
+See and modify options:
 
 ```bash
 agent-progress config                       # the whole table, * marks what you changed
@@ -80,23 +95,6 @@ See changes before keeping them:
 agent-progress preview                      # sample bars in every state
 agent-progress preview --set style=dots     # try a setting without saving it
 agent-progress preview --colors             # the 256-color codes
-```
-
-Presets bundle common combinations:
-
-| preset | effect |
-| --- | --- |
-| `minimal` | bar and percentage only |
-| `rich` | every field, wider bar, five jobs |
-| `tqdm` | tqdm-faithful |
-| `plain` | ascii, no color |
-| `quiet` | only jobs over ten minutes, one at a time, no notifications |
-| `guided` | ask before taking a command over (`auto_track=instruct`) |
-| `manual` | never take one over (`auto_track=off`) |
-| `eager` | start tracking from the first second |
-
-```bash
-agent-progress config --preset minimal
 ```
 
 Any setting can be overridden for one command via the environment:

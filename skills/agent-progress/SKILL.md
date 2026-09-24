@@ -272,12 +272,14 @@ With `report_style=context` you are told about running jobs on each prompt, and
 can volunteer status without checking anything. By default (`report_style=side`)
 nothing is sent to you; `agent-progress ls` is how you look.
 
-A bar that has outlived its estimate re-estimates on its own: the figure
-grows by half each time the clock catches it, the bar falls back and climbs
-again, and the old figure stays beside the new one - `est 51s (was 34s)`.
-That is the bar working, not a job stalling; a job whose own progress can be
-read is measured instead, and measurement always wins. Only replace the
-figure if you know better: `agent-progress update <id> --eta <duration>`.
+A bar that has outlived its estimate re-estimates on its own. A job whose own
+progress can be read is measured, and measurement always wins: the time
+remaining comes from its throughput. One that cannot be read has its figure
+grown by half each time the clock catches it, the bar falling back and
+climbing again. Either way the old figure stays beside the new one -
+`est 51s (was 34s)` - and the bar never says merely "past estimate". That is
+the bar working, not a job stalling. Only replace the figure if you know
+better: `agent-progress update <id> --eta <duration>`.
 
 **Intervene only when you know something the watcher cannot see:**
 

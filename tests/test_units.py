@@ -794,6 +794,25 @@ ck("and no longer says merely 'past estimate'", "past estimate" not in line)
 m = _job(60, total=100, units=50.0, step=50, samples=[[_now - 60, 0.0], [_now - 30, 25.0], [_now, 50.0]])
 e = cc.estimate(m, _now, _cfg)
 ck("measured progress past the estimate wins outright, unrevised", e["source"] == "measured" and e["revisions"] == 0 and abs(e["remaining"] - 60) < 5, str((e["source"], e["revisions"], e["remaining"])))
+line = re.sub(r"\s+", " ", cc.render_line(m, _cfg, width=120))
+ck("and its bar shows the measured figure beside the old one, in the same form", "(was 34s)" in line and "(+" not in line, line)
+# a measured job just past its estimate, within the drift threshold: this used
+# to fall through every branch and print a bare "(past estimate)" next to a
+# remaining time that had in fact been re-estimated from the log
+m = {"id": "j", "state": "running", "started": _now - 101, "eta_end": _now - 1, "eta_prior_s": 100, "initial_est_total_s": 100,
+     "eta_prior_source": "claude", "total": 100, "units": 90.0, "step": 90, "samples": [[_now - 101, 0.0], [_now - 50, 45.0], [_now, 90.0]]}
+e = cc.estimate(m, _now, _cfg)
+line = re.sub(r"\s+", " ", cc.render_line(m, _cfg, width=120))
+ck("a measured job just past its estimate is re-estimated from its own rate", e["source"] == "measured" and e["overdue"] and abs(e["remaining"] - 11) < 2, str((e["source"], e["overdue"], e["remaining"])))
+ck("and says so, rather than 'past estimate'", "est 1m5" in line and "(was 1m40s)" in line and "past estimate" not in line, line)
+m.pop("initial_est_total_s")
+line = re.sub(r"\s+", " ", cc.render_line(m, _cfg, width=120))
+ck("a record with no initial figure still shows the re-estimate", "(was 1m40s)" in line and "past estimate" not in line, line)
+# under the estimate, a material drift keeps its own form: the change, not a 'was'
+u = _job(60, eta_end=_now - 60 + 1000, eta_prior_s=1000, initial_est_total_s=1000, total=100, units=50.0, step=50,
+         samples=[[_now - 60, 0.0], [_now - 30, 25.0], [_now, 50.0]])
+line = re.sub(r"\s+", " ", cc.render_line(u, _cfg, width=120))
+ck("under the estimate, drift is still shown as a change", re.search(r"est \S+ \(-", line) is not None and "(was" not in line, line)
 d = _job(60, state="done", ended=_now - 1)
 ck("a finished job is not revised", cc.estimate(d, _now, _cfg)["revisions"] == 0)
 

@@ -1550,19 +1550,22 @@ def render_line(job, cfg, width=None, now=None):
         if cfg["show_eta_clock"] and e["eta_wall"]:
             parts.append(paint("\u2192" + fmt_clock(e["eta_wall"], cfg), "dim", color))
         init, tot = job.get("initial_est_total_s"), e.get("total_est")
-        if e.get("revisions"):
-            # past the estimate it was given: the new figure, and the old one
-            # kept beside it so the drift is plain
-            parts.append(paint("est %s (was %s)" % (
-                fmt_est(tot), fmt_est(job.get("eta_prior_s") or init)), "warn", color))
+        was = job.get("eta_prior_s") or init
+        if tot and (e.get("revisions") or e["overdue"]):
+            # past the estimate it was given - whether the job's own measured
+            # progress now says how long, or the prior has been grown to get
+            # ahead of the clock - the new figure, and the old one kept beside
+            # it so the drift is plain. Never a bare "(past estimate)": the end
+            # time has already been re-estimated, so say what it is
+            parts.append(paint("est %s (was %s)" % (fmt_est(tot), fmt_est(was)) if was
+                               else "est %s" % fmt_est(tot), "warn", color))
         elif (cfg["show_drift"] and init and tot
                 and abs(tot - init) / float(init) > cfg["drift_threshold"]):
-            # the job is taking materially longer (or less) than first thought
+            # still under the estimate, but taking materially longer (or less)
+            # than first thought
             d = tot - init
             parts.append(paint("est %s (%s%s)" % (
                 fmt_short(tot), "+" if d > 0 else "-", fmt_short(abs(d))), "warn", color))
-        elif e["overdue"]:
-            parts.append(paint("(past estimate)", "warn", color))
     else:
         tail = "in " + fmt_dur(e["elapsed"])
         parts.append(paint(tail, "dim", color))

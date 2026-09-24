@@ -614,8 +614,12 @@ ck("set -e is fine inside the wrapper", verdict("set -euo pipefail && python tra
 v = verdict("python train.py && cd out")
 ck("a cd after the work is a suffix, back in the caller's shell", v["track"] and v.get("suffix") == " && cd out" and v.get("body") == "python train.py", str(v))
 ck("a quoted cd is not split", not verdict("cd 'a b' && python train.py")["track"])
-ck("a self-backgrounded command is left alone", not verdict("python train.py &")["track"])
-ck("nohup is left alone", not verdict("nohup python train.py &")["track"])
+# A command that detaches itself is not wrapped - there would be nothing to
+# wait on - but followed by the pid it leaves in $!.
+v = verdict("python train.py &")
+ck("a self-backgrounded job is followed, not wrapped", v["track"] and v.get("detached") and "body" not in v, str(v))
+v = verdict("nohup python train.py &")
+ck("nohup likewise, reading nohup.out", v["track"] and (v.get("detached") or {}).get("log") == "nohup.out", str(v))
 ck("AGENT_PROGRESS_NO_AUTO=1 in front of the command works",
    not verdict("AGENT_PROGRESS_NO_AUTO=1 python train.py")["track"])
 ck("an inline assignment before the command is fine", verdict("FOO=1 python train.py")["track"])
@@ -638,7 +642,7 @@ ck("hydra overrides on continuation lines are still tracked", v["track"], v["why
 ck("make VAR=x on a continuation line is still tracked", verdict("make \\\n  CC=gcc")["track"])
 ck("an & inside a trailing comment is not backgrounding", verdict("pytest # trailing &")["track"]
    and verdict("pytest; # &")["track"])
-ck("a real trailing & still is", not verdict("pytest &")["track"] and not verdict("pytest 2>&1 &")["track"])
+ck("a real trailing & still is", verdict("pytest &").get("detached") and verdict("pytest 2>&1 &").get("detached"))
 ck("a && b is not backgrounding", verdict("make && python train.py")["track"])
 ck("./train.sh is named train", cc.suggest_job_name("./train.sh") == "train", cc.suggest_job_name("./train.sh"))
 ck("./scripts/run_eval.sh --x is named run_eval", cc.suggest_job_name("./scripts/run_eval.sh --x") == "run_eval",
@@ -698,8 +702,11 @@ ck("`J=...` after a cd, and the quick `cat`, are setup outside", v["track"] and 
 ck("and the assignment is restated at the front of the work", v.get("body") == "J=/tmp/w; python3 $J/a.py", str(v.get("body"))[:60])
 v = cc.classify_command("J=~/.claude/jobs/x/tmp; python3 $J/verify.py", {"timeout": 600000}, cfg)
 ck("a tilde value is a plain value", v["track"] and v.get("prefix") == "J=~/.claude/jobs/x/tmp; ", str(v.get("prefix")))
+# A computed or quoted value cannot be hoisted, but it need not be: everything
+# that reads it is on the line, and the whole line runs in the wrapper's shell.
 for c in ("J=$(mktemp -d) && python3 $J/x.py", "J='a b' && python3 x.py", 'J="a b" && python3 x.py'):
-    ck("%s is left alone" % c[:24], not cc.classify_command(c, {"timeout": 600000}, cfg)["track"])
+    v = cc.classify_command(c, {"timeout": 600000}, cfg)
+    ck("%s is wrapped whole, the assignment inside" % c[:24], v["track"] and v.get("prefix") == "" and v.get("body") == c, str(v)[:120])
 v = cc.classify_command("python3 x.py; RESULT=1", {"timeout": 600000}, cfg)
 ck("a trailing literal assignment is a suffix", v["track"] and v.get("suffix") == "; RESULT=1", str(v))
 ck("an inline assignment before the command is still fine", cc.classify_command("LOKY_MAX_CPU_COUNT=2 python3 train.py", {"timeout": 600000}, cfg)["track"])
@@ -715,6 +722,117 @@ ck("a heredoc body is blanked, not split", [st.strip() for *_r, st in segs][-1] 
 segs = cc.scan_shell("python - <<'EOF' && echo EDITED\nprint(1)\nEOF\nrun.sh")
 ck("a heredoc announced before && still owns the lines that follow", [st.strip() for *_r, st in segs][-1] == "run.sh" and "print" not in "".join(st for *_r, st in segs), str([st.strip() for *_r, st in segs]))
 ck("an escaped quote is not a quote", [st.strip() for *_r, st in cc.scan_shell("echo it\\'s; ls")] == ["echo it\\'s", "ls"])
+segs = [st.strip() for *_r, st in cc.scan_shell("J=$(cd a && pwd) && python3 train.py")]
+ck("a separator inside $(...) does not split", segs == ["J=$(cd a && pwd)", "python3 train.py"], str(segs))
+segs = [st.strip() for *_r, st in cc.scan_shell("J=`cd a; pwd`; X=$((1+2)) && python3 t.py")]
+ck("nor inside backticks, and $((...)) closes", segs == ["J=`cd a; pwd`", "X=$((1+2))", "python3 t.py"], str(segs))
+
+print()
+print("=== an assignment is only an assignment ===")
+for text, want in (("J=$(sbatch --parsable a.sbatch)", True), ("J=$(a $(b) c)", True), ("J='a b'", True),
+                   ('J="$(x)"', True), ("J=`x y`", True), ("J=plain", True),
+                   ("FOO=1 python train.py", False), ("J=$(x) python t.py", False), ("python t.py", False),
+                   ("=x", False)):
+    ck("%r -> %s" % (text, want), cc._is_assignment_only(text) == want)
+
+print()
+print("=== submitting to slurm the way the skill says to is tracked ===")
+cfg = cc.load_config()
+for c in ("JOB=$(sbatch --parsable train.sbatch)",
+          "JOB=$(sbatch --parsable train.sbatch) && echo $JOB",
+          "JOB=$(sbatch --parsable a.sbatch) && sbatch --dependency=afterok:$JOB b.sbatch",
+          "cd runs && JOB=$(sbatch --parsable a.sbatch) && echo $JOB"):
+    v = cc.classify_command(c, {}, cfg)
+    ck("tracked: %s" % c[:56], v["track"] and v.get("body") and "sbatch" in v["body"], str(v)[:140])
+v = cc.classify_command("cd runs && JOB=$(sbatch --parsable a.sbatch) && echo $JOB", {}, cfg)
+ck("the cd still stays in the caller's shell", v.get("prefix") == "cd runs && ", str(v.get("prefix")))
+ck("a cd in the middle still leaves the line alone",
+   not cc.classify_command("JOB=$(sbatch --parsable a.sbatch) && cd out && echo $JOB", {}, cfg)["track"])
+
+print()
+print("=== broader coverage: the long commands a session actually types ===")
+_tracked = [
+    "srun --gres=gpu:1 python run.py", "python predict.py --split test", "python embed_corpus.py",
+    "uv run preprocess.py", "bash run_all.sh", "./scripts/generate_data.sh",
+    "python run.py --epochs 50", "python main.py --max_steps=10000", "python app.py --multirun lr=1,2",
+    "wget https://x.org/big.tar.gz", "curl -L --output m.bin https://x", "hf download meta-llama/x",
+    "huggingface-cli upload me/x .", "aria2c -x8 https://x", "gdown 1abc", "rclone sync s3:b ./l",
+    "scp -r box:/data .", "git lfs pull", "docker pull nvcr.io/x:1", "ollama pull llama3",
+    "pip install torch", "uv sync", "uv pip install -r req.txt", "poetry install",
+    "conda env create -f env.yml", "mamba install pytorch", "npm ci", "pnpm install",
+    "apt-get install -y ffmpeg", "brew install llvm", "cargo install ripgrep",
+    "ffmpeg -i in.mp4 out.mkv", "tar czf b.tgz /data", "tar -xf data.tar", "unzip data.zip",
+    "zstd -19 big", "ls *.txt | xargs -P 8 -n 1 gzip", "parallel python run.py ::: 1 2 3",
+    "mypy src/", "pyright", "tsc -p .", "pre-commit run --all-files", "jest", "npx vitest run",
+    "playwright test", "ninja -C build", "ctest --output-on-failure", "dotnet test",
+    "latexmk -pdf paper.tex", "pdflatex paper.tex", "sphinx-build docs out", "quarto render",
+    "mkdocs build", "psql -d db -f big.sql", "mysql db < dump.sql", "mongorestore dump/",
+    "bq load ds.t gs://x", "helm upgrade --install x ./chart", "kubectl wait --for=condition=complete job/x",
+    "packer build x.pkr.hcl", "Rscript analysis.R", "julia sim.jl", "matlab -batch run",
+    "snakemake -j 8", "nextflow run main.nf", "papermill in.ipynb out.ipynb",
+    "jupyter nbconvert --execute nb.ipynb", "lm_eval --model hf --tasks mmlu", "tune run lora",
+    "sky launch task.yaml", "modal run app.py", "timeout 2h python x.py", "timeout -s KILL 3600 python x.py",
+]
+_missed = [c for c in _tracked if not cc.classify_command(c, {}, cfg)["track"]]
+ck("%d long commands are all tracked" % len(_tracked), not _missed, str(_missed))
+_left = [
+    # servers and watchers: a bar for one could never finish
+    "uvicorn app:main --reload", "python -m http.server 8000", "jupyter lab", "tensorboard --logdir runs",
+    "streamlit run app.py", "vllm serve meta-llama/x", "npm run dev", "yarn start", "tail -f train.log",
+    "watch -n 5 nvidia-smi", "tsc --watch", "jest --watchAll", "mkdocs serve", "flask run",
+    # and the ordinary quick things
+    "ls -la", "pip list", "npm ls", "echo running parallel jobs", "timeout 5 python x.py",
+    "git status", "cat train.log",
+]
+_caught = [c for c in _left if cc.classify_command(c, {}, cfg)["track"]]
+ck("%d servers, watchers and quick commands are left alone" % len(_left), not _caught, str(_caught))
+v = cc.classify_command("timeout 3h python x.py", {}, cfg)
+ck("a timeout prefix is read as the caller's own bound", v["signal"] == "timeout" and "3h" in v["why"], str(v))
+
+print()
+print("=== a script run by path is judged by what is in it ===")
+_sd = tempfile.mkdtemp(prefix="agent-progress-scripts-")
+open(os.path.join(_sd, "submit_all.sh"), "w").write("#!/bin/bash\nfor f in cfg/*.sbatch; do\n  sbatch $f\ndone\n")
+open(os.path.join(_sd, "serve.sh"), "w").write("#!/bin/bash\nsbatch warm.sbatch\nuvicorn app:main\n")
+open(os.path.join(_sd, "notes.sh"), "w").write("#!/bin/bash\n# remember to sbatch this later\necho hi\n")
+os.makedirs(os.path.join(_sd, "scripts"))
+open(os.path.join(_sd, "scripts", "go"), "w").write("#!/bin/sh\npython3 -m torch.distributed.run x.py\n")
+open(os.path.join(_sd, "blob.sh"), "wb").write(b"\x7fELF\0\0sbatch")
+v = cc.classify_command("bash submit_all.sh", {}, cfg, cwd=_sd)
+ck("a script that submits is tracked, and says why", v["track"] and v["signal"] == "script"
+   and "submit_all.sh" in v["why"] and "batch submission" in v["why"], str(v)[:160])
+ck("./scripts/go by its contents too", cc.classify_command("./scripts/go", {}, cfg, cwd=_sd)["track"])
+ck("an absolute path too", cc.classify_command("sh %s/submit_all.sh" % _sd, {}, cfg)["track"])
+ck("a script that starts a server is not", not cc.classify_command("bash serve.sh", {}, cfg, cwd=_sd)["track"])
+ck("a command in a comment is not a command", not cc.classify_command("bash notes.sh", {}, cfg, cwd=_sd)["track"])
+ck("a binary is not read as a script", not cc.classify_command("bash blob.sh", {}, cfg, cwd=_sd)["track"])
+ck("a script that is not there is simply not read", not cc.classify_command("bash nope.sh", {}, cfg, cwd=_sd)["track"])
+ck("bash -c '...' is not a script path", not cc.classify_command("bash -c 'echo hi'", {}, cfg, cwd=_sd)["track"])
+shutil.rmtree(_sd, ignore_errors=True)
+
+print()
+print("=== a command that detaches itself ===")
+line, fg, log = cc.split_detached("nohup python train.py > train.log 2>&1 &  # overnight")
+ck("the line runs to its &, the comment dropped", line == "nohup python train.py > train.log 2>&1 &", repr(line))
+ck("the log is where stdout goes, not stderr", log == "train.log" and fg == "nohup python train.py > train.log 2>&1", repr((fg, log)))
+ck("appending counts", cc.split_detached("python x.py >> out.txt 2>/dev/null &")[2] == "out.txt")
+ck("tee counts", cc.split_detached("python train.py | tee -a run.log &")[2] == "run.log")
+ck("no redirect and no nohup: no log", cc.split_detached("python train.py &")[2] is None)
+ck("a cd inside the background list makes a relative log unknowable",
+   cc.split_detached("cd runs && python train.py > t.log &")[2] is None)
+ck("two jobs in the background are not one", cc.split_detached("python a.py & python b.py &") is None)
+ck("an & in quotes is not a job", cc.split_detached("echo 'a & b'") is None)
+ck("&& is not &", cc.split_detached("make && python train.py") is None)
+v = cc.classify_command("nohup python train.py > train.log 2>&1 &", {}, cfg)
+ck("a detached training run is tracked and named", v["track"] and v["name"] == "train" and v["detached"]["log"] == "train.log", str(v)[:160])
+v = cc.classify_command("AGENT_PROGRESS_ETA=3h nohup ./go > g.log 2>&1 &", {}, cfg)
+ck("an estimate on a detached command is kept", v["track"] and v.get("eta") == "3h", str(v)[:160])
+for c in ("nohup python -m http.server 8000 &", "sleep 5 &", "tensorboard --logdir runs > tb.log 2>&1 &"):
+    ck("left alone: %s" % c, not cc.classify_command(c, {}, cfg)["track"])
+w = cc.detached_command("nohup python train.py > t.log 2>&1 &", "train", log="t.log", eta="2h",
+                        foreground="nohup python train.py > t.log 2>&1")
+ck("the rewrite keeps the line and adds a start by pid", w.startswith("nohup python train.py > t.log 2>&1 & ")
+   and "start train --pid $! --auto-launched --log t.log --eta 2h" in w, w)
 
 print()
 print("=== setup stays outside, the work inside, a trailing cd after ===")

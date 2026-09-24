@@ -84,7 +84,7 @@ def main():
         return 0
 
     try:
-        verdict = cc.classify_command(command, tool_input, cfg)
+        verdict = cc.classify_command(command, tool_input, cfg, cwd=data.get("cwd"))
     except Exception:
         return 0
     if not verdict["track"]:
@@ -99,6 +99,24 @@ def main():
                 return 0        # already asked once; let it through
         except Exception:
             pass
+
+    det = verdict.get("detached")
+    if cfg["auto_track"] == "defer" and det:
+        # `nohup python train.py > log 2>&1 &` runs exactly as written; the
+        # tracking follows it on the same line, by the pid it leaves in `$!`.
+        try:
+            wrapped = cc.detached_command(det["line"], verdict["name"], log=det["log"],
+                                          eta=verdict.get("eta"), cwd=data.get("cwd"),
+                                          foreground=det["foreground"])
+        except Exception:
+            wrapped = None
+        if wrapped is None:
+            return 0
+        emit({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "updatedInput": dict(tool_input, command=wrapped),
+        }})
+        return 0
 
     if cfg["auto_track"] == "defer":
         # Whatever the caller asked for is left exactly as it was. Clearing

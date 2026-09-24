@@ -705,6 +705,57 @@ w = _hook("python3 train.py --epochs 3")
 ck("with no timeout given, Claude Code's two-minute default is the bound", w is not None and "--bound 120s" in w, str(w)[-60:])
 shutil.rmtree(_w, ignore_errors=True)
 
+print()
+print("=== a command that detaches itself is followed by its pid ===")
+_w = tempfile.mkdtemp(prefix="agent-progress-detach-")
+_h = os.path.join(_w, "home")
+os.makedirs(os.path.join(_h, ".claude"))
+_env = dict(os.environ, HOME=_h, AGENT_PROGRESS_HOME=os.path.join(_w, "st"), AGENT_PROGRESS_NOTIFY="false",
+            CLAUDE_CODE_SESSION_ID="dt")
+open(os.path.join(_w, "train.py"), "w").write(
+    "import time\nfor i in range(1, 5):\n    print('epoch %d/4' % i, flush=True)\n    time.sleep(1)\n")
+def _hook(cmd, rules=None):
+    json.dump({"permissions": {"allow": rules or []}}, open(os.path.join(_h, ".claude", "settings.json"), "w"))
+    r = subprocess.run([sys.executable, AUTO], input=json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd},
+                                                                 "session_id": "dt", "cwd": _w}),
+                       capture_output=True, text=True, env=_env)
+    return json.loads(r.stdout)["hookSpecificOutput"]["updatedInput"]["command"] if r.stdout.strip() else None
+_cmd = "nohup python3 train.py > train.log 2>&1 &"
+w = _hook(_cmd)
+ck("the line is kept, and a start by pid follows it", w is not None and w.startswith(_cmd + " ")
+   and "start train --pid $! --auto-launched" in w and "--log train.log" in w, str(w)[:200])
+_t0 = time.time()
+r = subprocess.run(["/bin/bash", "-c", w or "false"], cwd=_w, capture_output=True, text=True, env=_env)
+ck("and it still returns at once, with the line's own status", r.returncode == 0 and time.time() - _t0 < 3,
+   "%s in %.1fs: %s" % (r.returncode, time.time() - _t0, r.stderr[-200:]))
+_js = [j for j in json.load(open(os.path.join(_w, "st", "state.json")))["jobs"].values()]
+_j = _js[0] if _js else {}
+ck("the job is followed by its pid, reading its own log", _j.get("pid") and _j.get("state") == "running"
+   and _j.get("log") == os.path.join(_w, "train.log") and _j.get("auto_launched"),
+   str({k: _j.get(k) for k in ("pid", "state", "log", "auto_launched")}))
+def _state():
+    try:
+        return list(json.load(open(os.path.join(_w, "st", "state.json")))["jobs"].values())[0]
+    except Exception:
+        return {}
+_deadline = time.time() + 60
+while time.time() < _deadline and _state().get("state") == "running":
+    time.sleep(1)
+_j = _state()
+ck("and its bar ends when the process does, having read its progress", _j.get("state") in ("done", "finished")
+   or (_j.get("state") != "running" and _j.get("step") == 4),
+   str({k: _j.get(k) for k in ("state", "step", "total", "exit_code")}))
+w = _hook("AGENT_PROGRESS_ETA=5m nohup false &")
+r = subprocess.run(["/bin/bash", "-c", w or "false"], cwd=_w, capture_output=True, text=True, env=_env)
+ck("a job that dies at once does not turn the line into a failure", w is not None and r.returncode == 0,
+   "%s %r" % (r.returncode, r.stderr[-160:]))
+ck("a server sent to the background is left alone", _hook("nohup python3 -m http.server 8931 > s.log 2>&1 &") is None)
+ck("a rule that allows the line but not the tracking leaves it alone",
+   _hook(_cmd, ["Bash(nohup:*)"]) is None)
+w = _hook(_cmd, ["Bash(nohup:*)", "Bash(python3:*)"])
+ck("one that allows python3 gets the python3 form", w is not None and "& python3 " in w and "agent_progress.py" in w, str(w)[-160:])
+shutil.rmtree(_w, ignore_errors=True)
+
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:
     print("   -", f)

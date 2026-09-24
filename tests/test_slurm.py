@@ -12,6 +12,7 @@ the job moves through the queue because the fake scheduler says it did.
 import importlib.util
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -400,6 +401,104 @@ until(lambda: job("rq2").get("state") not in ("running", "queued"), 60)
 ck("but a requeued attempt that failed is still a failure", job("rq2").get("state") == "failed",
    str(job("rq2").get("state")))
 run("rm", "--all", "--force")
+
+print()
+print("=== every way of submitting is followed, through the real wrapper ===")
+# A fake sbatch that hands out ids and records, as slurm does, who submitted
+# what from where and when - and a fake squeue that reports it.
+import tempfile  # noqa: E402
+W = tempfile.mkdtemp(prefix="agent-progress-submit-")
+COUNTER = os.path.join(sandbox.HOME, "sbatch.counter")
+QUEUE = os.path.join(sandbox.HOME, "squeue.txt")
+QUIET = os.path.join(sandbox.HOME, "squeue.off")
+for name, body in (
+        ("sbatch", '#!/bin/sh\nn=$(cat "%s" 2>/dev/null || echo 5150); n=$((n+1)); echo $n > "%s"\n'
+                   'echo "$n|$(date +%%Y-%%m-%%dT%%H:%%M:%%S)|$PWD" >> "%s"\n'
+                   'case " $* " in *" --parsable "*) echo "$n;testcluster" ;; '
+                   '*) echo "Submitted batch job $n" ;; esac\n' % (COUNTER, COUNTER, QUEUE)),
+        ("squeue", '#!/bin/sh\n[ -e "%s" ] && exit 0\ncat "%s" 2>/dev/null\nexit 0\n' % (QUIET, QUEUE))):
+    path = os.path.join(BIN, name)
+    with open(path, "w") as f:
+        f.write(body)
+    os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+slurm_says(scontrol=PENDING % W)
+
+
+def fresh():
+    run("rm", "--all", "--force")
+    open(QUEUE, "w").close()
+    if os.path.exists(QUIET):
+        os.remove(QUIET)
+
+
+def last_id():
+    return open(COUNTER).read().strip()
+
+
+def followed(jid):
+    return [j for j in cc.state_ro()["jobs"].values() if (j.get("batch") or {}).get("job_id") == jid]
+
+
+def wrapped(cmd):
+    return run("exec", "--after", "60", "--shell", cmd, cwd=W)
+
+
+fresh()
+r = wrapped("JOB=$(sbatch --parsable a.sbatch)")
+n = last_id()
+ck("an id captured into a variable, never printed, is still followed", len(followed(n)) == 1,
+   "%s: %s" % (n, r.stdout[-200:]))
+ck("and Claude is told so", "slurm job %s" % n in r.stdout and r.returncode == 0, r.stdout[-200:])
+
+fresh()
+open(QUIET, "w").close()               # squeue says nothing: the output alone must do
+r = wrapped("sbatch --parsable a.sbatch")
+n = last_id()
+ck("sbatch --parsable is followed from its output alone", len(followed(n)) == 1, r.stdout[-200:])
+ck("and its output reaches the caller untouched", r.stdout.startswith("%s;testcluster\n" % n), repr(r.stdout[:40]))
+
+fresh()
+r = wrapped("JOB=$(sbatch --parsable a.sbatch) && echo $JOB")
+n = last_id()
+ck("printed and queued, it is followed once, not twice", len(followed(n)) == 1, str(len(followed(n))))
+
+fresh()
+r = wrapped("for i in 1 2 3; do sbatch a.sbatch; done")
+n = int(last_id())
+ck("a loop that submits three has three bars", all(len(followed(str(i))) == 1 for i in (n - 2, n - 1, n)),
+   r.stdout[-300:])
+ck("announced together", "3 scheduler jobs were submitted" in r.stdout, r.stdout[-300:])
+
+fresh()
+open(os.path.join(W, "submit_all.sh"), "w").write("#!/bin/sh\nfor i in 1 2; do\n  sbatch --parsable a.sbatch\ndone\n")
+v = cc.classify_command("bash submit_all.sh", {}, cc.load_config(), cwd=W)
+ck("a script that submits is tracked because of what is in it", v["track"] and v["signal"] == "script", str(v)[:120])
+r = wrapped("bash submit_all.sh")
+n = int(last_id())
+ck("and both of its jobs are followed", len(followed(str(n - 1))) == 1 and len(followed(str(n))) == 1, r.stdout[-300:])
+
+fresh()
+r = wrapped("JOB=$(cd / && sbatch --parsable a.sbatch)")
+ck("a job submitted from another directory is not taken for this one's", followed(last_id()) == [],
+   str(followed(last_id()))[:120])
+
+fresh()
+# a HOME of its own: the launcher the hook writes must be this engine, not a
+# shim some installed copy left in ~/.local/bin
+_h = tempfile.mkdtemp(prefix="agent-progress-subhome-")
+_hook = subprocess.run([sys.executable, os.path.join(ROOT, "hooks", "auto_track.py")],
+                       input=json.dumps({"tool_name": "Bash", "session_id": "sub", "cwd": W,
+                                         "tool_input": {"command": "JOB=$(sbatch --parsable a.sbatch) && echo \"job $JOB\""}}),
+                       capture_output=True, text=True, env=dict(os.environ, HOME=_h))
+shutil.rmtree(_h, ignore_errors=True)
+w = json.loads(_hook.stdout)["hookSpecificOutput"]["updatedInput"]["command"] if _hook.stdout.strip() else None
+ck("the hook wraps the recipe the skill gives", w is not None and "exec --name" in w, _hook.stdout[:160])
+r = subprocess.run(["/bin/bash", "-c", w or "false"], cwd=W, capture_output=True, text=True)
+n = last_id()
+ck("which runs as it would have, and its job is followed", r.returncode == 0 and ("job %s;testcluster" % n) in r.stdout
+   and len(followed(n)) == 1, "%s %r" % (r.returncode, r.stdout[-200:]))
+fresh()
+shutil.rmtree(W, ignore_errors=True)
 
 print("=== %d checks, %d failed ===" % (CHECKS[0], len(FAILS)))
 for f in FAILS:

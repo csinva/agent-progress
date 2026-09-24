@@ -81,6 +81,14 @@ ends, with the command's own exit code. There is no note, because there is
 nothing to tell you - you are watching the same command you would have been
 watching anyway. Putting something in the background is your decision, not the
 plugin's.
+
+A command that puts itself in the background - `nohup python train.py >
+train.log 2>&1 &` - is not wrapped, since it returns at once. It runs exactly as
+written, and a line is added after it that follows the process by its pid and
+reads the file its output goes to; you will see that line's announcement in the
+output. Servers (`uvicorn`, `jupyter lab`, `npm run dev`, `vllm serve`) and
+watchers (`tail -f`, `--watch`) are never tracked, in the foreground or the
+background: they do not end, so neither would their bar.
 - **Give it an estimate, before it starts.** The hook cannot guess a duration -
   that is the one thing only you can supply - and once a foreground command is
   running you cannot reach it. So put the estimate on the command line itself,
@@ -157,6 +165,17 @@ progress comes from the file the scheduler writes, and its state comes from the
 scheduler itself, so the bar finishes on its own and a job the cluster kills
 arrives as a crash with the scheduler's own word for it - `OUT_OF_MEMORY`,
 `TIMEOUT`, `NODE_FAIL`.
+
+Every ordinary way of submitting is covered, so write it however suits the
+task - do not change how you submit, and do not also `agent-progress slurm`
+a job that was just submitted, or it gets two bars:
+
+- `sbatch train.sbatch`, and `sbatch --parsable train.sbatch`
+- `JOB=$(sbatch --parsable train.sbatch) && sbatch --dependency=afterok:$JOB next.sbatch`
+  - an id captured in a variable is never printed, so slurm itself is asked
+  what this user submitted from this directory while the command ran
+- a loop that submits many, and a script that does - each job gets its own bar
+  (up to twenty)
 
 So `sbatch train.sbatch` needs nothing from you except, as ever, an estimate:
 

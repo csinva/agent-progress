@@ -37,12 +37,29 @@ git clone https://github.com/csinva/agent-progress ~/.claude/skills/agent-progre
 
 ## Features
 A command is caught when it is backgrounded, when it is given a timeout of two
-minutes or more, or when it matches one of 38 patterns — training scripts,
-`torchrun`, `accelerate`, `deepspeed`, sweeps, `spark-submit`, `terraform`,
-`ansible`, `docker build`, `rsync`, `aws s3 sync`, model downloads, `dvc`,
-`dbt`, `pg_restore`, `git clone`, and ordinary work like `pytest`, `make`,
-`cargo build`, `npm test`, `go test`. Catching `pytest` is free when the suite
-takes four seconds, and useful when it takes four minutes.
+minutes or more (by the tool, or by a `timeout 2h ...` in front of it), when it
+runs a shell script whose contents would be caught, or when it matches
+one of 65 patterns:
+
+- **training and evaluation** — scripts named for the work (`train`, `eval`,
+  `predict`, `embed`, `preprocess`, `generate`, ...), `--epochs`/`--max_steps`
+  flags, `torchrun`, `accelerate`, `deepspeed`, `lm_eval`, sweeps, hydra
+  `--multirun`, `Rscript`, `julia`, `matlab -batch`
+- **clusters and workflows** — `sbatch`, `srun`, `qsub`, `bsub`, `sky`,
+  `modal`, `nextflow`, `snakemake`, `papermill`, `spark-submit`
+- **moving data** — `wget`, `curl -o`, `hf download`, `rsync`, `rclone`,
+  `scp`, `aws s3`, `gsutil`, `git lfs`, `docker pull`, `ollama pull`,
+  `git clone`
+- **installing** — `pip`, `uv sync`, `conda`/`mamba`, `npm ci`, `apt`, `brew`
+- **builds, tests and checks** — `pytest`, `make`, `cargo`, `go test`, `jest`,
+  `playwright`, `mypy`, `tsc`, `pre-commit`, `docker build`, `bazel`, `ninja`
+- **everything else slow** — `ffmpeg`, `tar`, `zstd`, `latexmk`, `sphinx-build`,
+  `psql -f`, `pg_restore`, `terraform`, `helm`, `dbt`, `dvc`, `xargs -P`
+
+Catching `pytest` is free when the suite takes four seconds, and useful when it
+takes four minutes. Servers and watchers — `uvicorn`, `jupyter lab`,
+`npm run dev`, `tail -f`, anything with `--watch` — are never tracked: a bar
+for something that never ends would never end either.
 
 ```bash
 agent-progress autotrack 'pytest tests/'
@@ -51,6 +68,32 @@ agent-progress autotrack 'pytest tests/'
 #   becomes      agent-progress exec --name pytest --after 20 --shell 'pytest tests/'
 #                only tracked if still running after 20s
 ```
+
+A command that sends itself to the background — `nohup python train.py >
+train.log 2>&1 &` — runs exactly as written, and is followed by the pid it
+leaves in `$!` and the file its output goes to.
+
+Work handed to a scheduler is followed on the scheduler's own word, however it
+was submitted: `sbatch job.sbatch`, `JOB=$(sbatch --parsable job.sbatch)` (the
+id is captured and never printed, so slurm is asked what was submitted from
+here while the command ran), a loop that submits twenty, or a script that
+submits them for you.
+
+## What counts as progress
+
+Each job is watched by one monitor, chosen when it starts:
+
+| monitor | watches |
+| --- | --- |
+| `auto` | the log, for any known progress marker — tqdm, `epoch 3/10`, `step 400/1000`, percentages (the default) |
+| `log` | the log, with your own regex: `--pattern 'done (?P<step>\d+)/(?P<total>\d+)'` |
+| `milestones` | named stages appearing in the log, each an equal slice |
+| `files` | output files appearing: `--glob 'out/shard-*.parquet' --total 500` |
+| `size` | a file or directory growing toward a size: `--path out/index.bin --target-size 12GB` |
+| `probe` | any command that prints `k/N`, `k` or `NN%` — a database count, a queue, a remote host |
+| `time` | nothing observable: the bar runs on the estimate alone |
+
+`agent-progress monitors` prints the same, with the flags each one takes.
 
 ## Custom configuration
 

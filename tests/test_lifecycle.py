@@ -327,6 +327,24 @@ ck("a bare number is not a submission on its own",
 ck("but it is when qsub printed it",
    cc.detect_submission("1234.head", "qsub job.pbs") == ("pbs", "1234.head"),
    str(cc.detect_submission("1234.head", "qsub job.pbs")))
+# `sbatch --parsable` is the form a script can capture, and the one the skill
+# recommends; it prints the id alone, or `id;cluster`.
+ck("sbatch --parsable is read",
+   cc.detect_submissions("4242\n", "sbatch --parsable a.sbatch") == [("slurm", "4242")],
+   str(cc.detect_submissions("4242\n", "sbatch --parsable a.sbatch")))
+ck("with its cluster suffix too",
+   cc.detect_submissions("4242;gpu\n", "J=$(sbatch --parsable a.sbatch) && echo $J") == [("slurm", "4242")])
+ck("but a bare number from sbatch without --parsable is not",
+   cc.detect_submissions("4242\n", "sbatch a.sbatch; wc -l x") == [])
+ck("every submission of a loop is found",
+   cc.detect_submissions("Submitted batch job 7\nSubmitted batch job 8\nSubmitted batch job 9\n",
+                         "for f in *.sbatch; do sbatch $f; done") == [("slurm", "7"), ("slurm", "8"), ("slurm", "9")])
+ck("a bare number beside them is not taken for one more",
+   cc.detect_submissions("Submitted batch job 7\n12\n", "sbatch --parsable a; sbatch b; wc -l x") == [("slurm", "7")])
+ck("of several bare numbers only the first is believed",
+   cc.detect_submissions("4242\n17\n", "sbatch --parsable a.sbatch && squeue | wc -l") == [("slurm", "4242")])
+ck("and a runaway loop is bounded",
+   len(cc.detect_submissions("".join("Submitted batch job %d\n" % i for i in range(500)), "x")) == cc.SUBMISSIONS_MAX)
 
 for label, final, want in [("that succeeds", "COMPLETED", "done"),
                            ("that is killed", "OUT_OF_MEMORY", "failed")]:

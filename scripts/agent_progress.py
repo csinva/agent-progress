@@ -1765,6 +1765,16 @@ def pick_jobs(st, cfg, session_id=None, apply_visibility=True, scoped=True):
 # a command handed a long timeout, or explicitly sent to the background, has
 # already been declared slow by whoever wrote it.
 
+# The words a script is named for when it is the long part of the work. Not
+# only training: `predict.py`, `embed_corpus.py`, `preprocess.sh` and
+# `run_all.sh` are as slow as any training run, and a session running one got
+# no bar because its name was not `train`. None of these names a server, which
+# is the one kind of long command a bar must not be given.
+_WORK_WORDS = (r"(?:train|finetune|fine_tune|pretrain|sweep|eval|benchmark|experiment"
+               r"|predict|infer|generat|embed|encod|distill|quantiz|preprocess|process"
+               r"|prepare|download|extract|convert|export|simulat|backfill|crawl|scrape"
+               r"|reindex|build_index|annotat|label|score|pipeline|run_all|rollout)")
+
 AUTO_TRACK_PATTERNS = [
     # training and other GPU work
     # No \b before the keyword: a word boundary cannot follow an underscore, so
@@ -1772,22 +1782,32 @@ AUTO_TRACK_PATTERNS = [
     # stray match on something like constraints.py costs nothing now that a
     # command finishing inside the threshold is never tracked at all.
     (r"\b(?:python3?|uv\s+run|poetry\s+run|pipenv\s+run)\s+[^|;&]{0,120}"
-     r"(?:train|finetune|fine_tune|pretrain|sweep|eval|benchmark|experiment)"
-     r"[\w.-]*\.py\b", "a training or evaluation script"),
+     + _WORK_WORDS + r"[\w.-]*\.py\b", "a training or evaluation script"),
     # The same work, invoked the other ways people actually invoke it. A model
     # asked to "run training" picks whatever the repo uses, and that is a module,
     # a shell script or a flag at least as often as it is a .py file.
     (r"\b(?:python3?|uv\s+run|poetry\s+run|pipenv\s+run)\s+(?:python3?\s+)?-m\s+[\w.]{0,60}"
-     r"(?:train|finetune|fine_tune|pretrain|sweep|eval|benchmark|experiment)",
-     "a training module"),
-    (r"\b(?:bash|sh|zsh)\s+[^|;&]{0,80}"
-     r"(?:train|finetune|pretrain|sweep|eval|benchmark|experiment)[\w.-]{0,40}\.sh\b",
+     + _WORK_WORDS, "a training module"),
+    (r"\b(?:bash|sh|zsh)\s+[^|;&]{0,80}" + _WORK_WORDS + r"[\w.-]{0,40}\.sh\b",
      "a training script"),
-    (r"(?:^|\s)\./[\w./-]{0,60}"
-     r"(?:train|finetune|pretrain|sweep|eval|benchmark|experiment)[\w.-]{0,40}",
-     "a training script"),
+    (r"(?:^|\s)\./[\w./-]{0,60}" + _WORK_WORDS + r"[\w.-]{0,40}", "a training script"),
     (r"--(?:mode|stage|task)[= ](?:train|fit|finetune|pretrain)\b", "a training run"),
+    # A flag that counts the work says there is a lot of it.
+    (r"\s--(?:epochs?|num_epochs|num_train_epochs|max_epochs|max_steps|num_steps|steps"
+     r"|iters|iterations|n_iter|n_trials|num_trials|num_samples|n_samples|max_samples)"
+     r"[= ]\d", "a run with a step count"),
+    (r"\s--multirun\b", "a hydra multirun"),
     (r"\b(?:sbatch|qsub|bsub)\b", "a batch submission"),
+    # srun blocks here until its step ends on the cluster, so it is a local job
+    # like any other
+    (r"\bsrun\b", "a slurm step"),
+    (r"\bsky\s+(?:launch|exec|jobs\s+launch)\b|\bmodal\s+run\b", "a cloud job"),
+    (r"\b(?:nextflow\s+run|snakemake|nf-core)\b", "a workflow run"),
+    (r"\b(?:papermill|jupyter\s+(?:nbconvert|execute))\b", "a notebook run"),
+    (r"\b(?:lm_eval|lighteval|axolotl|llamafactory-cli|litgpt|mlflow\s+run|tune\s+run)\b",
+     "an LLM training or eval run"),
+    (r"\b(?:Rscript\s[^|;&]{0,120}\.[Rr]\b|julia\s[^|;&]{0,120}\.jl\b|matlab\s+-batch)",
+     "an R, Julia or MATLAB script"),
     (r"\btorchrun\b", "torchrun"),
     (r"\baccelerate\s+launch\b", "accelerate launch"),
     (r"\bdeepspeed\b", "deepspeed"),
@@ -1808,6 +1828,21 @@ AUTO_TRACK_PATTERNS = [
     (r"\bbazel\s+(?:build|test)\b", "bazel"),
     (r"\b(?:gradlew?|mvn)\b", "a JVM build"),
     (r"\b(?:cmake\s+--build|xcodebuild)\b", "a native build"),
+    (r"\b(?:ninja|meson\s+compile|ctest|swift\s+(?:build|test)|dotnet\s+(?:build|test|publish)"
+     r"|sbt\s+\w|mix\s+(?:test|compile)|rspec|phpunit)\b", "a build or test"),
+    (r"\b(?:jest|vitest|mocha|playwright\s+test|cypress\s+run)\b", "a JS test run"),
+    (r"\b(?:tsc|mypy|pyright|pytype)\b", "a type check"),
+    (r"\bpre-commit\s+run\b", "pre-commit"),
+    (r"\b(?:latexmk|pdflatex|xelatex|lualatex|tectonic|sphinx-build|pandoc"
+     r"|jupyter-book\s+build|quarto\s+render|mkdocs\s+build)\b", "a document build"),
+    # installing: a cold `pip install torch` or `conda env create` is minutes
+    (r"\b(?:pip3?|uv\s+pip|pipx)\s+install\b|\buv\s+(?:sync|add)\b"
+     r"|\bpoetry\s+(?:install|update|add)\b", "a Python install"),
+    (r"\b(?:conda|mamba|micromamba)\s+(?:env\s+(?:create|update)|create|install|update)\b",
+     "a conda install"),
+    (r"\b(?:npm|pnpm)\s+(?:ci|install|i)\b|\byarn\s+install\b", "a JS install"),
+    (r"\b(?:apt|apt-get)\s+(?:install|upgrade|dist-upgrade)\b|\bbrew\s+(?:install|upgrade)\b"
+     r"|\b(?:cargo|go)\s+install\b|\bbundle\s+install\b", "a system install"),
     # data and infrastructure
     (r"\bdvc\s+repro\b", "a dvc pipeline"),
     (r"\bdbt\s+(?:run|build|test)\b", "a dbt run"),
@@ -1817,15 +1852,45 @@ AUTO_TRACK_PATTERNS = [
     (r"\bpulumi\s+(?:up|preview)\b", "pulumi"),
     (r"\balembic\s+upgrade\b", "a database migration"),
     (r"\b(?:pg_restore|pg_dump|mysqldump)\b", "a database dump or restore"),
+    (r"\bpsql\b[^|;&]{0,200}\s-f\s|\bmysql\b[^|;&]{0,200}<"
+     r"|\b(?:mongorestore|mongodump|mongoimport|pg_basebackup)\b|\bbq\s+(?:load|query|extract)\b",
+     "a database load"),
+    (r"\bhelm\s+(?:install|upgrade)\b|\bkubectl\s+(?:wait|rollout\s+status)\b|\bpacker\s+build\b"
+     r"|\bgcloud\s+(?:builds\s+submit|container\s+clusters\s+create)\b|\beksctl\s+create\b",
+     "a deployment"),
     # moving data
     (r"\brsync\b", "an rsync transfer"),
-    (r"\baws\s+s3\s+(?:sync|cp)\b", "an S3 transfer"),
+    (r"\baws\s+s3\s+(?:sync|cp|mv)\b", "an S3 transfer"),
     (r"\b(?:gsutil|gcloud\s+storage)\b", "a GCS transfer"),
-    (r"\bhuggingface-cli\s+download\b", "a model download"),
-    (r"\b(?:wget|curl)\b[^|;&]{0,120}\s-[a-zA-Z]*[oO]\b", "a download"),
+    (r"\b(?:hf|huggingface-cli)\s+(?:download|upload)\b", "a model download or upload"),
+    # wget always writes a file; curl only when told to
+    (r"\bwget\b", "a download"),
+    (r"\bcurl\b[^|;&]{0,200}\s(?:-[a-zA-Z]*[oO]\b|--output\b|--remote-name)", "a download"),
+    (r"\b(?:aria2c|gdown|yt-dlp|azcopy|kaggle\s+(?:datasets|competitions|kernels)\s+download)\b",
+     "a download"),
+    (r"\brclone\s+(?:copy|copyto|sync|move)\b|\bscp\b", "a remote copy"),
+    (r"\bgit\s+lfs\s+(?:pull|fetch|clone|push)\b", "a git lfs transfer"),
+    (r"\b(?:docker|podman)\s+(?:pull|push)\b|\bollama\s+(?:pull|create)\b",
+     "an image pull or push"),
     (r"\bgit\s+clone\b", "a git clone"),
+    # data and media on disk
+    (r"\b(?:ffmpeg|HandBrakeCLI|sox)\b", "a media conversion"),
+    (r"\btar\s+-?[a-zA-Z]*[cxr][a-zA-Z]*\b|\b(?:zip\s+-r|unzip|7z|7za|zstd|xz|pigz|pbzip2)\b",
+     "an archive"),
+    (r"^\s*parallel\s|\bxargs\b[^|;&]{0,200}\s-P\s*\d", "parallel jobs"),
     (r"\bsleep\s+(?:[2-9]\d\d|\d{4,})\b", "a long sleep"),
 ]
+
+# Servers and watchers never finish, so a bar for one never does either - it
+# would sit at its ceiling with an estimate forever being revised. A line that
+# starts one is left alone however else it would have matched.
+_SERVER_RULE = (
+    r"\b(?:uvicorn|gunicorn|tensorboard|gradio|http\.server)\b"
+    r"|\bjupyter\s+(?:lab|notebook|server)\b|\bstreamlit\s+run\b|\bflask\s+run\b"
+    r"|\b(?:vllm|ollama|mkdocs|sglang)\s+serve\b|\bquarto\s+preview\b|\bnext\s+dev\b"
+    r"|\bvite\s+(?:dev|serve|preview)\b"
+    r"|\b(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:dev|start|serve|watch)\b"
+    r"|\btail\s+(?:-[a-zA-Z]*[fF]|--follow)|(?:^|[;&|]\s*)watch\s|(?:^|\s)--watch(?:All)?\b")
 
 # Checked before anything else. Anything matching here is never auto-tracked.
 AUTO_TRACK_IGNORE = [
@@ -1850,6 +1915,7 @@ AUTO_TRACK_IGNORE = [
     r"^\s*git\s+(?:status|log|diff|show|branch|rev-parse|add|commit|config|remote)\b",
     r"^\s*(?:npm|pnpm|yarn|pip|pip3|brew|apt|apt-get)\s+(?:ls|list|info|view|show)\b",
     r"^\s*docker\s+(?:ps|images|logs)\b",
+    _SERVER_RULE,
 ]
 
 # A name for the bar, taken from whatever in the command looks most like the
@@ -1906,7 +1972,8 @@ def scan_shell(text):
     n = min(len(text), SCAN_CAP)
     segs = []
     i = start = 0
-    single = double = False
+    single = double = tick = False
+    depth = 0              # inside $( ... ): nothing there separates this line
     pending = []           # heredoc terminators announced on this line
     body_spans = []
     while i < n:
@@ -1933,6 +2000,27 @@ def scan_shell(text):
             continue
         if ch == '"':
             double = True
+            i += 1
+            continue
+        # A command substitution is one word to the line around it:
+        # `J=$(sbatch --parsable a.sbatch && echo x)` is a single assignment,
+        # and cutting at the `&&` inside it made two halves of nonsense.
+        if ch == "`":
+            tick = not tick
+            i += 1
+            continue
+        if tick:
+            i += 1
+            continue
+        if ch == "$" and text.startswith("$(", i):
+            depth += 1
+            i += 2
+            continue
+        if depth:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
             i += 1
             continue
         if ch == "<" and text.startswith("<<", i):
@@ -2057,6 +2145,47 @@ _STATE_WORDS = re.compile(r"\s*(?:cd|pushd|popd|export|ulimit|umask)(?:\s|$)")
 _LITERAL_ASSIGN = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_]*=[^;&|\n\'\"`$()\\ \t]*)\s*$")
 
 
+def _is_assignment_only(segment):
+    """Is this segment nothing but `NAME=value` - whatever the value is, a
+    `$(...)`, a quoted string - with no command after it? `J=$(sbatch
+    --parsable a.sbatch)` is; `FOO=1 python train.py` (a variable set for one
+    command) is not."""
+    s = (segment or "").lstrip()
+    m = re.match(r"[A-Za-z_][A-Za-z0-9_]*=", s)
+    if not m:
+        return False
+    i, n = m.end(), len(s)
+    depth = 0
+    quote = None
+    while i < n:
+        ch = s[i]
+        if quote:
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if ch in "'\"`":
+            quote = ch
+        elif s.startswith("$(", i):
+            depth += 1
+            i += 2
+            continue
+        elif ch == "(" and depth:
+            depth += 1
+        elif ch == ")" and depth:
+            depth -= 1
+        elif ch in " \t\n" and not depth:
+            return not s[i:].strip()
+        i += 1
+    return not quote and not depth
+
+
 def _setup_segment(stripped):
     """Is this segment something that belongs outside the wrapper, in the
     caller's own shell, and can safely go there? A `cd` or `export` with a
@@ -2146,6 +2275,15 @@ def split_shell_prefix(command):
             # would change what the earlier commands saw. It stays a blocker.
             hoist.append(stripped.strip())
             continue
+        if _is_assignment_only(stripped):
+            # `JOB=$(sbatch --parsable a.sbatch) && echo $JOB`: the value is
+            # computed, so it cannot be hoisted - but it does not have to be.
+            # Everything that reads it is on this line, and the whole of the
+            # work runs in the wrapper's one shell, so it is set there and
+            # read there. Nothing after the work can refer to it: a suffix is
+            # only ever a plain cd or a literal assignment. Refusing these
+            # left the canonical way of submitting to slurm untracked.
+            continue
         if _SHELL_STATE.match(stripped):
             return prefix, None, suffix
     if hoist:
@@ -2165,11 +2303,163 @@ def command_for_display(command):
     return one_line(HEREDOC.sub(" <<(script)", command or ""))
 
 
-def classify_command(command, tool_input=None, cfg=None):
+# `timeout 3h python x.py`: the caller has written down how long it may take,
+# which is the same declaration as a long tool timeout, made in the command.
+_TIMEOUT_PREFIX = re.compile(
+    r"^\s*(?:sudo\s+)?timeout\s+(?:--?[\w-]+(?:[= ]\S+)?\s+)*(\d+(?:\.\d+)?)([smhd]?)\s+\S")
+_TIMEOUT_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def timeout_prefix_seconds(segments):
+    """The longest `timeout N cmd` bound among these segments, in seconds."""
+    best = 0.0
+    for seg in segments:
+        m = _TIMEOUT_PREFIX.match(seg)
+        if m:
+            best = max(best, float(m.group(1)) * _TIMEOUT_UNITS[m.group(2)])
+    return best
+
+
+# A shell script run by path is opaque from its command line: `bash
+# submit_all.sh` says nothing about the sbatch loop inside it. When it is a
+# local file it is read, and judged by the commands in it.
+_SCRIPT_BY_SHELL = re.compile(
+    r"^\s*(?:(?:sudo|time|nohup|nice|caffeinate)\s+)*(?:bash|sh|zsh|dash|ksh)\s+"
+    r"(?:-[a-zA-Z]+\s+)*([^\s;&|<>'\"$`()-][^\s;&|<>'\"$`()]*)")
+_SCRIPT_DIRECT = re.compile(
+    r"^\s*(?:(?:sudo|time|nohup|nice|caffeinate)\s+)*"
+    r"((?:\.{1,2}|~)?/[^\s;&|<>'\"$`()]+|[\w.-]+/[^\s;&|<>'\"$`()]*\.(?:sh|bash))(?=\s|$)")
+SCRIPT_READ_CAP = 65536
+
+
+def referenced_scripts(command, cwd=None, most=4):
+    """[(path, text)] for the local shell scripts this command runs, comment
+    lines dropped - `#SBATCH` directives and prose are not commands."""
+    out = []
+    seen = set()
+    for seg in command_segments(command or "")[:40]:
+        m = _SCRIPT_BY_SHELL.match(seg) or _SCRIPT_DIRECT.match(seg)
+        if not m:
+            continue
+        path = os.path.expanduser(m.group(1))
+        if not os.path.isabs(path):
+            path = os.path.join(cwd or os.getcwd(), path)
+        if path in seen or not os.path.isfile(path):
+            continue
+        seen.add(path)
+        try:
+            with open(path, "rb") as f:
+                raw = f.read(SCRIPT_READ_CAP)
+        except OSError:
+            continue
+        if b"\0" in raw:
+            continue                        # a binary, not a script
+        text = raw.decode("utf-8", "replace")
+        text = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+        out.append((path, text))
+        if len(out) >= most:
+            break
+    return out
+
+
+def looks_long(text, segments, cfg, cwd=None):
+    """(signal, why) when something in these commands says they are slow, or
+    (None, None). Shared by commands run in front of the caller and commands
+    that put themselves in the background."""
+    limit = cfg["auto_track_timeout_seconds"]
+    bound = timeout_prefix_seconds(segments)
+    if limit and bound >= limit:
+        return "timeout", "it was given a %s timeout" % fmt_short(bound)
+    for rx, label in AUTO_TRACK_PATTERNS:
+        if any(_safe_search(rx, seg) for seg in segments):
+            return "pattern", "it looks like %s" % label
+    for rx in _split_patterns(cfg["auto_track_patterns"]):
+        if _safe_search(rx, text[:2000]):
+            return "pattern", "it matches one of your auto_track_patterns"
+    for path, script in referenced_scripts(text, cwd):
+        if _safe_search(_SERVER_RULE, script):
+            continue                        # it starts a server: no bar ever ends
+        inner = command_segments(script)
+        for rx, label in AUTO_TRACK_PATTERNS:
+            if any(_safe_search(rx, seg) for seg in inner):
+                return "script", "it runs %s, which looks like %s" % (
+                    os.path.basename(path), label)
+    return None, None
+
+
+# `nohup python train.py > train.log 2>&1 &` returns at once, so there is
+# nothing for a wrapper to wait on - but there is a pid, `$!`, and usually a
+# file the output goes to. That is exactly what `start --pid` follows, so a
+# command like this is left as it is and the tracking is added after it.
+_TRAILING_AMP = re.compile(r"(?<![&|>])&\s*$")
+_LONE_AMP = re.compile(r"(?<![&|>])&(?![&>])")
+_STDOUT_TO = re.compile(r"(?:^|[\s;|])(?:1?>>?|&>>?)\s*([^\s;&|<>()'\"`$]+)")
+_TEE_TO = re.compile(r"\btee\s+(?:-a\s+)?([^\s;&|<>()'\"`$-][^\s;&|<>()'\"`$]*)")
+
+
+def split_detached(command):
+    """(line, foreground, log) when the whole command is one job sent to the
+    background by a single trailing `&` - `line` is the command up to and
+    including that `&`, `foreground` the job without it, and `log` the file
+    its output goes to, if that can be told. None for anything else."""
+    text = (command or "").rstrip()
+    if not text:
+        return None
+    lines = text.split("\n")
+    lines[-1] = re.sub(r"(?:^|\s)#[^\n]*$", "", lines[-1]).rstrip()
+    line = "\n".join(lines).rstrip()
+    if not _TRAILING_AMP.search(line):
+        return None
+    foreground = line[:line.rfind("&")].rstrip()
+    stripped = " ".join(st for *_r, st in scan_shell(foreground))
+    if not foreground or _LONE_AMP.search(stripped):
+        return None                         # more than one job: `$!` names only the last
+    log = None
+    if not any(_STATE_WORDS.match(st) for *_r, st in scan_shell(foreground)):
+        # a `cd` inside the backgrounded list moves only the background shell,
+        # so a relative path could not be found from here
+        hits = _STDOUT_TO.findall(stripped) or _TEE_TO.findall(stripped)
+        if hits:
+            log = hits[-1]
+        elif re.search(r"(?:^|\s)nohup\s", stripped):
+            log = "nohup.out"
+    return line, foreground, log
+
+
+def detached_command(line, name, log=None, eta=None, cwd=None, foreground=None):
+    """The detached command with tracking added after it, in a form the
+    user's allow rules still match, or None to leave it alone. The job runs
+    exactly as written; `start` follows it by `$!` and never fails the line."""
+    def start(launcher):
+        s = "%s start %s --pid $! --auto-launched" % (launcher, shlex.quote(name))
+        if log:
+            s += " --log %s" % shlex.quote(log)
+        if eta:
+            s += " --eta %s" % shlex.quote(str(eta))
+        if foreground:
+            s += " --cmd %s" % shlex.quote(command_for_display(foreground)[:300])
+        return s
+    candidates = []
+    if _interpreter_ok("python3"):
+        candidates.append(start("python3 %s" % shlex.quote(os.path.abspath(__file__))))
+    candidates.append(start(launcher_prefix()))
+    rules = permission_allow_rules(cwd)
+    if rules and rule_allows(line, rules):
+        # the line is allowed; the segment added to it is checked on its own
+        for c in candidates:
+            if rule_allows(c, rules):
+                return line + " " + c
+        return None
+    return line + " " + candidates[0]
+
+
+def classify_command(command, tool_input=None, cfg=None, cwd=None):
     """Decide whether a Bash command deserves a progress bar.
 
     Returns {"track": bool, "why": str, "signal": str, "name": str}. `why` is
-    written to be read by Claude, so it explains itself in one clause."""
+    written to be read by Claude, so it explains itself in one clause. A
+    command that detaches itself comes back with "detached": {...} instead of
+    a prefix, body and suffix."""
     cfg = cfg or load_config()
     tool_input = tool_input or {}
     command = (command or "").strip()
@@ -2204,19 +2494,41 @@ def classify_command(command, tool_input=None, cfg=None):
         result["why"] = "every part of it is a trivial command"
         return result
 
-    # Some commands act on the shell they run in - `cd`, `export`, `source`, a
-    # bare assignment - and wrapping them in a shell of their own throws that
-    # away: `cd repo && pytest` left the session in the old directory. When
-    # they lead, they stay outside and only the work is wrapped; anywhere
-    # else, the command runs untouched. And a command that backgrounds itself
-    # with `&` returns at once, before the wrapper has anything to watch,
-    # while its output goes to a log the wrapper then deletes.
+    # A command that backgrounds itself with `&` returns at once, before a
+    # wrapper would have anything to wait on. It is left exactly as written,
+    # and followed afterwards by the pid it leaves in `$!`.
+    detached = split_detached(command)
+    if detached is not None:
+        line, foreground, log = detached
+        hints = hints_in_command(foreground)
+        result["name"] = hints.get("name") or suggest_job_name(
+            re.sub(r"^\s*(?:nohup|setsid)\s+", "", foreground)[:2000])
+        segs = command_segments(foreground) or [foreground[:2000]]
+        if hints.get("eta"):
+            result["eta"] = hints["eta"]
+            signal, why = "estimate", "it was given an estimate of %s" % hints["eta"]
+        else:
+            signal, why = looks_long(foreground, segs, cfg, cwd)
+        if not signal:
+            result["why"] = "it puts itself in the background, and nothing suggests it is long-running"
+            return result
+        result.update(track=True, signal=signal,
+                      why="%s, and puts itself in the background, so it is followed by its pid" % why,
+                      detached={"line": line, "foreground": foreground, "log": log})
+        return result
+
+    # Some commands act on the shell they run in - `cd`, `export`, `source` -
+    # and wrapping them in a shell of their own throws that away: `cd repo &&
+    # pytest` left the session in the old directory. When they lead, they stay
+    # outside and only the work is wrapped; anywhere else, the command runs
+    # untouched.
     prefix, body, suffix = split_shell_prefix(command)
     if body is None:
         result["why"] = "part of it changes the shell it runs in, or leaves it"
         return result
     last = re.sub(r"(?:^|\s)#[^\n]*$", "", body.rstrip().split("\n")[-1])
     if re.search(r"(?<![&|>])&\s*$", last):
+        # several jobs sent to the background at once: `$!` names only one
         result["why"] = "it puts itself in the background"
         return result
     result["prefix"], result["body"], result["suffix"] = prefix, body, suffix
@@ -2250,21 +2562,10 @@ def classify_command(command, tool_input=None, cfg=None):
         result.update(track=True, signal="timeout",
                       why="it was given a %s timeout" % fmt_short(timeout_s))
         return result
-    for rx, label in AUTO_TRACK_PATTERNS:
-        try:
-            if any(_safe_search(rx, seg) for seg in segments):
-                result.update(track=True, signal="pattern", why="it looks like %s" % label)
-                return result
-        except re.error:
-            continue
-    for rx in _split_patterns(cfg["auto_track_patterns"]):
-        try:
-            if re.search(rx, head):
-                result.update(track=True, signal="pattern",
-                              why="it matches one of your auto_track_patterns")
-                return result
-        except re.error:
-            continue
+    signal, why = looks_long(body, segments, cfg, cwd)
+    if signal:
+        result.update(track=True, signal=signal, why=why)
+        return result
 
     result["why"] = "nothing suggests this is long-running"
     return result
@@ -2502,11 +2803,17 @@ SUBMIT_PATTERNS = [
     # (pattern, scheduler, whether the command itself must vouch for it)
     (re.compile(r"Submitted batch job (\d+)"), "slurm", None),      # sbatch
     (re.compile(r"Job <(\d+)> is submitted"), "lsf", None),         # bsub
+    # `sbatch --parsable` prints the id alone, or `id;cluster` - the form the
+    # skill itself recommends, since it is the one a script can capture. Like
+    # qsub's, a bare number is only believed from the command that prints one.
+    (re.compile(r"^\s*(\d+)(?:;[\w.-]+)?\s*$", re.M), "slurm",
+     re.compile(r"\bsbatch\b[^\n]*--parsable")),
     # qsub prints a bare id, which on its own is indistinguishable from any
     # command that happens to print a number. Only trust it from qsub.
     (re.compile(r"^\s*(\d+(?:\.[\w-]+)?)\s*$", re.M), "pbs",
      re.compile(r"\bqsub\b")),
 ]
+SUBMISSIONS_MAX = 20        # a loop that submits hundreds gets the first twenty
 
 # Scheduler states, as words. Anything not named here leaves the job alone,
 # because an unrecognised word is far more likely to mean "still going" than to
@@ -2546,6 +2853,63 @@ def detect_submission(text, command=None):
         if m:
             return kind, m.group(1)
     return None, None
+
+
+def detect_submissions(text, command=None, most=SUBMISSIONS_MAX):
+    """[(scheduler, job id)] for every submission in this output, in order.
+
+    A loop over config files, or a script that submits a sweep, prints one
+    line per job; taking the first left all the others untracked. A sentence
+    only a scheduler prints is believed every time it appears. A bare number
+    is weaker evidence - `wc -l` after `sbatch --parsable` prints one too - so
+    only the first is taken, and only from a command that vouches for it."""
+    out = []
+    for rx, kind, needs in SUBMIT_PATTERNS:
+        if needs is not None and not needs.search(command or ""):
+            continue
+        found = rx.findall(text or "")
+        if needs is not None:
+            found = found[:1]
+            if out:
+                break                   # a sentence already named the jobs
+        for jid in found:
+            if (kind, jid) not in out:
+                out.append((kind, jid))
+    return out[:most]
+
+
+def slurm_recent_submissions(since, until, cwd=None):
+    """Slurm job ids submitted by this user between `since` and `until` from
+    this directory (or one under it), by asking slurm itself.
+
+    `JOB=$(sbatch --parsable a.sbatch)` puts the id in a variable, and nothing
+    is printed for the output to be read from. The scheduler still knows: it
+    records who submitted what, when, and from where. The window is the few
+    seconds the command ran and the directory is its own, so a submission made
+    at the same moment from another session elsewhere is not taken for this
+    one's. Returns [] whenever slurm cannot say."""
+    try:
+        user = os.environ.get("USER") or __import__("getpass").getuser()
+    except Exception:
+        return []
+    raw = _run("squeue -h -u %s -o '%%i|%%V|%%Z' 2>/dev/null" % shlex.quote(user), cwd)
+    here = os.path.realpath(cwd or os.getcwd())
+    out = []
+    for ln in (raw or "").splitlines():
+        parts = ln.strip().split("|")
+        if len(parts) < 3:
+            continue
+        jid = parts[0].split("_")[0].strip()
+        try:
+            submitted = time.mktime(time.strptime(parts[1].strip(), "%Y-%m-%dT%H:%M:%S"))
+        except (ValueError, OverflowError):
+            continue
+        where = os.path.realpath(parts[2].strip() or "/")
+        if (jid.isdigit() and since - 2 <= submitted <= until + 2
+                and (where == here or where.startswith(here + os.sep))
+                and jid not in out):
+            out.append(jid)
+    return out[:SUBMISSIONS_MAX]
 
 
 # ------------------------------------------------------------------ slurm
@@ -4096,6 +4460,22 @@ def _announce(job):
 
 
 def cmd_start(args):
+    if getattr(args, "auto_launched", False):
+        # Added by the hook after a command that put itself in the background.
+        # The line's exit status is this command's, so it must never fail it:
+        # a job that died at once, a state dir that is full - the caller's
+        # command already ran, and a missing bar is all it costs.
+        try:
+            return _start(args) or 0
+        except (Exception, SystemExit) as ex:
+            msg = ex.code if isinstance(ex, SystemExit) else str(ex)
+            if msg and not isinstance(msg, int):
+                sys.stderr.write("[agent-progress] not tracking it: %s\n" % msg)
+            return 0
+    return _start(args)
+
+
+def _start(args):
     if args.pid is not None and args.pid <= 1:
         raise SystemExit("pid %s is not a process of yours" % args.pid)
     if args.pid and not alive(args.pid):
@@ -4381,6 +4761,57 @@ def attach_batch_job(kind, job_id, cwd, eta=None, name=None, desc=None,
     return jid
 
 
+def _follow_submissions(command, log, args, started):
+    """If the command queued work rather than doing it, follow the queue.
+
+    What it printed is read first. When the command is one that submits to
+    slurm - itself, or a script it ran - slurm is also asked what this user
+    submitted from here while it ran, which is the only way to learn an id
+    that `$(sbatch --parsable ...)` put in a variable and never printed."""
+    cwd = args.cwd or os.getcwd()
+    # bounded: a verbose build can leave hundreds of megabytes here, and the
+    # ids a scheduler prints come early
+    with open(log) as f:
+        text = f.read(65536)
+    vouch = command + "".join("\n" + t for _p, t in referenced_scripts(command, cwd))
+    subs = detect_submissions(text, vouch)
+    if re.search(r"\bsbatch\b", vouch):
+        for sid in slurm_recent_submissions(started, time.time(), cwd):
+            if ("slurm", sid) not in subs:
+                subs.append(("slurm", sid))
+    if not subs:
+        return
+    tracked = {(j.get("batch") or {}).get("job_id") for j in state_ro()["jobs"].values()}
+    attached = []
+    for kind, sub_id in subs[:SUBMISSIONS_MAX]:
+        if sub_id in tracked:
+            continue                # already followed - by hand, or by an earlier line
+        attached.append((kind, sub_id, attach_batch_job(kind, sub_id, cwd, desc=args.desc)))
+    if not attached:
+        return
+    jobs = state_ro()["jobs"]
+    if len(attached) == 1:
+        kind, sub_id, jid = attached[0]
+        job = jobs.get(jid, {})
+        why = describe_queue(job)
+        print("\n[agent-progress] %s job %s is %s, and is being tracked as '%s'.%s\n"
+              "Progress comes from %s once the scheduler writes it, and the job's\n"
+              "state comes from the scheduler itself, so its bar finishes on its own.\n"
+              "Do not poll it with squeue - the bar already does, and says why it waits.\n"
+              "  agent-progress update %s --eta <duration>   how long you expect it to take"
+              % (kind, sub_id, job.get("state") or "queued", jid,
+                 ("\n" + why.capitalize() + ".") if why else "",
+                 job.get("log") or "the job's output file", jid))
+        return
+    print("\n[agent-progress] %d scheduler jobs were submitted, and each is being tracked:"
+          % len(attached))
+    for kind, sub_id, jid in attached:
+        print("  %-24s %s job %s, %s" % (jid, kind, sub_id,
+                                         jobs.get(jid, {}).get("state") or "queued"))
+    print("Each bar finishes on the scheduler's own word. Do not poll them with squeue.\n"
+          "  agent-progress update <id> --eta <duration>   how long you expect one to take")
+
+
 def _passthrough(command, cwd):
     """Run the command as though this wrapper were never here."""
     try:
@@ -4505,27 +4936,11 @@ def cmd_exec(args):
     relay.drain()                         # whatever it wrote on the way out
     relay.close()
     code = proc.returncode
-    try:
-        # bounded: a verbose build can leave hundreds of megabytes here, and
-        # the id a scheduler prints is in the first line either way
-        with open(log) as f:
-            kind, sub_id = detect_submission(f.read(65536), command)
-    except Exception:
-        kind, sub_id = None, None
-    if kind and (proc.returncode in (0, None)):
-        # the command did not do the work, it queued it. Follow the queue.
-        jid = attach_batch_job(kind, sub_id, args.cwd or os.getcwd(),
-                               desc=args.desc)
-        job = state_ro()["jobs"].get(jid, {})
-        state = job.get("state") or "queued"
-        why = describe_queue(job)
-        print("\n[agent-progress] %s job %s is %s, and is being tracked as '%s'.%s\n"
-              "Progress comes from %s once the scheduler writes it, and the job's\n"
-              "state comes from the scheduler itself, so its bar finishes on its own.\n"
-              "Do not poll it with squeue - the bar already does, and says why it waits.\n"
-              "  agent-progress update %s --eta <duration>   how long you expect it to take"
-              % (kind, sub_id, state, jid, ("\n" + why.capitalize() + ".") if why else "",
-                 job.get("log") or "the job's output file", jid))
+    if proc.returncode in (0, None):
+        try:
+            _follow_submissions(command, log, args, started)
+        except Exception:
+            pass                    # a queue that will not answer costs a bar, not the command
     try:
         with open(exitf) as f:
             code = int(f.read().strip())
@@ -5241,14 +5656,21 @@ def cmd_autotrack(args):
         ti["run_in_background"] = True
     if args.timeout:
         ti["timeout"] = int(args.timeout * 1000)
-    verdict = classify_command(command, ti, cfg)
+    verdict = classify_command(command, ti, cfg, cwd=os.getcwd())
     mark = "TRACK" if verdict["track"] else "leave alone"
     print("  %-12s %s" % (mark, command))
     print("  %-12s %s" % ("", verdict["why"]))
     if verdict["track"]:
         print("  %-12s %s" % ("name", verdict["name"]))
         print("  %-12s %s" % ("mode", cfg["auto_track"]))
-        if cfg["auto_track"] == "defer":
+        det = verdict.get("detached")
+        if cfg["auto_track"] == "defer" and det:
+            print("  %-12s %s" % ("becomes", detached_command(
+                det["line"], verdict["name"], log=det["log"], eta=verdict.get("eta"),
+                foreground=det["foreground"]) or command))
+            print("  %-12s runs as written; followed by its pid%s"
+                  % ("", " and %s" % det["log"] if det["log"] else ""))
+        elif cfg["auto_track"] == "defer":
             print("  %-12s %s" % ("becomes", wrap_command(
                 command, verdict["name"], after=cfg["auto_track_after_seconds"])))
             print("  %-12s only tracked if still running after %s"
@@ -5560,6 +5982,8 @@ def build_parser():
     sp.add_argument("--pid", type=int, help="pid to watch for completion")
     sp.add_argument("--cmd", help="command string, for display")
     sp.add_argument("--no-watch", action="store_true", help="do not spawn the log watcher")
+    sp.add_argument("--auto-launched", action="store_true",
+                    help="mark as started by the auto-track hook rather than a person")
     common(sp)
     monitor_flags(sp)
     sp.set_defaults(fn=cmd_start)

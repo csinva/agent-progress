@@ -214,6 +214,23 @@ print()
 print("=== the wrapped command does not depend on PATH ===")
 launcher = cc.launcher_prefix()
 ck("the launcher is an absolute path", launcher.strip("'").startswith("/"), launcher)
+# A shim left by another install - an older checkout, a path from before a
+# rename - must not be handed the commands this engine wraps.
+_sh = tempfile.mkdtemp(prefix="agent-progress-shim-")
+os.makedirs(os.path.join(_sh, ".local", "bin"))
+_shim = os.path.join(_sh, ".local", "bin", "agent-progress")
+_old_home = os.environ.get("HOME")
+os.environ["HOME"] = _sh
+try:
+    open(_shim, "w").write('#!/bin/sh\nexec python3 "/gone/agent-tqdm/scripts/agent_tqdm.py" "$@"\n')
+    os.chmod(_shim, 0o755)
+    ck("a shim for some other install is not used", _shim not in cc.launcher_prefix()
+       and os.path.abspath(ENGINE) in cc.launcher_prefix(), cc.launcher_prefix())
+    open(_shim, "w").write('#!/bin/sh\nexec python3 "%s" "$@"\n' % os.path.abspath(ENGINE))
+    ck("this install's own shim is", cc.launcher_prefix() == _shim, cc.launcher_prefix())
+finally:
+    os.environ["HOME"] = _old_home
+    shutil.rmtree(_sh, ignore_errors=True)
 wrapped = cc.wrap_command("echo ran", "t", after=20)
 for label, path in [("without ~/.local/bin",
                      ":".join(d for d in os.environ["PATH"].split(":")

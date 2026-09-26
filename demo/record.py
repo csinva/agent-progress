@@ -296,15 +296,15 @@ PANELS = [
      "idle": "not tracked yet",
      "reply": "Training is running.",
      "beside": "\u2713 train finished after 04:12\n  loss 0.41"},
-    {"key": "benchmark", "jid": "slurm-81734",
+    {"key": "benchmark", "jid": "bench-81734",
      "ask": "benchmark llama-7b on the cluster",
      "command": "sbatch bench.sbatch",
      "file": "bench.sbatch", "body": BENCH_SBATCH,
      "idle": "not submitted yet",
      "reply": "Submitted. It is in the queue.",
-     "beside": "\U0001f480 slurm-81734 OUT_OF_MEMORY after 02:14\n"
+     "beside": "\U0001f480 bench-81734 OUT_OF_MEMORY after 02:14\n"
                "  torch.cuda.OutOfMemoryError: 8.00 GiB\n"
-               "  agent-progress log slurm-81734 -n 60"},
+               "  agent-progress log bench-81734 -n 60"},
     {"key": "make", "jid": None, "ask": "build the project", "command": "make -j8",
      "file": "Makefile", "body": MAKEFILE,
      "idle": "under 20s - never tracked",

@@ -449,6 +449,15 @@ n = last_id()
 ck("an id captured into a variable, never printed, is still followed", len(followed(n)) == 1,
    "%s: %s" % (n, r.stdout[-200:]))
 ck("and Claude is told so", "slurm job %s" % n in r.stdout and r.returncode == 0, r.stdout[-200:])
+ck("its bar is named for what it runs, then which one: eval-%s" % n,
+   followed(n) and followed(n)[0]["id"] == "eval-%s" % n, str([j["id"] for j in followed(n)]))
+fresh()
+slurm_says(scontrol=(PENDING % W).replace("JobName=eval", "JobName=wrap"))
+wrapped("sbatch a.sbatch")
+n = last_id()
+ck("a --wrap job, whose name says nothing, keeps the scheduler's", followed(n) and followed(n)[0]["id"] == "slurm-%s" % n,
+   str([j["id"] for j in followed(n)]))
+slurm_says(scontrol=PENDING % W)
 
 fresh()
 open(QUIET, "w").close()               # squeue says nothing: the output alone must do

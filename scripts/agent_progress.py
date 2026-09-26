@@ -1932,16 +1932,312 @@ def _split_patterns(text):
     return [p for p in re.split(r"[;\n]", text or "") if p.strip()]
 
 
-def suggest_job_name(command):
-    command = (command or "")[:2000]      # the head is all a name can come from
-    for rx in _NAME_HINTS:
-        m = re.search(rx, command)
-        if m:
-            name = slug(os.path.basename(m.group(1)))
-            name = re.sub(r"\.(py|sh|js|ts)$", "", name)
-            if name and name not in ("python", "python3", "uv", "poetry", "sudo", "env"):
-                return name[:18]
-    return "job"
+# ---------------------------------------------------------------- job names
+#
+# The name is most of what a bar says about itself, and it used to come from
+# the command's first word: `AGENT_PROGRESS_ETA=5m make -j8` was a bar called
+# AGENT_PROGRESS_ETA, `JOB=$(sbatch ...)` one called JOB, a loop one called
+# `for`. A name is now taken from the work itself - the script, the module, the
+# thing being fetched or built - once the scaffolding around it is set aside.
+
+NAME_MAX = 16               # fits the default column, and most of the narrow one
+
+# Words that say nothing about which job this is. A bar named `main` or `run`
+# borrows its directory's name instead; one named `python` or `job` is a
+# failure of this function.
+_VAGUE = {"job", "run", "main", "script", "scripts", "app", "cli", "index", "__main__",
+          "start", "do", "task", "tmp", "temp", "test", "a", "b", "x", "src", "bin",
+          "python", "python3", "bash", "sh", "zsh", "env", "sudo", "uv", "poetry", "for",
+          "while", "if", "then", "do", "done", "exec", "command", "time", "nohup", "src"}
+
+# Commands that only launch the command after them. Their own options are
+# skipped by _skip_options, with the ones that take a value listed here.
+_LAUNCHERS = {
+    "sudo": "-u -g -C", "nohup": "", "setsid": "", "time": "-f -o", "caffeinate": "",
+    "xvfb-run": "-a -n -s", "exec": "", "command": "", "builtin": "",
+    "nice": "-n", "ionice": "-c -n -p", "stdbuf": "-i -o -e", "chrt": "",
+    "srun": "-p -n -N -c -t -J --gres --mem -A -q", "mpirun": "-np -n -H --host",
+    "mpiexec": "-np -n", "torchrun": "--nproc_per_node --nnodes --node_rank --master_addr "
+                                     "--master_port --rdzv_endpoint --rdzv_backend",
+    "deepspeed": "--num_gpus --num_nodes --hostfile --include --master_port",
+    "npx": "", "bunx": "", "pixi": "", "xargs": "-n -P -I -L -d -a",
+}
+_TIMEOUT_WORD = re.compile(r"^\d+(?:\.\d+)?[smhd]?$")
+_SCRIPT_EXT = re.compile(r"\.(?:py|sh|bash|zsh|sbatch|slurm|pbs|lsf|job|R|r|jl|js|mjs|ts|rb|pl|m|ipynb|nf|smk)$")
+_INTERPRETERS = re.compile(r"^(?:python[\d.]*|pypy3?|Rscript|julia|node|deno|bun|ruby|perl|bash|sh|zsh|dash|ksh|matlab|octave)$")
+# Long words the work is usually named with, and the short forms people use.
+_ABBREV = {"evaluation": "eval", "evaluate": "eval", "training": "train", "pretraining": "pretrain",
+           "finetuning": "finetune", "fine_tune": "finetune", "preprocessing": "prep", "preprocess": "prep",
+           "generation": "gen", "generate": "gen", "download": "dl", "downloads": "dl", "install": "inst",
+           "inference": "infer", "embedding": "embed", "embeddings": "embed", "experiment": "exp",
+           "experiments": "exp", "benchmark": "bench", "benchmarks": "bench", "configuration": "cfg",
+           "config": "cfg", "prediction": "pred", "predictions": "pred", "predict": "pred",
+           "distributed": "dist", "multilingual": "multi", "retrieval": "retr", "dataset": "data",
+           "datasets": "data", "database": "db", "migration": "migrate", "validation": "val",
+           "requirements": "reqs", "environment": "env", "processing": "proc", "process": "proc"}
+
+
+def _tokens(segment):
+    try:
+        return shlex.split(segment, comments=True)
+    except ValueError:
+        return segment.split()
+
+
+def _skip_options(toks, takes_value=""):
+    """Drop leading options, and the value of any that takes one."""
+    valued = set(takes_value.split())
+    i = 0
+    while i < len(toks) and toks[i].startswith("-") and toks[i] != "-":
+        opt = toks[i]
+        i += 1
+        if "=" not in opt and opt in valued and i < len(toks):
+            i += 1
+    return toks[i:]
+
+
+def _strip_scaffolding(toks):
+    """The command with what only launches it set aside: `VAR=x`, `env`,
+    `sudo`, `nohup`, `timeout 2h`, `uv run`, `conda run -n x`, `torchrun
+    --nproc_per_node 8`, a `do` or `then` that opens a loop body."""
+    for _ in range(12):
+        if not toks:
+            return toks
+        t = toks[0]
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t):
+            toks = toks[1:]
+        elif t in ("do", "then", "else", "{", "(", "!"):
+            toks = toks[1:]
+        elif t == "env":
+            toks = _skip_options(toks[1:], "-u -C -S")
+        elif t == "timeout":
+            rest = _skip_options(toks[1:], "-s -k --signal --kill-after")
+            toks = rest[1:] if rest and _TIMEOUT_WORD.match(rest[0]) else rest
+        elif t in ("uv", "poetry", "pipenv", "pdm", "hatch", "rye") and toks[1:2] == ["run"]:
+            toks = _skip_options(toks[2:], "--with --python -p --env")
+        elif t in ("conda", "mamba", "micromamba") and toks[1:2] == ["run"]:
+            toks = _skip_options(toks[2:], "-n --name -p --prefix")
+        elif t == "pixi" and toks[1:2] == ["run"]:
+            toks = toks[2:]
+        elif t == "accelerate" and toks[1:2] == ["launch"]:
+            toks = _skip_options(toks[2:], "--num_processes --num_machines --config_file "
+                                           "--mixed_precision --main_process_port --gpu_ids")
+        elif os.path.basename(t) in _LAUNCHERS:
+            toks = _skip_options(toks[1:], _LAUNCHERS[os.path.basename(t)])
+        else:
+            return toks
+    return toks
+
+
+def _stem(path):
+    """`scripts/train_model.py` -> train_model; a vague stem takes its
+    directory: `experiments/run.py` -> experiments-run."""
+    path = path.rstrip("/")
+    base = _SCRIPT_EXT.sub("", os.path.basename(path)) or os.path.basename(path)
+    base = re.sub(r"\.(?:tar(?:\.\w+)?|tgz|zip|gz|bz2|xz|zst|7z|git)$", "", base)
+    base = re.sub(r"(?<=.)\.[A-Za-z][A-Za-z0-9]{0,4}$", "", base)   # talk.mp4, env.yml, paper.tex
+    if base.lower() in _VAGUE:
+        parent = os.path.basename(os.path.dirname(path))
+        if parent and parent.lower() not in _VAGUE and parent not in (".", ".."):
+            return "%s-%s" % (parent, base)
+    return base
+
+
+def _url_stem(url):
+    """The thing a URL names: its last path part, or its repo for a git host."""
+    path = re.sub(r"^[a-z]+://[^/]+", "", url.split("?")[0].split("#")[0]).rstrip("/")
+    return _stem(path) if path else ""
+
+
+def _plain(toks):
+    """The positional arguments, options dropped."""
+    return [t for t in toks if not t.startswith("-")]
+
+
+def _name_from_tokens(toks):
+    """A name for one command, scaffolding already removed. None if it gives
+    nothing better than its own first word."""
+    if not toks:
+        return None
+    t0 = os.path.basename(toks[0])
+    rest = toks[1:]
+    args = _plain(rest)
+    # an interpreter: the script it runs, or the module
+    if _INTERPRETERS.match(t0):
+        opts = _skip_options(rest, "-X -W -Q -e -c -m -e -E")
+        for i, t in enumerate(rest):
+            if t == "-m" and i + 1 < len(rest):
+                mod = rest[i + 1]
+                if mod in ("torch.distributed.run", "torch.distributed.launch"):
+                    return _name_from_tokens(_strip_scaffolding(["torchrun"] + rest[i + 2:])) or "torchrun"
+                parts = [p for p in mod.split(".") if p.lower() not in _VAGUE]
+                return parts[-1] if parts else mod
+            if t in ("-c", "-e"):
+                return "%s-inline" % ("py" if t0.startswith(("python", "pypy")) else t0)
+        if not opts:
+            return None
+        name = _stem(opts[0])
+        if name.lower() in _VAGUE or "-" in name and name.split("-")[-1].lower() in _VAGUE:
+            # `python main.py --config sweep_a.yaml`: the entry point is shared,
+            # the configuration is what tells runs apart
+            m = re.search(r"(?:^|\s)--?(?:config|cfg|config-name|config_name|task|exp|experiment|"
+                          r"name|run_name|model|dataset|data)[= ](\S+)", " ".join(opts[1:]))
+            if m:
+                name = "%s-%s" % (os.path.basename(_SCRIPT_EXT.sub("", opts[0])), _stem(m.group(1)))
+        return name
+    # a scheduler: the script it queues, or the name the job was given
+    if t0 in ("sbatch", "qsub", "bsub"):
+        for i, t in enumerate(rest):
+            m = re.match(r"^(?:--job-name|-J|-N)(?:=(.+))?$", t)
+            if m:
+                return m.group(1) or (rest[i + 1] if i + 1 < len(rest) else None)
+            if t.startswith("--wrap"):
+                inner = t.split("=", 1)[1] if "=" in t else (rest[i + 1] if i + 1 < len(rest) else "")
+                return suggest_job_name(inner, fallback=None)
+        scripts = [a for a in _plain(_skip_options(rest, "-p -t -c -n -N -o -e -A -q --mem -G -q -l -W -M -R"))
+                   if not a.startswith("$")]
+        return _stem(scripts[0]) if scripts else None
+    # a path run directly
+    if "/" in toks[0] or _SCRIPT_EXT.search(toks[0]):
+        return _stem(toks[0])
+    sub = args[0] if args else ""
+    obj = args[1] if len(args) > 1 else ""
+    if t0 == "make":
+        targets = [a for a in args if "=" not in a]
+        return "make-%s" % targets[0] if targets else "make"
+    if t0 in ("npm", "pnpm", "yarn", "bun"):
+        if sub == "run" and obj:
+            return "%s-%s" % (t0, obj)
+        if sub in ("ci", "i", "install", "add"):
+            return "%s-install" % t0
+        return "%s-%s" % (t0, sub) if sub else t0
+    if t0 in ("pip", "pip3", "pipx") or (t0 == "uv" and sub == "pip"):
+        pk = args[2:] if t0 == "uv" else args[1:]
+        if "-r" in rest or "--requirement" in rest:
+            return "pip-reqs"
+        pk = [p for p in pk if not p.startswith((".", "/"))]
+        return "pip-%s" % re.split(r"[<>=\[;]", pk[0])[0] if pk else "pip-install"
+    if t0 in ("conda", "mamba", "micromamba"):
+        if sub == "env":
+            return "%s-env" % t0
+        pk = [p for p in args[1:]]
+        return "%s-%s" % (t0, pk[0]) if pk and sub in ("install", "create") else "%s-%s" % (t0, sub or "env")
+    if t0 in ("apt", "apt-get", "brew", "cargo", "go", "gem", "dnf", "yum") and sub == "install" and obj:
+        return "%s-%s" % (t0.split("-")[0], obj.split("@")[0].split("/")[-1])
+    if t0 in ("hf", "huggingface-cli") and sub in ("download", "upload") and obj:
+        return "%s-%s" % ("dl" if sub == "download" else "up", obj.rstrip("/").split("/")[-1])
+    if t0 in ("wget", "curl", "aria2c", "gdown", "yt-dlp", "axel"):
+        urls = [a for a in args if "://" in a or re.match(r"^[\w.-]+\.\w+/", a)]
+        return "dl-%s" % _url_stem(urls[0]) if urls and _url_stem(urls[0]) else "dl-%s" % t0
+    if t0 == "git":
+        if sub == "clone" and obj:
+            return "clone-%s" % _url_stem(obj)
+        return "git-%s" % ("lfs-" + obj if sub == "lfs" and obj else sub) if sub else "git"
+    if t0 in ("rsync", "scp", "rclone"):
+        src = [a for a in args if a not in ("copy", "sync", "move", "copyto")]
+        return "%s-%s" % (t0, _stem(src[0].split(":")[-1]) or "data") if src else t0
+    if t0 == "aws" and sub == "s3" and len(args) > 2:
+        return "s3-%s" % args[1]
+    if t0 in ("docker", "podman"):
+        if sub == "compose":
+            return "compose-%s" % obj if obj else "compose"
+        if sub == "build":
+            m = re.search(r"(?:^|\s)(?:-t|--tag)[ =](\S+)", " ".join(rest))
+            return "build-%s" % m.group(1).split(":")[0].split("/")[-1] if m else "docker-build"
+        if sub in ("pull", "push") and obj:
+            return "%s-%s" % (sub, obj.split(":")[0].split("/")[-1])
+        if sub == "run":
+            inner = _plain(_skip_options(rest[1:], "-v -e -p -w --name --gpus --shm-size -u --network "
+                                                  "--mount --entrypoint --env-file --ipc"))
+            return _name_from_tokens(inner[1:]) or (inner[0].split(":")[0].split("/")[-1] if inner else "docker-run")
+        return "docker-%s" % sub if sub else "docker"
+    if t0 in ("tar", "zip", "unzip", "zstd", "xz", "7z", "gzip", "pigz"):
+        files = [a for a in args if re.search(r"\.(?:tar|tgz|zip|gz|bz2|xz|zst|7z)\b", a)] or args[1:] or args
+        return "%s-%s" % (t0, _stem(files[0])) if files else t0
+    if t0 == "ffmpeg":
+        m = re.search(r"(?:^|\s)-i\s+(\S+)", " ".join(rest))
+        return "ffmpeg-%s" % _stem(m.group(1)) if m else "ffmpeg"
+    if t0 in ("latexmk", "pdflatex", "xelatex", "lualatex", "tectonic"):
+        tex = [a for a in args if a.endswith(".tex")]
+        return "tex-%s" % _stem(tex[0][:-4]) if tex else "latex"
+    if t0 in ("pytest", "py.test", "jest", "vitest", "mocha", "rspec"):
+        paths = [a for a in args if not a.startswith("$")]
+        return "%s-%s" % (t0, _stem(paths[0])) if paths and _stem(paths[0]).lower() not in ("tests", "test") else t0
+    if t0 == "terraform" and sub:
+        return "tf-%s" % sub
+    if t0 in ("helm", "kubectl") and sub:
+        return "%s-%s" % (t0, obj.split("/")[-1] if obj and sub in ("install", "upgrade") else sub)
+    if t0 == "sleep":
+        return "sleep-%s" % sub if sub else "sleep"
+    if sub and re.match(r"^[a-z][\w-]{1,15}$", sub):
+        return "%s-%s" % (t0, sub)            # a tool and what it was asked to do
+    return None
+
+
+def abbreviate(name, most=NAME_MAX):
+    """Short enough to be read whole on the bar: long words take their usual
+    short forms, and what is still too long is cut at a word boundary."""
+    name = slug(name)
+    if len(name) <= most:
+        return name                     # it already fits: shortening only loses meaning
+    parts = re.split(r"([-_.])", name)
+    parts = [_ABBREV.get(p.lower(), p) if i % 2 == 0 else p for i, p in enumerate(parts)]
+    name = "".join(parts)
+    if len(name) <= most:
+        return name
+    cut = name[:most]
+    if name[most] not in "-_.":
+        # the limit falls inside a word: end at the word before it instead
+        edge = max(cut.rfind("-"), cut.rfind("_"))
+        if edge >= most // 2:
+            cut = cut[:edge]
+    return cut.strip("-_.")
+
+
+def _work_segment(segments):
+    """Of a compound command, the part that is the work: the first that
+    would be tracked on its own, else the first that is not setup."""
+    def unwrap(seg):
+        seg = re.sub(r"^\s*(?:do|then|else|\{|\()\s+", "", seg)
+        if _is_assignment_only(seg):
+            m = re.match(r"\s*[A-Za-z_][A-Za-z0-9_]*=(?:\"?\$\((.*)\)\"?|`(.*)`)\s*$", seg, re.S)
+            return (m.group(1) or m.group(2)) if m else ""
+        return seg
+    body = [unwrap(s) for s in segments]
+    body = [s for s in body if s.strip() and not re.match(r"^\s*(?:for|while|until|if|case|done|fi|esac)\b", s)]
+    for seg in body:
+        if any(_safe_search(rx, seg) for rx, _l in AUTO_TRACK_PATTERNS):
+            return seg
+    for seg in body:
+        if not _setup_segment(seg) and not _is_assignment_only(seg):
+            return seg
+    return body[0] if body else ""
+
+
+def suggest_job_name(command, fallback="job"):
+    command = command_for_display((command or "")[:2000])   # the head is all a name can come from
+    hint = hints_in_command(command).get("name")
+    if hint:
+        return abbreviate(hint)
+    seg = _work_segment(command_segments(command) or [command])
+    toks = _strip_scaffolding(_tokens(seg))
+    name = None
+    try:
+        name = _name_from_tokens(toks)
+    except Exception:
+        name = None                     # a name is never worth failing the command for
+    if not name and toks:
+        name = _stem(toks[0])
+    if not name or name.lower() in _VAGUE or re.match(r"(?i)agent[-_]progress", name):
+        for rx in _NAME_HINTS:
+            m = re.search(rx, seg)
+            if m and m.group(1).lower() not in _VAGUE and not re.match(r"(?i)agent[-_]progress", m.group(1)):
+                name = _stem(m.group(1))
+                break
+        else:
+            name = name if name and name.lower() not in ("python", "python3", "bash", "sh", "env",
+                                                         "sudo", "for", "job") else None
+    return abbreviate(name) if name else fallback
 
 
 def _safe_search(rx, text):
@@ -2578,10 +2874,21 @@ def launcher_prefix():
     the session's own shell, whose PATH is not this process's - a session that
     was already running when the shim was installed still has the older one.
     A name that does not resolve there would fail the whole command, which is
-    the user's command, not ours."""
+    the user's command, not ours.
+
+    The shim is only used when it runs this engine. One left by another
+    install - an older checkout, or the path from before a rename - would
+    hand every wrapped command to code other than the code that wrapped it,
+    or to a file that is gone, which fails the command outright."""
     shim = os.path.join(os.path.expanduser("~"), ".local", "bin", "agent-progress")
     if os.path.isfile(shim) and os.access(shim, os.X_OK):
-        return shlex.quote(shim)
+        try:
+            with open(shim, errors="replace") as f:
+                ours = os.path.abspath(__file__) in f.read(4096)
+        except OSError:
+            ours = False
+        if ours:
+            return shlex.quote(shim)
     return "%s %s" % (shlex.quote(sys.executable), shlex.quote(os.path.abspath(__file__)))
 
 
@@ -3137,8 +3444,9 @@ def slurm_probe(job_id, cwd=None):
         state = "done"
     else:
         state = None                          # a word slurm knows and we do not
+    jobname = next((r.get("JobName") for r in recs if (r.get("JobName") or "").strip()), None)
     return {"state": state, "word": word, "reason": reason, "nodes": nodes,
-            "partition": partition, "stdout": stdout, "source": source,
+            "partition": partition, "stdout": stdout, "source": source, "jobname": jobname,
             "run_seconds": run_seconds, "limit_seconds": limit_seconds,
             "tasks_total": total, "tasks_done": tally["done"] + tally["failed"],
             "tasks_running": tally["running"], "tasks_queued": tally["queued"],
@@ -4732,8 +5040,15 @@ def attach_batch_job(kind, job_id, cwd, eta=None, name=None, desc=None,
     log = slurm_log_path(job_id, cwd, info) if kind == "slurm" else None
     probe = None if kind == "slurm" else (
         STATE_CMDS.get(kind, SLURM_STATE_CMD) % {"id": job_id})
+    if not name:
+        # what the job is, then which one: `train-4242`, not `slurm-4242`.
+        # Slurm's JobName defaults to the script's name; `wrap` is what it
+        # calls a job submitted with --wrap, which names nothing.
+        what = abbreviate(_stem((info or {}).get("jobname") or ""), NAME_MAX - len(str(job_id)) - 1) \
+            if (info or {}).get("jobname") else ""
+        name = "%s-%s" % (what if what and what.lower() not in _VAGUE | {"wrap"} else kind, job_id)
     with state_rw() as st:
-        jid = new_id(st, name or "%s-%s" % (kind, job_id))
+        jid = new_id(st, name)
         st["jobs"][jid] = {
             "id": jid, "desc": desc or "%s job %s" % (kind, job_id), "cmd": None,
             # a scheduler job's output is written by the scheduler; there is no

@@ -218,7 +218,7 @@ for key, bad in [("bar_width", "9999"), ("style", "fancy"), ("color", "maybe"),
 print()
 print("=== command classification ===")
 eq("name from a script", cc.suggest_job_name("python3 src/train_model.py --lr 1"), "train_model")
-eq("name from a subcommand", cc.suggest_job_name("cargo build --release"), "build")
+eq("name from a tool and its subcommand", cc.suggest_job_name("cargo build --release"), "cargo-build")
 ck("name is never empty", cc.suggest_job_name("!!!") == "job")
 ck("timeout given as text does not crash",
    cc.classify_command("./x", {"timeout": "600000"}, cfg) is not None)
@@ -726,6 +726,66 @@ segs = [st.strip() for *_r, st in cc.scan_shell("J=$(cd a && pwd) && python3 tra
 ck("a separator inside $(...) does not split", segs == ["J=$(cd a && pwd)", "python3 train.py"], str(segs))
 segs = [st.strip() for *_r, st in cc.scan_shell("J=`cd a; pwd`; X=$((1+2)) && python3 t.py")]
 ck("nor inside backticks, and $((...)) closes", segs == ["J=`cd a; pwd`", "X=$((1+2))", "python3 t.py"], str(segs))
+
+print()
+print("=== every bar is named for what it runs ===")
+# A bar used to be named for the command's first word: an estimate in front
+# made it AGENT_PROGRESS_ETA, a captured submission made it JOB, a loop `for`.
+_names = [
+    ("AGENT_PROGRESS_ETA=5m sbatch train.sbatch", "train"),
+    ("AGENT_PROGRESS_ETA=10m make -j8", "make"),
+    ("AGENT_PROGRESS_ETA=10m make test", "make-test"),
+    ("AGENT_PROGRESS_ETA=10m pytest tests/", "pytest"),
+    ("AGENT_PROGRESS_ETA=1h uv run python -m lm_eval --tasks mmlu", "lm_eval"),
+    ("AGENT_PROGRESS_ETA=2h AGENT_PROGRESS_NAME=nightly python x.py", "nightly"),
+    ("CUDA_VISIBLE_DEVICES=0,1 accelerate launch finetune.py", "finetune"),
+    ("torchrun --nproc_per_node 8 pretrain.py", "pretrain"),
+    ("python -m torch.distributed.run --nproc_per_node 4 train_ddp.py", "train_ddp"),
+    ("JOB=$(sbatch --parsable train.sbatch) && echo $JOB", "train"),
+    ("sbatch --job-name=sweep-a run.sbatch", "sweep-a"),
+    ("sbatch --wrap 'python embed.py'", "embed"),
+    ("for f in cfg/*.sbatch; do sbatch $f; done", "sbatch"),
+    ("nohup python train.py > t.log 2>&1 &", "train"),
+    ("timeout 2h python3 -u scripts/embed_corpus.py --n 8", "embed_corpus"),
+    ("env OMP_NUM_THREADS=4 python predict.py", "predict"),
+    ("srun --gres=gpu:1 python infer.py", "infer"),
+    ("cd runs && python3 score.py", "score"),
+    ("python src/main.py --config sweep_a.yaml", "main-sweep_a"),
+    ("python experiments/run.py", "experiments-run"),
+    ("python -c 'import time; time.sleep(100)'", "py-inline"),
+    ("wget https://x.org/data/imagenet-val.tar", "dl-imagenet-val"),
+    ("hf download meta-llama/Llama-3-8B", "dl-Llama-3-8B"),
+    ("git clone https://github.com/csinva/imodels", "clone-imodels"),
+    ("pip install torch torchvision", "pip-torch"),
+    ("pip install -r requirements.txt", "pip-reqs"),
+    ("npm test", "npm-test"),
+    ("npm run build", "npm-build"),
+    ("docker build -t myimg .", "build-myimg"),
+    ("docker run --gpus all img python train.py", "train"),
+    ("conda env create -f environment.yml", "conda-env"),
+    ("sudo apt-get install -y ffmpeg", "apt-ffmpeg"),
+    ("ffmpeg -i talk.mp4 talk.mkv", "ffmpeg-talk"),
+    ("tar czf backup.tgz /data", "tar-backup"),
+    ("rsync -av data/ box:/data", "rsync-data"),
+    ("latexmk -pdf paper.tex", "tex-paper"),
+    ("terraform apply", "tf-apply"),
+    ("sleep 600", "sleep-600"),
+    ("./scripts/run_eval.sh --x", "run_eval"),
+]
+_bad = [(c, cc.suggest_job_name(c), want) for c, want in _names if cc.suggest_job_name(c) != want]
+ck("%d commands are each named for their work" % len(_names), not _bad, str(_bad))
+_every = [c for c, _w in _names] + ["X=1 Y=2 Z=3 ./go", "JOB=$(qsub run.pbs)", "while true; do python poll.py; done",
+                                     "for i in 1 2; do python embed_multilingual_retrieval_corpus.py; done"]
+_vague = [(c, n) for c in _every for n in [cc.suggest_job_name(c)]
+          if n.lower() in cc._VAGUE or re.match(r"(?i)agent[-_]progress", n) or len(n) > cc.NAME_MAX]
+ck("none is vague, an env variable, or longer than %d" % cc.NAME_MAX, not _vague, str(_vague))
+ck("a long name is shortened the usual way, at a word",
+   cc.suggest_job_name("python embed_multilingual_retrieval_corpus.py") == "embed_multi_retr",
+   cc.suggest_job_name("python embed_multilingual_retrieval_corpus.py"))
+ck("a name that fits is left whole", cc.abbreviate("predict") == "predict")
+ck("the classifier names detached and assignment-led commands the same way",
+   cc.classify_command("AGENT_PROGRESS_ETA=3h nohup make -j8 > b.log 2>&1 &", {}, cc.load_config())["name"] == "make"
+   and cc.classify_command("JOB=$(sbatch --parsable eval.sbatch)", {}, cc.load_config())["name"] == "eval")
 
 print()
 print("=== an assignment is only an assignment ===")

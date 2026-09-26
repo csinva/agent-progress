@@ -58,8 +58,8 @@ ck("the two jobs with bars sit together",
 bench = dict((p["key"], p) for p in rec.PANELS)["benchmark"]
 ck("the benchmark is submitted, not run here",
    bench["command"].startswith("sbatch"), bench["command"])
-ck("it is tracked under the id slurm gives it",
-   bench["jid"] == "slurm-81734", str(bench.get("jid")))
+ck("it is tracked under its job name and the id slurm gives it",
+   bench["jid"] == "bench-81734", str(bench.get("jid")))
 ck("the build panel expects no job at all",
    dict((p["key"], p) for p in rec.PANELS)["make"]["jid"] is None)
 
@@ -100,7 +100,7 @@ while time.time() < deadline and by_key["benchmark"].job() is None:
     time.sleep(0.5)
 j = by_key["benchmark"].job() or {}
 ck("submitting produces a tracked job", bool(j), "no job appeared")
-ck("named for the queue and the id slurm printed", j.get("id") == "slurm-81734",
+ck("named for what it runs and the id slurm printed", j.get("id") == "bench-81734",
    str(j.get("id")))
 ck("which starts queued", j.get("state") == "queued", str(j.get("state")))
 ck("with slurm's reason for the wait", j.get("queue_reason") == "Resources",
@@ -117,7 +117,7 @@ ck("and why", "waiting for" in line, repr(line))
 ck("and fits the column", cc.visible_len(line) <= rec.PANEL_COLS,
    "%d columns" % cc.visible_len(line))
 
-os.system("%s %s update slurm-81734 --interval 1s --quiet >/dev/null 2>&1"
+os.system("%s %s update bench-81734 --interval 1s --quiet >/dev/null 2>&1"
           % (sys.executable, ENGINE))
 deadline = time.time() + 300
 while time.time() < deadline and (by_key["benchmark"].job() or {}).get("state") == "queued":
